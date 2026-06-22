@@ -61,7 +61,7 @@ let package = Package(
         // SafetyEngine + the serialized transaction coordinator (protocol-driven, platform-independent).
         .target(
             name: "TopologyCore",
-            dependencies: ["DisplayDomain", "ProviderInterfaces", "SceneEngine"],
+            dependencies: ["DisplayDomain", "ProviderInterfaces", "SceneEngine", "AutomationSchema"],
             path: "Packages/TopologyCore/Sources/TopologyCore"
         ),
         // A fully in-memory provider that exercises every result and fault state. Used by tests
@@ -90,7 +90,7 @@ let package = Package(
         ),
         .testTarget(
             name: "TopologyCoreTests",
-            dependencies: ["TopologyCore", "SimulatorProvider", "DisplayDomain", "ProviderInterfaces"],
+            dependencies: ["TopologyCore", "SimulatorProvider", "DisplayDomain", "ProviderInterfaces", "AutomationSchema"],
             path: "Packages/TopologyCore/Tests/TopologyCoreTests"
         )
     ]

@@ -82,6 +82,7 @@ targets:
       - target: DisplayDomain
       - target: ProviderInterfaces
       - target: SceneEngine
+      - target: AutomationSchema
 
   SimulatorProvider:
     type: framework
