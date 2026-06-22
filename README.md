@@ -85,6 +85,7 @@ depend on the cross-platform packages through the protocols in `ProviderInterfac
 ## Documentation
 
 - [Product Requirements Document](Docs/PRD.md) — the normative spec.
+- [macOS Quickstart](Docs/MacQuickstart.md) — build & run the app on a Mac.
 - [Architecture overview](Docs/Architecture/overview.md)
 - [Recovery model](Docs/Recovery/recovery.md)
 - [Architecture decisions](Docs/Architecture/decisions.md)
