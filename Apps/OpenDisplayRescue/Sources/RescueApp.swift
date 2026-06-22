@@ -1,14 +1,16 @@
 #if os(macOS)
 import CoreGraphicsProvider
 import DisplayDomain
+import ExperimentalLifecycleProvider
 import Foundation
 import SwiftUI
 import TopologyCore
 
 /// The independent rescue utility (PRD LIF-011, DIA-010, D-004). It reads the last-known-safe
 /// checkpoint the main app persisted to Application Support — a single well-known JSON file — and
-/// can restore the recorded arrangement using only public Core Graphics APIs, so it works even
-/// when the main app is unavailable. Minimal-dependency by design.
+/// restores the recorded arrangement even when the main app is unavailable. Recovery runs BOTH
+/// mechanisms best-effort: a SkyLight re-enable transaction (undoes a private logical disconnect)
+/// and a public Core Graphics un-mirror (undoes the mirroring fallback). Minimal-dependency.
 @main
 struct OpenDisplayRescueApp: App {
     var body: some Scene {
@@ -27,12 +29,23 @@ final class RescueModel: ObservableObject {
     @Published private(set) var busy = false
 
     private let store: (any CheckpointStoring)?
-    private let lifecycle = CoreGraphicsProvider()
+    private let observer = CoreGraphicsProvider()   // also the public un-mirror LifecycleProvider
+    private let reEnable = ExperimentalLifecycleProvider()  // private SkyLight re-enable
     private var checkpoint: Checkpoint?
 
     init() {
         store = (try? DiskCheckpointStore.defaultDirectory()).map(DiskCheckpointStore.init(directory:))
-        Task { await load() }
+        Task {
+            await load()
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["OPENDISPLAY_RESCUE_RUN"] != nil {
+                await Self.dump(observer, "RESCUE before")
+                await reconnectAll()
+                await Self.dump(observer, "RESCUE after")
+                Self.err("RESCUE status: \(status)")
+            }
+            #endif
+        }
     }
 
     func load() async {
@@ -50,19 +63,31 @@ final class RescueModel: ObservableObject {
         status = "Loaded the last-known-safe checkpoint. This runs independently of the main app."
     }
 
-    /// Restores the recorded arrangement with the public mirroring provider (un-mirrors the
-    /// displays the checkpoint recorded as active). Idempotent and hardware-safe.
+    /// Restores the recorded arrangement. Runs both recovery paths best-effort — re-enabling a
+    /// privately-disabled display (SkyLight transaction) and un-mirroring a mirrored one (public
+    /// Core Graphics). Each is a no-op when not applicable, so it's safe to run unconditionally.
     func reconnectAll() async {
         guard let checkpoint else { return }
         busy = true
         defer { busy = false }
-        do {
-            try await lifecycle.recover(to: checkpoint)
-            status = "Reconnect All complete — restored the recorded arrangement."
-        } catch {
-            status = "Reconnect All failed: \(error)"
-        }
+        try? await reEnable.recover(to: checkpoint)   // undo a private logical disconnect
+        try? await observer.recover(to: checkpoint)   // undo the mirroring fallback
+        status = "Reconnect All complete — restored the recorded arrangement."
     }
+
+    #if DEBUG
+    private static func dump(_ observer: CoreGraphicsProvider, _ label: String) async {
+        let snapshot = await observer.currentSnapshot()
+        let summary = snapshot.observations
+            .map { "\($0.recordID.rawValue) active=\($0.isActive) mirror=\($0.mirrorSourceID?.rawValue ?? "none")" }
+            .joined(separator: " | ")
+        err("\(label) online=\(snapshot.observations.count): \(summary)")
+    }
+
+    private static func err(_ message: String) {
+        FileHandle.standardError.write(Data((message + "\n").utf8))
+    }
+    #endif
 }
 
 struct RescueView: View {

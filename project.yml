@@ -211,6 +211,7 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Apps/OpenDisplayRescue/Resources/OpenDisplayRescue.entitlements
     dependencies:
       - target: CoreGraphicsProvider
+      - target: ExperimentalLifecycleProvider
       - target: DisplayDomain
       - target: ProviderInterfaces
       - target: SceneEngine

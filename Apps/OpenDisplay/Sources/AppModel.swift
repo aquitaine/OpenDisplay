@@ -153,8 +153,12 @@ final class AppModel: ObservableObject {
             .map { "\($0.recordID.rawValue) active=\($0.isActive) mirror=\($0.mirrorSourceID?.rawValue ?? "none")" }
             .joined(separator: " | ")
         Self.err("POST-DISCONNECT online=\(post.observations.count): \(summary)")
-        // Restore unconditionally so the test is self-healing.
-        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        // Restore unconditionally so the test is self-healing. The hold is configurable (default
+        // 3s) so a cross-process test can re-enable the display from another process meanwhile;
+        // forAppOnly also reverts the disable if this process exits first.
+        let holdSeconds = ProcessInfo.processInfo.environment["OPENDISPLAY_HOLD_SECONDS"]
+            .flatMap(Double.init) ?? 3
+        try? await Task.sleep(nanoseconds: UInt64(holdSeconds * 1_000_000_000))
         do {
             try await lifecycle.reconnect(reconnectID, deadline: Date().addingTimeInterval(10))
             Self.err("RECONNECT \(reconnectID.rawValue): done")

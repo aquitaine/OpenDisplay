@@ -89,9 +89,13 @@ public struct ExperimentalLifecycleProvider: LifecycleProvider {
     }
 
     public func recover(to checkpoint: Checkpoint) async throws {
-        // Best effort: re-enable every display the checkpoint recorded as active.
+        // Best effort: re-enable every display the checkpoint recorded as active. Prefer the raw
+        // CG display ID — a logically-disabled display may have dropped off the online list, so its
+        // persistent UUID can fail to resolve, but the numeric ID is still valid while connected.
         for observation in checkpoint.observations where observation.isActive {
-            try? setEnabled(observation.recordID, enabled: true)
+            let target = observation.cgDisplayID.map { DisplayRecordID(rawValue: "cgid:\($0)") }
+                ?? observation.recordID
+            try? setEnabled(target, enabled: true)
         }
     }
 
