@@ -242,7 +242,9 @@ targets:
         embed: false
       - target: TopologyCore
         embed: false
-      - target: SimulatorProvider
+      - target: CoreGraphicsProvider
+        embed: false
+      - target: ExperimentalLifecycleProvider
         embed: false
 
 schemes:
