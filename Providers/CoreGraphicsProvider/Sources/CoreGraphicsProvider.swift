@@ -230,6 +230,79 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
         )
     }
 
+    /// One display's target arrangement for `applyArrangement`.
+    public struct ArrangementTarget: Sendable {
+        public var displayID: CGDirectDisplayID
+        public var origin: DisplayOrigin?
+        public var mode: DisplayMode?
+        public init(displayID: CGDirectDisplayID, origin: DisplayOrigin?, mode: DisplayMode?) {
+            self.displayID = displayID
+            self.origin = origin
+            self.mode = mode
+        }
+    }
+
+    /// Applies display positions and modes atomically inside one Core Graphics configuration
+    /// transaction (`.permanently`). Restoring origins also restores the main display, since the
+    /// display at (0,0) is the main one. Reversible — apply another arrangement to undo. Returns
+    /// human-readable warnings for anything it couldn't satisfy (e.g. an unavailable mode).
+    /// Nonisolated: pure CG calls, no actor state.
+    public nonisolated func applyArrangement(_ targets: [ArrangementTarget]) -> [String] {
+        var warnings: [String] = []
+        var configRef: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&configRef) == .success, let config = configRef else {
+            return ["could not begin display configuration"]
+        }
+        var changed = false
+        for target in targets {
+            // Mode first (resolution can shift the origin), then origin. Skip whatever already
+            // matches so a no-op apply doesn't flicker the displays.
+            if let mode = target.mode, !modeSatisfied(target.displayID, mode) {
+                if let cgMode = bestMode(for: target.displayID, matching: mode) {
+                    if CGConfigureDisplayWithDisplayMode(config, target.displayID, cgMode, nil) == .success {
+                        changed = true
+                    } else {
+                        warnings.append("could not set mode for \(target.displayID)")
+                    }
+                } else {
+                    warnings.append("no matching mode for \(target.displayID) (\(mode.pixelWidth)x\(mode.pixelHeight)@\(Int(mode.refreshHz.rounded())))")
+                }
+            }
+            if let origin = target.origin {
+                let current = CGDisplayBounds(target.displayID).origin
+                if Int(current.x.rounded()) != origin.x || Int(current.y.rounded()) != origin.y {
+                    if CGConfigureDisplayOrigin(config, target.displayID, Int32(origin.x), Int32(origin.y)) == .success {
+                        changed = true
+                    } else {
+                        warnings.append("could not move \(target.displayID)")
+                    }
+                }
+            }
+        }
+        guard changed else {
+            CGCancelDisplayConfiguration(config)
+            return warnings
+        }
+        if CGCompleteDisplayConfiguration(config, .permanently) != .success {
+            warnings.append("apply failed (complete error)")
+        }
+        return warnings
+    }
+
+    private nonisolated func modeSatisfied(_ id: CGDirectDisplayID, _ desired: DisplayMode) -> Bool {
+        guard let current = CGDisplayCopyDisplayMode(id) else { return false }
+        return current.pixelWidth == desired.pixelWidth && current.pixelHeight == desired.pixelHeight
+            && abs(current.refreshRate - desired.refreshHz) < 1
+    }
+
+    private nonisolated func bestMode(for id: CGDirectDisplayID, matching desired: DisplayMode) -> CGDisplayMode? {
+        guard let modes = CGDisplayCopyAllDisplayModes(id, nil) as? [CGDisplayMode] else { return nil }
+        return modes.first {
+            $0.pixelWidth == desired.pixelWidth && $0.pixelHeight == desired.pixelHeight
+                && abs($0.refreshRate - desired.refreshHz) < 1
+        }
+    }
+
     private func displayUUID(_ id: CGDirectDisplayID) -> String? {
         guard let unmanaged = CGDisplayCreateUUIDFromDisplayID(id) else { return nil }
         let uuid = unmanaged.takeRetainedValue()

@@ -161,13 +161,14 @@ func runList() async {
         struct Row: Encodable {
             var id: String; var recordId: String; var alias: String?; var tags: [String]
             var cgDisplayID: UInt32?; var active: Bool; var main: Bool
-            var displayClass: String; var mode: String?
+            var displayClass: String; var mode: String?; var origin: String
         }
         emit(pairs.map {
             Row(id: $0.observation.recordID.rawValue, recordId: $0.record.id.rawValue, alias: $0.record.alias,
                 tags: $0.record.tags.sorted(), cgDisplayID: $0.observation.cgDisplayID,
                 active: $0.observation.isActive, main: $0.observation.isMain,
-                displayClass: $0.observation.displayClass.rawValue, mode: modeString($0.observation))
+                displayClass: $0.observation.displayClass.rawValue, mode: modeString($0.observation),
+                origin: "(\($0.observation.origin.x),\($0.observation.origin.y))")
         })
         return
     }
@@ -350,6 +351,33 @@ func runScene() async {
         if satisfied > 0 { print("  (\(satisfied) already satisfied)") }
         for selector in plan.missingOptional { print("  · skipped (absent): \(selector)") }
 
+    case "apply":
+        guard let nameArg, let scene = await sceneLibrary.scene(named: nameArg) else {
+            fail("no scene named '\(nameArg ?? "")'")
+        }
+        let pairs = await resolveCurrentDisplays()
+        let snapshot = await observer.currentSnapshot()
+        var targets: [CoreGraphicsProvider.ArrangementTarget] = []
+        var skipped: [String] = []
+        for member in scene.members {
+            guard let recordID = resolveMember(member.selector, in: pairs),
+                  let observation = snapshot.observation(for: recordID),
+                  let cgID = observation.cgDisplayID else {
+                skipped.append("\(member.selector): not present")
+                continue
+            }
+            if let rotation = member.desired.rotation, rotation != .degrees0 {
+                skipped.append("\(member.selector): rotation not applied (needs private API)")
+            }
+            if member.desired.brightness != nil { skipped.append("\(member.selector): brightness not applied (no control provider yet)") }
+            if member.desired.connected == false { skipped.append("\(member.selector): disconnect not applied by scene apply") }
+            targets.append(.init(displayID: cgID, origin: member.desired.position, mode: member.desired.mode))
+        }
+        guard !targets.isEmpty else { fail("scene \"\(scene.name)\" resolved to no present displays") }
+        let warnings = observer.applyArrangement(targets)
+        print("applied scene \"\(scene.name)\" to \(targets.count) display(s)")
+        for note in warnings + skipped { print("  · \(note)") }
+
     case "delete":
         guard let nameArg, let scene = await sceneLibrary.scene(named: nameArg) else {
             fail("no scene named '\(nameArg ?? "")'")
@@ -358,7 +386,7 @@ func runScene() async {
         print("deleted scene \"\(nameArg)\"")
 
     default:
-        fail("unknown scene subcommand '\(sub)' (try: list, save, show, plan, delete)", code: 2)
+        fail("unknown scene subcommand '\(sub)' (try: list, save, show, plan, apply, delete)", code: 2)
     }
 }
 
@@ -385,7 +413,7 @@ case "help", "--help", "-h":
       opendisplay disconnect <selector> [--dry-run] [--json]
       opendisplay reconnect <selector> [--json]
       opendisplay recover [--json]
-      opendisplay scene <list|save|show|plan|delete> [name] [--json]
+      opendisplay scene <list|save|show|plan|apply|delete> [name] [--json]
 
     SELECTORS: id:<recordID> · alias:<name> · tag:<tag> · main · builtin · state:<active|managedOffline> · <cgDisplayID>
     """)
