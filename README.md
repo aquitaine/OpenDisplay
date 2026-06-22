@@ -51,12 +51,17 @@ Tests/                      Fixtures + hardware-lab evidence
 
 ## Building & testing
 
-The platform-independent core builds and tests anywhere a **Swift 6** toolchain is
-installed (macOS or Linux):
+Local-first: the platform-independent core builds and tests anywhere a **Swift 6**
+toolchain is installed (macOS Xcode 16+ or Linux).
 
 ```sh
-./scripts/test.sh        # swift build && swift test --parallel
+make bootstrap   # ensure a Swift 6 toolchain (installs it on Ubuntu; checks Xcode on macOS)
+make test        # swift build && swift test --parallel   (42 unit/state-machine tests)
+make lint        # SwiftLint, if installed
 ```
+
+`make` with no target runs the tests. See `make help` for all targets. (`./scripts/test.sh`
+also works if you prefer not to use make.)
 
 The macOS app, providers, rescue utility, CLI, and SwiftUI design system require
 **Xcode 16+ on macOS** and are wired into the Xcode project (added in milestone M0). They

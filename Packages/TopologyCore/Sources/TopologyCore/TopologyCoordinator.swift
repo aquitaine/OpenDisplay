@@ -16,7 +16,6 @@ public struct DisconnectOptions: Sendable {
     public var reason: String
     public var identityConfidence: Double
     public var isFirstUseForRoute: Bool
-    public var userOverride: Bool
     public var deadline: Date
     public var persistencePolicy: PersistencePolicy
 
@@ -25,7 +24,6 @@ public struct DisconnectOptions: Sendable {
         reason: String = "user requested",
         identityConfidence: Double,
         isFirstUseForRoute: Bool = false,
-        userOverride: Bool = false,
         deadline: Date = Date().addingTimeInterval(10),
         persistencePolicy: PersistencePolicy = .reconnectOnQuit
     ) {
@@ -33,7 +31,6 @@ public struct DisconnectOptions: Sendable {
         self.reason = reason
         self.identityConfidence = identityConfidence
         self.isFirstUseForRoute = isFirstUseForRoute
-        self.userOverride = userOverride
         self.deadline = deadline
         self.persistencePolicy = persistencePolicy
     }
@@ -79,7 +76,10 @@ public actor TopologyCoordinator {
         checkpoints: CheckpointStoring,
         safety: SafetyEngine = SafetyEngine(),
         recoveryServiceHealthy: @escaping @Sendable () async -> Bool = { true },
-        confirm: @escaping ConfirmationHandler = { _, _ in true }
+        // Fail-safe default: with no explicit handler, every `.needsConfirmation` preflight is
+        // *cancelled* rather than silently approved (LIF-006). Production callers must supply a
+        // real countdown/confirmation handler to allow risky disconnects to proceed.
+        confirm: @escaping ConfirmationHandler = { _, _ in false }
     ) {
         self.observer = observer
         self.lifecycleProvider = lifecycleProvider
@@ -121,7 +121,11 @@ public actor TopologyCoordinator {
             recoveryServiceHealthy: healthy,
             isFirstUseForRoute: options.isFirstUseForRoute
         )
-        if case .blocked(let reasons) = decision, !options.userOverride {
+        // A `.blocked` preflight is a hard stop and cannot be bypassed here (§9.2 invariants 3/9):
+        // e.g. an unhealthy recovery service or removing the last safe display. An advanced
+        // "disconnect all" override (§9.10) requires an independently verified remote recovery
+        // surface and is a separate, future mechanism — never a boolean that skips these checks.
+        if case .blocked(let reasons) = decision {
             try transition(to: .failed)
             return .blocked(reasons)
         }
@@ -165,11 +169,17 @@ public actor TopologyCoordinator {
         try transition(to: .observing)
         let after = await observer.awaitStableGeneration(after: snapshot.generation)
 
-        // 7. Verify postconditions: target inactive AND a safe surface remains active.
+        // 7. Verify postconditions (§9.4): the target became inactive, a safe surface remains, AND
+        //    no *other* previously-active display was unexpectedly lost. A provider/OS path that
+        //    drops an unrelated endpoint alongside the target must roll back, never commit — even
+        //    if some third display still qualifies as a safe surface.
         try transition(to: .verifying)
         let targetInactive = after.observation(for: target)?.isActive != true
         let safeSurfaceRemains = safety.safeSurface(in: after, excluding: [target]) != nil
-        guard targetInactive && safeSurfaceRemains else {
+        let expectedActive = Set(snapshot.activeDisplays.map(\.recordID)).subtracting([target])
+        let stillActive = Set(after.activeDisplays.map(\.recordID))
+        let unexpectedlyLost = expectedActive.subtracting(stillActive)
+        guard targetInactive && safeSurfaceRemains && unexpectedlyLost.isEmpty else {
             return await rollback(txID, checkpoint: checkpoint, failure: .partial(message: "postconditions not met"))
         }
 

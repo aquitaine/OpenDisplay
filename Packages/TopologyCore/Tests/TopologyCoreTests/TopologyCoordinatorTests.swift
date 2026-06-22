@@ -112,6 +112,49 @@ final class TopologyCoordinatorTests: XCTestCase {
         XCTAssertEqual(finalState, .degraded)
     }
 
+    // §9.4: if the provider drops an unrelated active display alongside the target, the coordinator
+    // must roll back rather than commit — even though a third display remains a safe surface.
+    func testRollsBackWhenProviderDropsUnrelatedDisplay() async throws {
+        let system = SimulatedDisplaySystem(
+            observations: [
+                obs("builtin", main: true, klass: .builtIn),
+                obs("external"),
+                obs("third")
+            ],
+            faults: SimulatedFaults(alsoDisconnect: [DisplayRecordID(rawValue: "third")])
+        )
+        let coordinator = makeCoordinator(system)
+        let result = try await coordinator.disconnect(DisplayRecordID(rawValue: "external"),
+                                                       options: .init(actor: .ui, identityConfidence: 1.0))
+        guard case .rolledBack(_, let recovered) = result else {
+            return XCTFail("expected rolledBack after losing an unrelated display, got \(result)")
+        }
+        XCTAssertTrue(recovered)
+        // After rollback both the target and the unrelated display are restored.
+        let snapshot = await system.currentSnapshot()
+        XCTAssertEqual(snapshot.observation(for: DisplayRecordID(rawValue: "third"))?.isActive, true)
+        XCTAssertEqual(snapshot.observation(for: DisplayRecordID(rawValue: "external"))?.isActive, true)
+    }
+
+    // Default coordinator (no confirmation handler supplied) must NOT silently approve a
+    // `.needsConfirmation` disconnect — it cancels, leaving the display active.
+    func testDefaultConfirmHandlerCancels() async throws {
+        let system = SimulatedDisplaySystem(observations: [
+            obs("builtin", main: true, klass: .builtIn), obs("external")
+        ])
+        // No `confirm:` argument → fail-safe default (deny).
+        let coordinator = TopologyCoordinator(
+            observer: system, lifecycleProvider: system, checkpoints: TestCheckpointStore()
+        )
+        let result = try await coordinator.disconnect(
+            DisplayRecordID(rawValue: "external"),
+            options: .init(actor: .ui, identityConfidence: 1.0, isFirstUseForRoute: true)
+        )
+        guard case .cancelled = result else { return XCTFail("expected cancelled, got \(result)") }
+        let snapshot = await system.currentSnapshot()
+        XCTAssertEqual(snapshot.observation(for: DisplayRecordID(rawValue: "external"))?.isActive, true)
+    }
+
     // LIF-006: first-use confirmation that the user cancels.
     func testConfirmationCancelled() async throws {
         let system = SimulatedDisplaySystem(observations: [

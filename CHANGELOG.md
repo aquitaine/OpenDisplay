@@ -20,3 +20,11 @@ change until 1.0.
 - Initial documentation (architecture, recovery model, decisions, PRD) and open-source
   governance (contributing, security, code of conduct, RFC and issue/PR templates).
 - macOS target scaffolding for the app, rescue utility, CLI, providers, and design system.
+- Local-first developer tooling: `Makefile` (`make bootstrap`/`build`/`test`/`lint`) and
+  `scripts/bootstrap-swift.sh` to install a Swift 6 toolchain on Ubuntu / verify Xcode on macOS.
+
+### Changed
+- Hardened the disconnect transaction after review: `.blocked` preflights are non-bypassable
+  (removed the `userOverride` escape hatch); the confirmation handler now defaults to *cancel*
+  rather than silently approving `.needsConfirmation`; and verification now rolls back if any
+  unrelated active display is unexpectedly lost, not only the target (PRD §9.2/§9.4).

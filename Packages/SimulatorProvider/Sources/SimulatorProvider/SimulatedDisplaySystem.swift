@@ -12,15 +12,20 @@ public struct SimulatedFaults: Sendable {
     public var disconnectSilentlyNoOps: Bool
     /// If `true`, `recover` throws — simulating a failed rollback that degrades.
     public var recoverFails: Bool
+    /// Extra, unrelated displays the (buggy/OS) provider also drops during `disconnect` — used to
+    /// exercise the "no unexpected endpoint lost" postcondition (PRD §9.4).
+    public var alsoDisconnect: [DisplayRecordID]
 
     public init(
         disconnectFailure: ProviderFailure? = nil,
         disconnectSilentlyNoOps: Bool = false,
-        recoverFails: Bool = false
+        recoverFails: Bool = false,
+        alsoDisconnect: [DisplayRecordID] = []
     ) {
         self.disconnectFailure = disconnectFailure
         self.disconnectSilentlyNoOps = disconnectSilentlyNoOps
         self.recoverFails = recoverFails
+        self.alsoDisconnect = alsoDisconnect
     }
 
     public static let none = SimulatedFaults()
@@ -90,6 +95,13 @@ public actor SimulatedDisplaySystem: LifecycleProvider, TopologyObserving {
         managedOffline.append(
             ManagedOfflineRecord(displayID: target, actor: .ui, reason: "simulated", providerID: providerID)
         )
+        // Simulate a faulty provider/OS path that also drops unrelated displays.
+        for extra in faults.alsoDisconnect {
+            if let i = observations.firstIndex(where: { $0.recordID == extra }) {
+                observations[i].isActive = false
+                observations[i].generation = generation
+            }
+        }
     }
 
     public func reconnect(_ target: DisplayRecordID, deadline: Date) async throws {
