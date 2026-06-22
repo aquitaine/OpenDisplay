@@ -390,6 +390,67 @@ func runScene() async {
     }
 }
 
+// MARK: - Control commands
+
+/// Get or set a display's brightness (0..1). Built-in via DisplayServices, external via DDC.
+func runBrightness() async {
+    guard let sel = selectorArg else { fail("usage: opendisplay brightness <selector> [0..1]") }
+    let pairs = await resolveCurrentDisplays()
+    let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
+    guard let cgID = target.observation.cgDisplayID else { fail("display has no Core Graphics id") }
+    let builtIn = target.observation.displayClass == .builtIn
+    if let raw = valueArg {
+        guard let level = Float(raw), (0...1).contains(level) else { fail("brightness value must be 0..1") }
+        if builtIn {
+            let ok = DisplayServicesBrightnessProvider().setBrightness(level, for: cgID)
+            print(ok ? "\(name(for: target)): brightness = \(Int((level * 100).rounded()))%"
+                     : "failed (DisplayServices unavailable)")
+        } else if let ddc = ExternalDisplayDDC(displayID: cgID) {
+            let maxValue = await ddc.read(.brightness)?.max ?? 100
+            let ok = await ddc.write(.brightness, Int(level * Float(maxValue)))
+            print(ok ? "\(name(for: target)): brightness = \(Int((level * 100).rounded()))% (DDC)"
+                     : "DDC write failed")
+        } else {
+            fail("no brightness control for this display")
+        }
+    } else if builtIn, let value = DisplayServicesBrightnessProvider().brightness(for: cgID) {
+        print("\(Int((value * 100).rounded()))%")
+    } else if !builtIn, let ddc = ExternalDisplayDDC(displayID: cgID),
+              let reading = await ddc.read(.brightness), reading.max > 0 {
+        print("\(Int((Float(reading.current) / Float(reading.max) * 100).rounded()))% (\(reading.current)/\(reading.max), DDC)")
+    } else {
+        print("unsupported")
+    }
+}
+
+/// Get or set a raw DDC/CI feature on an external display.
+func runDDC() async {
+    let featureNames: [String: ExternalDisplayDDC.Feature] = [
+        "brightness": .brightness, "contrast": .contrast, "volume": .volume, "input": .inputSource,
+    ]
+    guard let sel = selectorArg, let featureArg = valueArg else {
+        fail("usage: opendisplay ddc <selector> <brightness|contrast|volume|input> [value]")
+    }
+    guard let feature = featureNames[featureArg.lowercased()] else {
+        fail("unknown feature '\(featureArg)' (brightness|contrast|volume|input)")
+    }
+    let pairs = await resolveCurrentDisplays()
+    let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
+    guard let cgID = target.observation.cgDisplayID, let ddc = ExternalDisplayDDC(displayID: cgID) else {
+        fail("no DDC for this display (external displays only)")
+    }
+    let setValue = positional.count > 3 ? positional[3] : nil
+    if let raw = setValue {
+        guard let value = Int(raw) else { fail("value must be an integer") }
+        let ok = await ddc.write(feature, value)
+        print(ok ? "\(featureArg) = \(value)" : "DDC write failed")
+    } else if let reading = await ddc.read(feature) {
+        print("\(featureArg): \(reading.current)/\(reading.max)")
+    } else {
+        print("\(featureArg): unsupported")
+    }
+}
+
 // MARK: - Dispatch
 
 switch command {
@@ -401,6 +462,8 @@ case "recover": await runRecover()
 case "disconnect": await runDisconnect()
 case "reconnect": await runReconnect()
 case "scene": await runScene()
+case "brightness": await runBrightness()
+case "ddc": await runDDC()
 case "help", "--help", "-h":
     print("""
     opendisplay — OpenDisplay automation CLI
@@ -414,9 +477,11 @@ case "help", "--help", "-h":
       opendisplay reconnect <selector> [--json]
       opendisplay recover [--json]
       opendisplay scene <list|save|show|plan|apply|delete> [name] [--json]
+      opendisplay brightness <selector> [0..1]
+      opendisplay ddc <selector> <brightness|contrast|volume|input> [value]
 
     SELECTORS: id:<recordID> · alias:<name> · tag:<tag> · main · builtin · state:<active|managedOffline> · <cgDisplayID>
     """)
 default:
-    fail("unknown command '\(command)' (try: list, diagnose, alias, tag, disconnect, reconnect, recover, scene, help)", code: 2)
+    fail("unknown command '\(command)' (try: list, diagnose, alias, tag, disconnect, reconnect, recover, scene, brightness, ddc, help)", code: 2)
 }
