@@ -27,6 +27,7 @@ final class AppModel: ObservableObject {
     private let coordinator: TopologyCoordinator
     private let checkpoints: any CheckpointStoring
     private let lifecycle: any LifecycleProvider
+    private var hotKey: GlobalHotKey?
 
     init() {
         let observer = CoreGraphicsProvider()
@@ -40,6 +41,18 @@ final class AppModel: ObservableObject {
             lifecycleProvider: lifecycle,
             checkpoints: checkpoints
         )
+        // Always-available global Reconnect-All (recovery hierarchy step 3): reachable even when
+        // the menu bar isn't. Falls back to the menu-bar item if the chord can't be registered.
+        self.hotKey = GlobalHotKey.reconnectAll { [weak self] in
+            #if DEBUG
+            FileHandle.standardError.write(Data("HOTKEY: Reconnect All triggered\n".utf8))
+            #endif
+            Task { await self?.reconnectAll() }
+        }
+        #if DEBUG
+        FileHandle.standardError.write(Data(
+            "Global Reconnect-All hotkey (Ctrl-Opt-Cmd-R) \(hotKey != nil ? "registered" : "FAILED")\n".utf8))
+        #endif
         Task {
             await refresh()
             await writeBaselineCheckpoint()
