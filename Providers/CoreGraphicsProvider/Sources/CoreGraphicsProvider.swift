@@ -26,10 +26,15 @@ private func openDisplayReconfigurationCallback(
 /// into `DisplayObservation`s, and advances the `TopologyGeneration` whenever the topology
 /// signature changes — driven both lazily (each snapshot) and eagerly by a
 /// `CGDisplayRegisterReconfigurationCallback` event source so hotplug/rotation/mirror changes are
-/// noticed promptly. It performs no mutation; logical connect/disconnect lives in a separate
-/// (experimental) `LifecycleProvider`, and only documented Apple APIs are used here so this
-/// provider stays in the public-API-only build (NFR-010, D-008).
-public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider {
+/// noticed promptly.
+///
+/// It also serves as the **public, reversible** `LifecycleProvider` fallback: lacking a public
+/// API to truly remove a display, it approximates logical disconnect by mirroring the target into
+/// the safe surface via `CGConfigureDisplayMirrorOfDisplay` (un-mirroring on reconnect). The true
+/// logical disconnect lives in the experimental SkyLight provider; the router prefers that and
+/// falls back here. Only documented Apple APIs are used, so this provider stays in the
+/// public-API-only build (NFR-010, D-008).
+public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, LifecycleProvider {
     public nonisolated let providerID = "coregraphics.v1"
     public nonisolated let isExperimental = false
 
@@ -76,6 +81,67 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider {
     public func probe(_ environment: ProviderEnvironment) -> ProviderProbe {
         // Public display enumeration is available on every supported macOS.
         ProviderProbe(providerID: providerID, status: .supported, risk: .normal)
+    }
+
+    // MARK: LifecycleProvider (public, reversible — mirroring fallback)
+
+    /// Approximates a logical disconnect by mirroring `target` into the current main display, so
+    /// it stops being an independent surface. Reversible via `reconnect`. Refuses to mirror the
+    /// main display onto itself (the coordinator independently guarantees a safe surface remains).
+    public func disconnect(_ target: DisplayRecordID, deadline: Date) async throws {
+        guard let id = Self.displayID(for: target) else { throw ProviderFailure.ambiguous(candidates: []) }
+        let master = CGMainDisplayID()
+        guard id != master else { throw ProviderFailure.unsupported(reason: [.safetyPolicy]) }
+        try applyMirror(of: id, onto: master)
+    }
+
+    /// Un-mirrors `target`, restoring it as an independent display. Idempotent: un-mirroring a
+    /// display that is not mirrored is a successful no-op.
+    public func reconnect(_ target: DisplayRecordID, deadline: Date) async throws {
+        guard let id = Self.displayID(for: target) else { throw ProviderFailure.ambiguous(candidates: []) }
+        try applyMirror(of: id, onto: kCGNullDirectDisplay)
+    }
+
+    /// Best-effort restoration: un-mirror every display the checkpoint recorded as active, so the
+    /// independent arrangement comes back.
+    public func recover(to checkpoint: Checkpoint) async throws {
+        for observation in checkpoint.observations where observation.isActive {
+            guard let id = Self.displayID(for: observation.recordID) else { continue }
+            try? applyMirror(of: id, onto: kCGNullDirectDisplay)
+        }
+    }
+
+    /// Resolves an app record ID back to a live `CGDirectDisplayID`. The `cg:<uuid>` form is
+    /// resolved through the persistent CG UUID (stable across reboots); `cgid:<n>` is the raw ID.
+    public nonisolated static func displayID(for record: DisplayRecordID) -> CGDirectDisplayID? {
+        let raw = record.rawValue
+        if raw.hasPrefix("cgid:") { return UInt32(raw.dropFirst("cgid:".count)) }
+        if raw.hasPrefix("cg:") {
+            let uuidString = String(raw.dropFirst("cg:".count))
+            guard let uuid = CFUUIDCreateFromString(kCFAllocatorDefault, uuidString as CFString) else { return nil }
+            let id = CGDisplayGetDisplayIDFromUUID(uuid)
+            return id != 0 ? id : nil
+        }
+        return nil
+    }
+
+    /// Runs one mirror (re)configuration inside a CG display-configuration transaction. Pass
+    /// `kCGNullDirectDisplay` as the master to un-mirror. Applied `.forSession` so any mistake
+    /// self-heals at logout — an extra safety net beyond the coordinator's checkpoint/rollback.
+    private func applyMirror(of display: CGDirectDisplayID, onto master: CGDirectDisplayID) throws {
+        var configRef: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&configRef) == .success, let config = configRef else {
+            throw ProviderFailure.osRejected(code: -1)
+        }
+        let configureError = CGConfigureDisplayMirrorOfDisplay(config, display, master)
+        guard configureError == .success else {
+            CGCancelDisplayConfiguration(config)
+            throw ProviderFailure.osRejected(code: Int(configureError.rawValue))
+        }
+        let completeError = CGCompleteDisplayConfiguration(config, .forSession)
+        guard completeError == .success else {
+            throw ProviderFailure.osRejected(code: Int(completeError.rawValue))
+        }
     }
 
     // MARK: Reconfiguration event source

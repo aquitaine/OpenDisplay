@@ -4,15 +4,18 @@ import DisplayDomain
 import Foundation
 import ProviderInterfaces
 import TopologyCore
+#if !PUBLIC_API_ONLY
+import ExperimentalLifecycleProvider
+#endif
 
 /// The app's composition root. It wires the platform-independent `TopologyCoordinator`
 /// (Packages/TopologyCore) to a display system and exposes an observable snapshot for the UI.
 ///
-/// M0: observation now comes from the real `CoreGraphicsProvider` (live display enumeration +
-/// a reconfiguration event source). The lifecycle path (logical disconnect/reconnect) is not a
-/// Core Graphics capability — it arrives with the `ExperimentalLifecycleProvider`, wired behind
-/// `#if !PUBLIC_API_ONLY`. Until then a provider that honestly reports the lifecycle as
-/// unavailable backs the coordinator, so nothing pretends to mutate real hardware.
+/// M0: observation comes from the real `CoreGraphicsProvider` (live enumeration + a
+/// reconfiguration event source). The lifecycle path prefers the experimental SkyLight provider
+/// (true logical disconnect, full build only) and falls back to `CoreGraphicsProvider`'s public,
+/// reversible mirroring approach — selected by `RoutedLifecycleProvider`. In the public-API-only
+/// build the experimental module is absent and the public provider is used directly.
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var displays: [DisplayObservation] = []
@@ -27,10 +30,20 @@ final class AppModel: ObservableObject {
         self.observer = observer
         self.coordinator = TopologyCoordinator(
             observer: observer,
-            lifecycleProvider: UnavailableLifecycleProvider(),
+            lifecycleProvider: AppModel.makeLifecycleProvider(public: observer),
             checkpoints: InMemoryCheckpointStore()
         )
         Task { await refresh() }
+    }
+
+    /// Builds the lifecycle provider: experimental-primary + public-fallback in the full build,
+    /// the public provider alone in the public-API-only build.
+    private static func makeLifecycleProvider(public publicProvider: CoreGraphicsProvider) -> any LifecycleProvider {
+        #if PUBLIC_API_ONLY
+        return publicProvider
+        #else
+        return RoutedLifecycleProvider(primary: ExperimentalLifecycleProvider(), fallback: publicProvider)
+        #endif
     }
 
     func refresh() async {
@@ -43,7 +56,7 @@ final class AppModel: ObservableObject {
     }
 
     /// Emergency recovery — always available (PRD LIF-010). With live observation and no
-    /// managed-offline displays yet, this is a safe no-op until the lifecycle provider lands.
+    /// managed-offline displays yet, this is a safe no-op until a disconnect path is exercised.
     func reconnectAll() async {
         busy = true
         defer { busy = false }
@@ -68,26 +81,39 @@ final class AppModel: ObservableObject {
     }
 }
 
-/// Stands in for a `LifecycleProvider` until the real ones are wired (M0 step 3). Reports the
-/// lifecycle path as unavailable rather than pretending to succeed (verify-not-assume, D-010).
-private struct UnavailableLifecycleProvider: LifecycleProvider {
-    let providerID = "lifecycle.unavailable"
-    let isExperimental = false
+/// Prefers a primary lifecycle provider and falls back to a public one only when the primary
+/// reports the operation `.unsupported` (e.g. the private SkyLight symbols are absent on this OS).
+/// Other failures propagate — a real OS rejection must not silently retry by another mechanism.
+private struct RoutedLifecycleProvider: LifecycleProvider {
+    let primary: any LifecycleProvider
+    let fallback: any LifecycleProvider
+
+    let providerID = "routed.lifecycle.v1"
+    var isExperimental: Bool { primary.isExperimental }
 
     func probe(_ environment: ProviderEnvironment) async -> ProviderProbe {
-        ProviderProbe(providerID: providerID, status: .unsupported, risk: .normal, reasons: [.buildFlavor])
+        let probe = await primary.probe(environment)
+        return probe.status == .supported ? probe : await fallback.probe(environment)
     }
 
     func disconnect(_ target: DisplayRecordID, deadline: Date) async throws {
-        throw ProviderFailure.unsupported(reason: [.buildFlavor])
+        try await route { try await $0.disconnect(target, deadline: deadline) }
     }
 
     func reconnect(_ target: DisplayRecordID, deadline: Date) async throws {
-        throw ProviderFailure.unsupported(reason: [.buildFlavor])
+        try await route { try await $0.reconnect(target, deadline: deadline) }
     }
 
     func recover(to checkpoint: Checkpoint) async throws {
-        throw ProviderFailure.unsupported(reason: [.buildFlavor])
+        try await route { try await $0.recover(to: checkpoint) }
+    }
+
+    private func route(_ operation: (any LifecycleProvider) async throws -> Void) async throws {
+        do {
+            try await operation(primary)
+        } catch ProviderFailure.unsupported {
+            try await operation(fallback)
+        }
     }
 }
 #endif
