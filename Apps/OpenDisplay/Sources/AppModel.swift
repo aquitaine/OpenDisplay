@@ -4,6 +4,7 @@ import CoreGraphicsProvider
 import DisplayDomain
 import Foundation
 import ProviderInterfaces
+import SceneEngine
 import TopologyCore
 #if !PUBLIC_API_ONLY
 import ExperimentalLifecycleProvider
@@ -27,6 +28,22 @@ final class AppModel: ObservableObject {
     @Published private(set) var recentActivity: [AuditEntry] = []
     /// Identity records for the current displays, keyed by the observation's record id.
     @Published private(set) var records: [DisplayRecordID: DisplayRecord] = [:]
+    @Published private(set) var scenes: [Scene] = []
+    /// Displays the app has logically turned off. The OS drops them from the online list, so we track
+    /// them here to keep an "off" card in the menu (with a way back on) and to feed the safety net.
+    @Published private(set) var managedOffline: [OfflineDisplay] = []
+
+    /// A display OpenDisplay turned off — remembered so it stays visible and re-enableable.
+    struct OfflineDisplay: Identifiable, Equatable {
+        let recordID: DisplayRecordID
+        let cgID: CGDirectDisplayID
+        let name: String
+        let displayClass: DisplayClass
+        var id: DisplayRecordID { recordID }
+    }
+
+    /// Count of currently-active displays — the UI disables the off-toggle on the last one.
+    var activeDisplayCount: Int { displays.filter(\.isActive).count }
 
     /// True when any provider isn't fully supported — drives the menu-bar caution banner.
     var isDegraded: Bool { diagnostics.contains { $0.status != "supported" } }
@@ -37,6 +54,7 @@ final class AppModel: ObservableObject {
     private let lifecycle: any LifecycleProvider
     private var hotKey: GlobalHotKey?
     private var registry: DisplayRegistry?
+    private var sceneLibrary: SceneLibrary?
     let settings: OpenDisplaySettings
 
     init() {
@@ -49,7 +67,11 @@ final class AppModel: ObservableObject {
         self.coordinator = TopologyCoordinator(
             observer: observer,
             lifecycleProvider: lifecycle,
-            checkpoints: checkpoints
+            checkpoints: checkpoints,
+            // A disconnect from the menu/CLI is an explicit user action, so confirm the SafetyEngine's
+            // `.needsConfirmation` cases (e.g. turning off the current main). The engine's hard
+            // `.blocked` cases — chiefly "this would leave no active display" — are NOT bypassable here.
+            confirm: { _, _ in true }
         )
         self.settings = AppModel.loadSettings()
         // Always-available global Reconnect-All (recovery hierarchy step 3): reachable even when the
@@ -71,6 +93,7 @@ final class AppModel: ObservableObject {
         #endif
         Task {
             await setUpRegistry()
+            await setUpScenes()
             await refresh()
             await writeBaselineCheckpoint()
             #if DEBUG
@@ -79,6 +102,7 @@ final class AppModel: ObservableObject {
             }
             #endif
         }
+        Task { await observeTopologyChanges() }
     }
 
     /// Builds the lifecycle provider: experimental-primary + public-fallback in the full build,
@@ -199,6 +223,70 @@ final class AppModel: ObservableObject {
         records = resolved
     }
 
+    private func setUpScenes() async {
+        let store: any SceneStoring =
+            (try? DiskSceneStore.defaultDirectory()).map { DiskSceneStore(directory: $0) }
+            ?? InMemorySceneStore()
+        let library = await SceneLibrary(store: store)
+        sceneLibrary = library
+        scenes = await library.all()
+    }
+
+    /// Captures the current arrangement as a named scene (upsert by name).
+    func saveScene(named name: String) async {
+        guard let sceneLibrary else { return }
+        let snapshot = await observer.currentSnapshot()
+        let id = await sceneLibrary.scene(named: name)?.id ?? "scene_\(UUID().uuidString.prefix(8))"
+        let scene = SceneRecorder.capture(from: snapshot, name: name, id: String(id))
+        await sceneLibrary.save(scene)
+        scenes = await sceneLibrary.all()
+    }
+
+    /// Moves a single display to a new origin (used by the drag-to-arrange canvas), then re-reads
+    /// the resulting topology (Core Graphics may adjust neighbours to keep the layout adjacent).
+    func setPosition(_ origin: DisplayOrigin, for observation: DisplayObservation) async {
+        guard let cgID = observation.cgDisplayID else { return }
+        _ = observer.applyArrangement([.init(displayID: cgID, origin: origin, mode: nil)])
+        await refresh()
+    }
+
+    /// Applies a saved scene's positions + modes to the current displays (user-triggered).
+    func applyScene(_ scene: Scene) async {
+        let snapshot = await observer.currentSnapshot()
+        var targets: [CoreGraphicsProvider.ArrangementTarget] = []
+        for member in scene.members {
+            guard let observation = resolveSceneMember(member.selector, in: snapshot),
+                  let cgID = observation.cgDisplayID else { continue }
+            targets.append(.init(displayID: cgID, origin: member.desired.position, mode: member.desired.mode))
+        }
+        _ = observer.applyArrangement(targets)
+        await refresh()
+    }
+
+    func deleteScene(_ scene: Scene) async {
+        guard let sceneLibrary else { return }
+        await sceneLibrary.delete(id: scene.id)
+        scenes = await sceneLibrary.all()
+    }
+
+    /// Resolves a scene member selector to a current observation (id:/alias:/tag:/main/builtin).
+    private func resolveSceneMember(_ selector: String, in snapshot: TopologySnapshot) -> DisplayObservation? {
+        if selector.hasPrefix("id:") {
+            return snapshot.observation(for: DisplayRecordID(rawValue: String(selector.dropFirst("id:".count))))
+        }
+        if selector.hasPrefix("alias:") {
+            let alias = String(selector.dropFirst("alias:".count))
+            if let id = records.first(where: { $0.value.alias == alias })?.key { return snapshot.observation(for: id) }
+        }
+        if selector.hasPrefix("tag:") {
+            let tag = String(selector.dropFirst("tag:".count))
+            if let id = records.first(where: { $0.value.tags.contains(tag) })?.key { return snapshot.observation(for: id) }
+        }
+        if selector == "main" { return snapshot.observations.first { $0.isMain } }
+        if selector == "builtin" { return snapshot.observations.first { $0.displayClass == .builtIn } }
+        return nil
+    }
+
     /// Sets the user alias for a display and re-resolves so the change shows immediately.
     func setAlias(_ alias: String, for observation: DisplayObservation) async {
         guard let registry, let record = records[observation.recordID] else { return }
@@ -207,8 +295,21 @@ final class AppModel: ObservableObject {
     }
 
     func refresh() async {
-        let snapshot = await observer.currentSnapshot()
+        var snapshot = await observer.currentSnapshot()
+        // Another display-manager app (e.g. BetterDisplay) holding a reconfiguration can make
+        // enumeration transiently empty or error; a Mac running this app always has ≥1 display, so
+        // re-poll briefly before trusting an empty list — otherwise the menu blanks out entirely.
+        var attempts = 0
+        while snapshot.observations.isEmpty && attempts < 8 {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            snapshot = await observer.currentSnapshot()
+            attempts += 1
+        }
         displays = snapshot.observations.sorted { $0.recordID.rawValue < $1.recordID.rawValue }
+        // Drop any tracked off-display that has come back on its own (e.g. re-enabled elsewhere).
+        managedOffline.removeAll { offline in
+            displays.contains { $0.recordID == offline.recordID && $0.isActive }
+        }
         statusText = "\(snapshot.activeDisplays.count) active · \(snapshot.observations.count) total"
         phase = displays.isEmpty ? .empty : .ready
         await resolveRecords(snapshot)
@@ -219,6 +320,98 @@ final class AppModel: ObservableObject {
                 .joined(separator: ", ")
             FileHandle.standardError.write(Data("names: \(names)\n".utf8))
         }
+    }
+
+    // MARK: - Menu controls (Phase 1)
+
+    /// Available resolutions for a display, de-duplicated per point-size — drives the resolution slider.
+    func availableModes(for observation: DisplayObservation) -> [DisplayMode] {
+        guard let cgID = observation.cgDisplayID else { return [] }
+        return observer.availableModes(for: cgID)
+    }
+
+    /// Applies a chosen resolution/mode, then re-reads the topology.
+    func setMode(_ mode: DisplayMode, for observation: DisplayObservation) async {
+        guard let cgID = observation.cgDisplayID else { return }
+        _ = observer.applyArrangement([.init(displayID: cgID, origin: nil, mode: mode)])
+        await refresh()
+    }
+
+    /// Makes a display the main display by re-anchoring every origin so this one sits at (0,0) —
+    /// Core Graphics treats the display at the origin as main.
+    func setMain(for observation: DisplayObservation) async {
+        guard !observation.isMain else { return }
+        let snapshot = await observer.currentSnapshot()
+        let dx = -observation.origin.x
+        let dy = -observation.origin.y
+        let targets = snapshot.observations.compactMap { obs -> CoreGraphicsProvider.ArrangementTarget? in
+            guard let cgID = obs.cgDisplayID else { return nil }
+            return .init(displayID: cgID,
+                         origin: DisplayOrigin(x: obs.origin.x + dx, y: obs.origin.y + dy),
+                         mode: nil)
+        }
+        _ = observer.applyArrangement(targets)
+        await refresh()
+    }
+
+    /// Turns a live display off (flagship). Routes through the coordinator, which preflights and
+    /// refuses to remove the last active surface; on success the display is remembered as
+    /// managed-offline so it keeps an "off" card in the menu. Works on any display, the built-in
+    /// included, as long as another stays active.
+    func setDisplayActive(_ active: Bool, for observation: DisplayObservation) async {
+        guard !active else { return }  // turning back on is handled by reconnectOffline
+        busy = true
+        defer { busy = false }
+        let offline = OfflineDisplay(
+            recordID: observation.recordID,
+            cgID: observation.cgDisplayID ?? 0,
+            name: displayName(for: observation),
+            displayClass: observation.displayClass)
+        let result = try? await coordinator.disconnect(
+            observation.recordID,
+            options: DisconnectOptions(actor: .ui, identityConfidence: 1.0))
+        if case .committed? = result {
+            managedOffline.removeAll { $0.recordID == offline.recordID }
+            managedOffline.append(offline)
+        }
+        await refresh()
+    }
+
+    /// Turns a previously turned-off display back on. Reconnects by raw display id (a disabled
+    /// display drops off the online list, so UUID resolution can fail), then drops it from the
+    /// managed-offline list and re-reads the topology.
+    func reconnectOffline(_ offline: OfflineDisplay) async {
+        busy = true
+        defer { busy = false }
+        let reconnectID = offline.cgID != 0
+            ? DisplayRecordID(rawValue: "cgid:\(offline.cgID)")
+            : offline.recordID
+        try? await lifecycle.reconnect(reconnectID, deadline: Date().addingTimeInterval(10))
+        managedOffline.removeAll { $0.recordID == offline.recordID }
+        await refresh()
+    }
+
+    /// Long-lived subscription to the observer's reconfiguration events: every hotplug, unplug,
+    /// sleep, or enable/disable refreshes the UI and re-checks the always-one-active invariant.
+    private func observeTopologyChanges() async {
+        let stream = await observer.changes()
+        for await _ in stream {
+            await refresh()
+            await enforceActiveSurfaceInvariant()
+        }
+    }
+
+    /// The "one display is always active" safety net. If a topology change leaves nothing active —
+    /// e.g. the last external is physically unplugged while the built-in is logically off — re-enable
+    /// the built-in (or the most-recently disabled display) so the user is never left black-screened.
+    private func enforceActiveSurfaceInvariant() async {
+        guard !busy, displays.filter(\.isActive).isEmpty else { return }
+        let fallback = managedOffline.first(where: { $0.displayClass == .builtIn }) ?? managedOffline.last
+        guard let fallback else { return }
+        #if DEBUG
+        Self.err("ACTIVE-SURFACE GUARD: 0 active displays — re-enabling \(fallback.name)")
+        #endif
+        await reconnectOffline(fallback)
     }
 
     /// Emergency recovery — always available (PRD LIF-010). With live observation and no

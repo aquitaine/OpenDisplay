@@ -146,11 +146,33 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
 
     // MARK: Reconfiguration event source
 
+    private var changeContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]
+
+    /// Emits whenever the live topology changes (hotplug, unplug, sleep, rotation, mirror,
+    /// enable/disable). The app subscribes to refresh promptly and to enforce the
+    /// always-one-active-display invariant when a display is physically unplugged.
+    public func changes() -> AsyncStream<Void> {
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        let id = UUID()
+        changeContinuations[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.dropContinuation(id) }
+        }
+        return stream
+    }
+
+    private func dropContinuation(_ id: UUID) { changeContinuations[id] = nil }
+
     /// Invoked off the CG reconfiguration callback. Recomputing the topology bumps the generation
     /// if the signature changed; redundant callbacks (e.g. the begin-configuration phase) are
-    /// harmless no-ops because the signature is unchanged.
+    /// harmless no-ops because the signature is unchanged. Subscribers are then notified.
     func handleReconfiguration(rawFlags: UInt32) {
+        // The begin-configuration callback fires *before* the change lands (and while another app may
+        // hold the configuration), so the display list is mid-flight. React only to settled callbacks.
+        let flags = CGDisplayChangeSummaryFlags(rawValue: rawFlags)
+        if flags.contains(.beginConfigurationFlag) { return }
         _ = currentTopology()
+        for continuation in changeContinuations.values { continuation.yield(()) }
     }
 
     // MARK: - Enumeration
@@ -291,16 +313,50 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
 
     private nonisolated func modeSatisfied(_ id: CGDirectDisplayID, _ desired: DisplayMode) -> Bool {
         guard let current = CGDisplayCopyDisplayMode(id) else { return false }
-        return current.pixelWidth == desired.pixelWidth && current.pixelHeight == desired.pixelHeight
+        // Compare the logical (point) size + HiDPI + refresh: a scaled HiDPI mode and a native mode
+        // can share pixel dimensions, so a pixel-only check would wrongly treat them as identical.
+        return current.width == desired.pointWidth && current.height == desired.pointHeight
+            && (current.pixelWidth > current.width) == desired.isHiDPI
             && abs(current.refreshRate - desired.refreshHz) < 1
     }
 
     private nonisolated func bestMode(for id: CGDirectDisplayID, matching desired: DisplayMode) -> CGDisplayMode? {
-        guard let modes = CGDisplayCopyAllDisplayModes(id, nil) as? [CGDisplayMode] else { return nil }
+        let options = [kCGDisplayShowDuplicateLowResolutionModes: true] as CFDictionary
+        guard let modes = CGDisplayCopyAllDisplayModes(id, options) as? [CGDisplayMode] else { return nil }
+        // Prefer an exact logical (point) + HiDPI + refresh match, since a scaled HiDPI mode and a
+        // native mode can share pixel dimensions; fall back to a pixel match if none lines up.
         return modes.first {
+            $0.width == desired.pointWidth && $0.height == desired.pointHeight
+                && ($0.pixelWidth > $0.width) == desired.isHiDPI
+                && abs($0.refreshRate - desired.refreshHz) < 1
+        } ?? modes.first {
             $0.pixelWidth == desired.pixelWidth && $0.pixelHeight == desired.pixelHeight
                 && abs($0.refreshRate - desired.refreshHz) < 1
         }
+    }
+
+    /// All selectable resolutions for a display, de-duplicated to one mode per point-size (HiDPI
+    /// preferred, then highest refresh) and sorted by area ascending — drives the resolution slider.
+    public nonisolated func availableModes(for cgID: CGDirectDisplayID) -> [DisplayMode] {
+        // Include scaled HiDPI ("looks like") modes — without this option the built-in returns only
+        // its 1:1 pixel modes, so the user's actual scaled resolution wouldn't appear in the list.
+        let options = [kCGDisplayShowDuplicateLowResolutionModes: true] as CFDictionary
+        guard let cgModes = CGDisplayCopyAllDisplayModes(cgID, options) as? [CGDisplayMode] else { return [] }
+        var best: [String: DisplayMode] = [:]
+        for cg in cgModes {
+            let mode = DisplayMode(
+                pixelWidth: cg.pixelWidth, pixelHeight: cg.pixelHeight,
+                pointWidth: cg.width, pointHeight: cg.height,
+                refreshHz: cg.refreshRate, isHiDPI: cg.pixelWidth > cg.width)
+            let key = "\(mode.pointWidth)x\(mode.pointHeight)"
+            let rank = (mode.isHiDPI ? 1 : 0, mode.refreshHz)
+            if let existing = best[key] {
+                if rank > (existing.isHiDPI ? 1 : 0, existing.refreshHz) { best[key] = mode }
+            } else {
+                best[key] = mode
+            }
+        }
+        return best.values.sorted { $0.pointWidth * $0.pointHeight < $1.pointWidth * $1.pointHeight }
     }
 
     private func displayUUID(_ id: CGDirectDisplayID) -> String? {
