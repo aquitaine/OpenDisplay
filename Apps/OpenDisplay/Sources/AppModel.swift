@@ -25,20 +25,28 @@ final class AppModel: ObservableObject {
     private let observer: CoreGraphicsProvider
     private let coordinator: TopologyCoordinator
     private let checkpoints: any CheckpointStoring
+    private let lifecycle: any LifecycleProvider
 
     init() {
         let observer = CoreGraphicsProvider()
         self.observer = observer
         let checkpoints = AppModel.makeCheckpointStore()
         self.checkpoints = checkpoints
+        let lifecycle = AppModel.makeLifecycleProvider(public: observer)
+        self.lifecycle = lifecycle
         self.coordinator = TopologyCoordinator(
             observer: observer,
-            lifecycleProvider: AppModel.makeLifecycleProvider(public: observer),
+            lifecycleProvider: lifecycle,
             checkpoints: checkpoints
         )
         Task {
             await refresh()
             await writeBaselineCheckpoint()
+            #if DEBUG
+            if let token = ProcessInfo.processInfo.environment["OPENDISPLAY_DISCONNECT"] {
+                await debugDisconnectCycle(token: token)
+            }
+            #endif
         }
     }
 
@@ -108,6 +116,50 @@ final class AppModel: ObservableObject {
         }
         FileHandle.standardError.write(Data(out.utf8))
     }
+
+    #if DEBUG
+    /// M0 live-test harness (DEBUG only, gated on `OPENDISPLAY_DISCONNECT=<cgID|recordID>`): runs
+    /// one real disconnect through the full coordinator transaction, logs the result + stage path
+    /// to stderr, then **always reconnects after 3s** so a live test can never strand a display.
+    /// Never target the main display — the coordinator blocks removing the last safe surface.
+    private func debugDisconnectCycle(token: String) async {
+        let snapshot = await observer.currentSnapshot()
+        guard let observation = snapshot.observations.first(where: {
+            $0.cgDisplayID.map(String.init) == token || $0.recordID.rawValue == token
+        }) else {
+            Self.err("DISCONNECT: no display matches \(token)")
+            return
+        }
+        let target = observation.recordID
+        // Reconnect by raw display ID so restore can't fail on UUID resolution after the display
+        // drops off the online list while logically disabled.
+        let reconnectID = observation.cgDisplayID.map { DisplayRecordID(rawValue: "cgid:\($0)") } ?? target
+
+        Self.err("DISCONNECT target \(target.rawValue) (cgID \(observation.cgDisplayID ?? 0)) — running coordinator transaction…")
+        do {
+            let result = try await coordinator.disconnect(
+                target, options: DisconnectOptions(actor: .cli, identityConfidence: 1.0)
+            )
+            let stages = await coordinator.lastTransition.map { "\($0)" }.joined(separator: " → ")
+            Self.err("DISCONNECT result: \(result)\n  stages: \(stages)")
+        } catch {
+            Self.err("DISCONNECT error: \(error)")
+        }
+        // Restore unconditionally so the test is self-healing.
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        do {
+            try await lifecycle.reconnect(reconnectID, deadline: Date().addingTimeInterval(10))
+            Self.err("RECONNECT \(reconnectID.rawValue): done")
+        } catch {
+            Self.err("RECONNECT \(reconnectID.rawValue) error: \(error)")
+        }
+        await refresh()
+    }
+
+    private static func err(_ message: String) {
+        FileHandle.standardError.write(Data((message + "\n").utf8))
+    }
+    #endif
 }
 
 /// Prefers a primary lifecycle provider and falls back to a public one only when the primary
@@ -126,23 +178,32 @@ private struct RoutedLifecycleProvider: LifecycleProvider {
     }
 
     func disconnect(_ target: DisplayRecordID, deadline: Date) async throws {
-        try await route { try await $0.disconnect(target, deadline: deadline) }
+        try await active().disconnect(target, deadline: deadline)
     }
 
     func reconnect(_ target: DisplayRecordID, deadline: Date) async throws {
-        try await route { try await $0.reconnect(target, deadline: deadline) }
+        try await active().reconnect(target, deadline: deadline)
     }
 
     func recover(to checkpoint: Checkpoint) async throws {
-        try await route { try await $0.recover(to: checkpoint) }
+        try await active().recover(to: checkpoint)
     }
 
-    private func route(_ operation: (any LifecycleProvider) async throws -> Void) async throws {
-        do {
-            try await operation(primary)
-        } catch ProviderFailure.unsupported {
-            try await operation(fallback)
-        }
+    /// Pick the provider by probe status rather than by catching a typed failure. `as?` / `catch as`
+    /// against a type vended by a statically-linked SPM product fails across framework copies — the
+    /// same `ProviderFailure` exists as distinct runtime metadata in each image — so error-based
+    /// routing silently never falls back. A probe status comparison is a value check and is
+    /// boundary-safe. (The deeper fix is making the SPM products dynamic so there is one copy.)
+    private func active() async -> any LifecycleProvider {
+        #if arch(arm64)
+        let appleSilicon = true
+        #else
+        let appleSilicon = false
+        #endif
+        let environment = ProviderEnvironment(
+            osBuild: "", isAppleSilicon: appleSilicon, transport: .unknown, displayClass: .unknown
+        )
+        return await primary.probe(environment).status == .supported ? primary : fallback
     }
 }
 #endif

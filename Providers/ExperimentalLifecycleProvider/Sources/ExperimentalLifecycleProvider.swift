@@ -39,13 +39,16 @@ public struct ExperimentalLifecycleProvider: LifecycleProvider {
     }
 
     public func probe(_ environment: ProviderEnvironment) async -> ProviderProbe {
-        guard mainConnection != nil, configureEnabled != nil else {
-            return ProviderProbe(providerID: providerID, status: .unsupported, risk: .recoveryCritical, reasons: [.osVersion])
-        }
-        guard environment.isAppleSilicon else {
-            return ProviderProbe(providerID: providerID, status: .unsupported, risk: .recoveryCritical, reasons: [.architecture])
-        }
-        return ProviderProbe(providerID: providerID, status: .supported, risk: .recoveryCritical)
+        // The SkyLight symbols resolve, but the bare 3-arg call is the wrong ABI (see setEnabled),
+        // so until the CGS display-configuration transaction is implemented and verified we report
+        // unsupported and let RoutedLifecycleProvider fall back to the public mirroring provider.
+        _ = (mainConnection, configureEnabled)
+        return ProviderProbe(
+            providerID: providerID,
+            status: .unsupported,
+            risk: .recoveryCritical,
+            reasons: environment.isAppleSilicon ? [.osVersion] : [.architecture]
+        )
     }
 
     public func disconnect(_ target: DisplayRecordID, deadline: Date) async throws {
@@ -66,14 +69,16 @@ public struct ExperimentalLifecycleProvider: LifecycleProvider {
     // MARK: - Private
 
     private func setEnabled(_ target: DisplayRecordID, enabled: Bool) throws {
-        guard let mainConnection, let configureEnabled else {
-            throw ProviderFailure.unsupported(reason: [.osVersion])
-        }
-        guard let displayID = Self.displayID(for: target) else {
-            throw ProviderFailure.ambiguous(candidates: [])
-        }
-        let status = configureEnabled(mainConnection(), displayID, enabled)
-        guard status == 0 else { throw ProviderFailure.osRejected(code: Int(status)) }
+        // NOT IMPLEMENTED — and deliberately not called. A bare
+        // `SLSConfigureDisplayEnabled(cid, displayID, enabled)` segfaults inside
+        // `checkCapacity(CGSConfigData*)`: the real entry point takes a CGS display-configuration
+        // transaction object (a begin → configure → complete sequence, like the public
+        // CGBeginDisplayConfiguration flow), not a bare display ID. Implementing and verifying that
+        // sequence is a follow-up; until then this throws `.unsupported` so RoutedLifecycleProvider
+        // falls back to the public CoreGraphicsProvider mirroring path. (Verified 2026-06-22: the
+        // 3-arg call crashes on macOS / Apple Silicon.)
+        _ = (target, enabled)
+        throw ProviderFailure.unsupported(reason: [.osVersion])
     }
 
     private static func lookup<T>(_ handle: UnsafeMutableRawPointer?, _ symbol: String, as type: T.Type) -> T? {
