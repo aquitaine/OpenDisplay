@@ -31,6 +31,12 @@ targets:
   OpenDisplayDesignSystem:
     type: framework
     platform: macOS
+    # Frameworks need a synthesized Info.plist; without it codesign rejects the
+    # bundle ("bundle format unrecognized"). The app/CLI targets set INFOPLIST_FILE
+    # explicitly instead.
+    settings: &frameworkSettings
+      base:
+        GENERATE_INFOPLIST_FILE: YES
     sources: [Packages/OpenDisplayDesignSystem/Sources]
     dependencies:
       - package: OpenDisplay
@@ -40,6 +46,7 @@ targets:
   CoreGraphicsProvider:
     type: framework
     platform: macOS
+    settings: *frameworkSettings
     sources: [Providers/CoreGraphicsProvider/Sources]
     dependencies: &providerDeps
       - package: OpenDisplay
@@ -50,30 +57,35 @@ targets:
   DDCProvider:
     type: framework
     platform: macOS
+    settings: *frameworkSettings
     sources: [Providers/DDCProvider/Sources]
     dependencies: *providerDeps
 
   NativeControlProvider:
     type: framework
     platform: macOS
+    settings: *frameworkSettings
     sources: [Providers/NativeControlProvider/Sources]
     dependencies: *providerDeps
 
   CaptureProvider:
     type: framework
     platform: macOS
+    settings: *frameworkSettings
     sources: [Providers/CaptureProvider/Sources]
     dependencies: *providerDeps
 
   ExperimentalLifecycleProvider:
     type: framework
     platform: macOS
+    settings: *frameworkSettings
     sources: [Providers/ExperimentalLifecycleProvider/Sources]
     dependencies: *providerDeps
 
   VirtualDisplayProvider:
     type: framework
     platform: macOS
+    settings: *frameworkSettings
     sources: [Providers/VirtualDisplayProvider/Sources]
     dependencies: *providerDeps
 
