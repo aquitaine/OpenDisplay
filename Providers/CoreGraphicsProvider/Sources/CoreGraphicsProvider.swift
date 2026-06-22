@@ -144,6 +144,18 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
         }
     }
 
+    /// Mirrors `displayID` onto the current main display (both show the same content), or stops
+    /// mirroring when `enabled` is false. Reversible; public Core Graphics only.
+    public func setMirroring(of displayID: CGDirectDisplayID, enabled: Bool) -> Bool {
+        let master = enabled ? CGMainDisplayID() : kCGNullDirectDisplay
+        do {
+            try applyMirror(of: displayID, onto: master)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     // MARK: Reconfiguration event source
 
     private var changeContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]

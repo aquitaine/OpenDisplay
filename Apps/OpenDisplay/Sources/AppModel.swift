@@ -291,6 +291,39 @@ final class AppModel: ObservableObject {
         await refresh()
     }
 
+    /// Mirrors a display onto the main display (both show the same content) or stops mirroring.
+    /// Reversible (public Core Graphics mirroring).
+    func setMirrored(_ on: Bool, for observation: DisplayObservation) async {
+        guard let cgID = observation.cgDisplayID else { return }
+        _ = await observer.setMirroring(of: cgID, enabled: on)
+        await refresh()
+    }
+
+    /// Read-only display metadata (EDID-derived) for the menu's info panel.
+    func displayInfo(for observation: DisplayObservation) -> [(label: String, value: String)] {
+        guard let cgID = observation.cgDisplayID else { return [] }
+        var info: [(String, String)] = [
+            ("Name", displayName(for: observation)),
+            ("Type", observation.displayClass == .builtIn ? "Built-in" : "External"),
+        ]
+        let vendor = CGDisplayVendorNumber(cgID)
+        let model = CGDisplayModelNumber(cgID)
+        let serial = CGDisplaySerialNumber(cgID)
+        if vendor != 0, vendor != 0xFFFF_FFFF { info.append(("Vendor", String(vendor))) }
+        if model != 0, model != 0xFFFF_FFFF { info.append(("Model", String(model))) }
+        if serial != 0 { info.append(("Serial", String(serial))) }
+        if let mode = observation.mode {
+            info.append(("Native", "\(mode.pixelWidth) × \(mode.pixelHeight)"))
+            info.append(("Refresh", "\(Int(mode.refreshHz.rounded())) Hz"))
+        }
+        let size = CGDisplayScreenSize(cgID)
+        if size.width > 0, size.height > 0 {
+            let inches = (size.width * size.width + size.height * size.height).squareRoot() / 25.4
+            info.append(("Size", String(format: "%.1f-inch", inches)))
+        }
+        return info
+    }
+
     /// Applies a saved scene's positions + modes to the current displays (user-triggered).
     func applyScene(_ scene: Scene) async {
         let snapshot = await observer.currentSnapshot()

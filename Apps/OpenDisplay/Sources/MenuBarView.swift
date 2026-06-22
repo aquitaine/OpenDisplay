@@ -138,6 +138,7 @@ private struct DisplayCard: View {
     @State private var resIndex: Double = 0
     @State private var showHardware = false
     @State private var hardwareProbed = false
+    @State private var showInfo = false
 
     private var isExpanded: Bool { expandedID == display.recordID }
 
@@ -253,7 +254,22 @@ private struct DisplayCard: View {
                     Task { await model.setMain(for: display) }
                 }
             }
-            MenuActionRow(title: "Mirror display", systemImage: "rectangle.on.rectangle.angled", soon: true)
+            if !display.isMain {
+                HStack(spacing: 10) {
+                    Image(systemName: "rectangle.on.rectangle.angled").font(.system(size: 14))
+                        .frame(width: 18).foregroundStyle(.secondary)
+                    Text("Mirror to main display").font(.system(size: 13))
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { display.mirrorSourceID != nil },
+                        set: { isOn in Task { await model.setMirrored(isOn, for: display) } }))
+                        .labelsHidden().toggleStyle(.switch).controlSize(.mini)
+                        .disabled(model.busy)
+                }
+                .padding(.horizontal, 8).padding(.vertical, 5)
+            } else {
+                MenuActionRow(title: "Mirror display", systemImage: "rectangle.on.rectangle.angled", soon: true)
+            }
             MenuActionRow(title: "Move in arrangement…", systemImage: "arrow.up.left.and.arrow.down.right") {
                 onOpenSettings()
             }
@@ -271,7 +287,24 @@ private struct DisplayCard: View {
                 MenuActionRow(title: "Hardware control", systemImage: "slider.horizontal.3", soon: true)
             }
             MenuActionRow(title: "Rename & manage…", systemImage: "tag") { onOpenSettings() }
+            MenuActionRow(title: "Display info", systemImage: "info.circle", showChevron: false) {
+                withAnimation(.easeInOut(duration: 0.15)) { showInfo.toggle() }
+            }
+            if showInfo { displayInfoPanel }
         }
+    }
+
+    private var displayInfoPanel: some View {
+        VStack(spacing: 2) {
+            ForEach(model.displayInfo(for: display), id: \.label) { item in
+                HStack {
+                    Text(item.label).font(.caption2).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(item.value).font(.caption2).lineLimit(1)
+                }
+            }
+        }
+        .padding(.leading, 26).padding(.trailing, 8).padding(.vertical, 2)
     }
 
     private var hardwareControls: some View {
