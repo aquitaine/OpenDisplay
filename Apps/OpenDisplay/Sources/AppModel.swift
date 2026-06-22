@@ -22,6 +22,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var displays: [DisplayObservation] = []
     @Published private(set) var statusText = "Scanning…"
     @Published private(set) var busy = false
+    @Published private(set) var diagnostics: [DisplayDiagnostic] = []
 
     private let observer: CoreGraphicsProvider
     private let coordinator: TopologyCoordinator
@@ -113,6 +114,37 @@ final class AppModel: ObservableObject {
             return "\(observation.displayClass.rawValue.capitalized) · \(mode.pixelWidth)×\(mode.pixelHeight)"
         }
         return observation.recordID.rawValue
+    }
+
+    /// Where the rescue-readable checkpoints live, shown in Settings → Diagnostics & Recovery.
+    var checkpointLocation: String {
+        (try? DiskCheckpointStore.defaultDirectory().path) ?? "(unavailable)"
+    }
+
+    /// The bound global recovery hotkey, shown in Settings.
+    let reconnectAllHotkey = "⌃⌥⌘R"
+
+    /// Probes the observation + lifecycle providers and publishes their status for Settings.
+    func refreshDiagnostics() async {
+        #if arch(arm64)
+        let appleSilicon = true
+        #else
+        let appleSilicon = false
+        #endif
+        let environment = ProviderEnvironment(
+            osBuild: ProcessInfo.processInfo.operatingSystemVersionString,
+            isAppleSilicon: appleSilicon, transport: .unknown, displayClass: .unknown
+        )
+        let observation = await observer.probe(environment)
+        let lifecycleProbe = await lifecycle.probe(environment)
+        diagnostics = [
+            DisplayDiagnostic(provider: "Core Graphics (observation)", status: observation.status.rawValue,
+                              risk: observation.risk.rawValue, experimental: observer.isExperimental,
+                              reasons: observation.reasons.map(\.rawValue)),
+            DisplayDiagnostic(provider: "Lifecycle (disconnect / reconnect)", status: lifecycleProbe.status.rawValue,
+                              risk: lifecycleProbe.risk.rawValue, experimental: lifecycle.isExperimental,
+                              reasons: lifecycleProbe.reasons.map(\.rawValue))
+        ]
     }
 
     func refresh() async {
@@ -267,5 +299,15 @@ private struct RoutedLifecycleProvider: LifecycleProvider {
         )
         return await primary.probe(environment).status == .supported ? primary : fallback
     }
+}
+
+/// A provider status row shown in Settings → Diagnostics & Recovery.
+struct DisplayDiagnostic: Identifiable, Hashable {
+    var id: String { provider }
+    var provider: String
+    var status: String
+    var risk: String
+    var experimental: Bool
+    var reasons: [String]
 }
 #endif
