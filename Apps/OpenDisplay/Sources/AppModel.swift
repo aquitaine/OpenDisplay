@@ -189,11 +189,11 @@ private struct RoutedLifecycleProvider: LifecycleProvider {
         try await active().recover(to: checkpoint)
     }
 
-    /// Pick the provider by probe status rather than by catching a typed failure. `as?` / `catch as`
-    /// against a type vended by a statically-linked SPM product fails across framework copies — the
-    /// same `ProviderFailure` exists as distinct runtime metadata in each image — so error-based
-    /// routing silently never falls back. A probe status comparison is a value check and is
-    /// boundary-safe. (The deeper fix is making the SPM products dynamic so there is one copy.)
+    /// Pick the provider by probe status — a forward capability check, so an unsupported primary
+    /// never even attempts the operation. (`catch as ProviderFailure` is now also boundary-safe: the
+    /// shared core ships as dynamic frameworks — see project.yml — so `ProviderFailure` has exactly
+    /// one runtime type across all images. Error-based fallback would work too; probe-based routing is
+    /// kept because deciding up front beats reacting to a thrown failure.)
     private func active() async -> any LifecycleProvider {
         #if arch(arm64)
         let appleSilicon = true

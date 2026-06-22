@@ -16,6 +16,16 @@ let package = Package(
     platforms: [
         .macOS(.v13)
     ],
+    // Cross-platform `swift test` / `swift build` consume these products. The Xcode build does NOT:
+    // the macOS app links these modules into multiple Mach-O images (every provider framework AND
+    // the app/CLI/rescue), so a *static* copy of e.g. `ProviderInterfaces.ProviderFailure` would end
+    // up in each image with distinct runtime metadata, breaking `as?`/`catch as` across the framework
+    // boundary. The fix lives in the Xcode build (project.yml), which compiles these same source dirs
+    // as explicit *dynamic* frameworks so there is exactly one copy of each type at runtime. SwiftPM's
+    // own `.dynamic` products can't express that here — Xcode 16/26 can't build a package target
+    // dynamically when it's also an internal package dependency (diamond), so the dynamic frameworks
+    // are declared natively in project.yml instead. These product types stay as the default (static);
+    // they only affect the single-image `swift test`/`swift build` binaries, where duplication is moot.
     products: [
         .library(name: "DisplayDomain", targets: ["DisplayDomain"]),
         .library(name: "ProviderInterfaces", targets: ["ProviderInterfaces"]),
