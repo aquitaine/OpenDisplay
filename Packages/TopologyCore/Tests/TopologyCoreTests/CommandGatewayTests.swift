@@ -39,6 +39,22 @@ final class CommandGatewayTests: XCTestCase {
         XCTAssertTrue(envelope.targets.isEmpty)
     }
 
+    func testReconnectAllPartialWhenSomeFail() async {
+        // "ext" exists (reconnect succeeds); the "ghost" managed-offline record has no matching
+        // observation, so its reconnect throws and is reported false → overall partial.
+        let system = SimulatedDisplaySystem(
+            observations: [obs("builtin", main: true, klass: .builtIn), obs("ext", active: false)],
+            managedOffline: [offline("ext"), offline("ghost")]
+        )
+        let gateway = CommandGateway(observer: system, lifecycleProvider: system, checkpoints: InMemoryCheckpointStore())
+        let envelope = await gateway.reconnectAll()
+        XCTAssertEqual(envelope.status, .partial)
+        let verification = Dictionary(uniqueKeysWithValues:
+            envelope.targets.map { ($0.displayId, $0.operations.first?.verification) })
+        XCTAssertEqual(verification["ext"], .verified)
+        XCTAssertEqual(verification["ghost"], .readBackUnavailable)
+    }
+
     func testDisconnectCommitsWhenSafeSurfaceRemains() async {
         // Default confirm handler declines, so reaching .committed proves preflight returned
         // .allowed (no confirmation needed) for a non-main target with the built-in as safe surface.
