@@ -11,7 +11,7 @@ import IOKit
 /// using non-blocking sleeps for the DDC inter-message delays, so the slow I2C never touches the UI.
 public actor ExternalDisplayDDC {
     /// Common VCP feature codes (Monitor Control Command Set).
-    public enum Feature: UInt8 {
+    public enum Feature: UInt8, Sendable {
         case brightness = 0x10
         case contrast = 0x12
         case volume = 0x62
@@ -57,8 +57,8 @@ public actor ExternalDisplayDDC {
         try? await Task.sleep(nanoseconds: 60_000_000)
         var buffer = [UInt8](repeating: 0, count: 12)
         guard readFn(service, Self.i2cChip, Self.i2cSource, &buffer, 12) == 0,
-              buffer[0] == 0x6e, buffer[2] == 0x02, buffer[4] == code
-        else { return nil }
+              buffer[0] == 0x6e, buffer[2] == 0x02, buffer[3] == 0x00, buffer[4] == code
+        else { return nil }  // buffer[3] is the DDC result code; non-zero = feature unsupported
         let maxValue = Int(buffer[6]) << 8 | Int(buffer[7])
         let current = Int(buffer[8]) << 8 | Int(buffer[9])
         return (current, maxValue)

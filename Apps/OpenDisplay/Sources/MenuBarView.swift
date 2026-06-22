@@ -136,6 +136,8 @@ private struct DisplayCard: View {
     @Binding var expandedID: DisplayRecordID?
     let onOpenSettings: () -> Void
     @State private var resIndex: Double = 0
+    @State private var showHardware = false
+    @State private var hardwareProbed = false
 
     private var isExpanded: Bool { expandedID == display.recordID }
 
@@ -257,9 +259,44 @@ private struct DisplayCard: View {
             }
             MenuActionRow(title: "Screen rotation", systemImage: "rotate.right", soon: true)
             MenuActionRow(title: "Colour mode", systemImage: "paintpalette", soon: true)
-            MenuActionRow(title: "Hardware control", systemImage: "slider.horizontal.3", soon: true)
+            if display.displayClass != .builtIn {
+                MenuActionRow(title: "Hardware control", systemImage: "slider.horizontal.3", showChevron: false) {
+                    withAnimation(.easeInOut(duration: 0.15)) { showHardware.toggle() }
+                    if showHardware {
+                        Task { await model.refreshHardwareControls(for: display); hardwareProbed = true }
+                    }
+                }
+                if showHardware { hardwareControls }
+            } else {
+                MenuActionRow(title: "Hardware control", systemImage: "slider.horizontal.3", soon: true)
+            }
             MenuActionRow(title: "Rename & manage…", systemImage: "tag") { onOpenSettings() }
         }
+    }
+
+    private var hardwareControls: some View {
+        VStack(spacing: 5) {
+            ForEach(HardwareControl.allCases, id: \.self) { control in
+                if let level = model.ddcControl(control, for: display) {
+                    HStack(spacing: 6) {
+                        Image(systemName: control.icon).font(.caption).foregroundStyle(.tertiary).frame(width: 15)
+                        Text(control.label).font(.caption2).foregroundStyle(.secondary)
+                            .frame(width: 52, alignment: .leading)
+                        Slider(value: Binding(
+                            get: { model.ddcControl(control, for: display) ?? 0.5 },
+                            set: { model.setHardwareControl(control, $0, for: display) }), in: 0...1)
+                        Text("\(Int((level * 100).rounded()))%").font(.caption2).foregroundStyle(.secondary)
+                            .frame(width: 30, alignment: .trailing)
+                    }
+                }
+            }
+            if HardwareControl.allCases.allSatisfy({ model.ddcControl($0, for: display) == nil }) {
+                Text(hardwareProbed ? "No adjustable controls reported" : "Reading…")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.leading, 26).padding(.trailing, 6).padding(.top, 2)
     }
 
     private func currentIndex(in modes: [DisplayMode]) -> Double {

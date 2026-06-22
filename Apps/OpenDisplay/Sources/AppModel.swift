@@ -10,6 +10,31 @@ import TopologyCore
 import ExperimentalLifecycleProvider
 #endif
 
+/// A hardware (DDC) control the menu can offer for an external display. Public-safe (no private-SPI
+/// types), so the menu can reference it in every build; AppModel maps it to a DDC VCP code.
+enum HardwareControl: CaseIterable, Hashable {
+    case contrast, volume
+
+    var vcp: UInt8 {
+        switch self {
+        case .contrast: return 0x12
+        case .volume: return 0x62
+        }
+    }
+    var label: String {
+        switch self {
+        case .contrast: return "Contrast"
+        case .volume: return "Volume"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .contrast: return "circle.lefthalf.filled"
+        case .volume: return "speaker.wave.2"
+        }
+    }
+}
+
 /// The app's composition root. It wires the platform-independent `TopologyCoordinator`
 /// (Packages/TopologyCore) to a display system and exposes an observable snapshot for the UI.
 ///
@@ -35,6 +60,8 @@ final class AppModel: ObservableObject {
     /// Cached brightness (0...1) for displays we can control — built-in via DisplayServices, externals
     /// via DDC. A missing key means "not controllable here", so the menu shows a disabled slider.
     @Published private(set) var brightness: [DisplayRecordID: Float] = [:]
+    /// Cached DDC hardware-control levels (0...1) keyed by display then VCP code (contrast/volume).
+    @Published private(set) var ddcControlLevel: [DisplayRecordID: [UInt8: Float]] = [:]
 
     /// A display OpenDisplay turned off — remembered so it stays visible and re-enableable.
     struct OfflineDisplay: Identifiable, Equatable {
@@ -61,6 +88,10 @@ final class AppModel: ObservableObject {
     private var brightnessMax: [DisplayRecordID: Int] = [:]
     private var ddcTarget: [DisplayRecordID: Int] = [:]
     private var ddcWriters: [DisplayRecordID: Task<Void, Never>] = [:]
+    private struct DDCControlKey: Hashable { let id: DisplayRecordID; let vcp: UInt8 }
+    private var ddcControlMax: [DDCControlKey: Int] = [:]
+    private var ddcControlTarget: [DDCControlKey: Int] = [:]
+    private var ddcControlWriter: [DDCControlKey: Task<Void, Never>] = [:]
     #endif
     private var hotKey: GlobalHotKey?
     private var registry: DisplayRegistry?
@@ -393,6 +424,53 @@ final class AppModel: ObservableObject {
             await controller.write(.brightness, target)
         }
         ddcWriters[id] = nil
+    }
+    #endif
+
+    /// Cached level (0...1) of a DDC hardware control, or nil if the display doesn't report it.
+    func ddcControl(_ control: HardwareControl, for observation: DisplayObservation) -> Float? {
+        ddcControlLevel[observation.recordID]?[control.vcp]
+    }
+
+    /// Reads every hardware (DDC) control for an external display into the cache. Skips the built-in
+    /// and any feature the panel reports as unsupported. No-op in the public-API-only build.
+    func refreshHardwareControls(for observation: DisplayObservation) async {
+        #if !PUBLIC_API_ONLY
+        guard observation.displayClass != .builtIn, let controller = ddcController(for: observation) else { return }
+        let id = observation.recordID
+        for control in HardwareControl.allCases {
+            guard let feature = ExternalDisplayDDC.Feature(rawValue: control.vcp),
+                  let reading = await controller.read(feature), reading.max > 0 else { continue }
+            ddcControlLevel[id, default: [:]][control.vcp] = Float(reading.current) / Float(reading.max)
+            ddcControlMax[DDCControlKey(id: id, vcp: control.vcp)] = reading.max
+        }
+        #endif
+    }
+
+    /// Sets a DDC hardware control (0...1), updating the cache optimistically and coalescing the
+    /// I2C writes the same way brightness does.
+    func setHardwareControl(_ control: HardwareControl, _ value: Float, for observation: DisplayObservation) {
+        #if !PUBLIC_API_ONLY
+        guard observation.displayClass != .builtIn else { return }
+        let id = observation.recordID
+        let key = DDCControlKey(id: id, vcp: control.vcp)
+        ddcControlLevel[id, default: [:]][control.vcp] = value
+        ddcControlTarget[key] = Int((value * Float(ddcControlMax[key] ?? 100)).rounded())
+        if ddcControlWriter[key] == nil {
+            ddcControlWriter[key] = Task { [weak self] in await self?.drainHardwareWrites(key, control, observation) }
+        }
+        #endif
+    }
+
+    #if !PUBLIC_API_ONLY
+    private func drainHardwareWrites(_ key: DDCControlKey, _ control: HardwareControl, _ observation: DisplayObservation) async {
+        guard let feature = ExternalDisplayDDC.Feature(rawValue: control.vcp),
+              let controller = ddcController(for: observation) else { ddcControlWriter[key] = nil; return }
+        while let target = ddcControlTarget[key] {
+            ddcControlTarget[key] = nil
+            await controller.write(feature, target)
+        }
+        ddcControlWriter[key] = nil
     }
     #endif
 
