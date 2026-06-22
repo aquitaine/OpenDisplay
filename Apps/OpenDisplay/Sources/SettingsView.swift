@@ -51,44 +51,68 @@ struct SettingsView: View {
     }
 
     private var diagnosticsTab: some View {
-        VStack(alignment: .leading, spacing: ODSpacing.md) {
-            Text("Providers").font(.title3)
-            ForEach(model.diagnostics) { row in
-                HStack(spacing: ODSpacing.sm) {
-                    Image(systemName: row.status == "supported" ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(row.status == "supported" ? ODColor.connected : ODColor.caution)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(row.provider)
-                        Text("\(row.status) · risk \(row.risk)\(row.reasons.isEmpty ? "" : " · \(row.reasons.joined(separator: ", "))")")
-                            .font(.caption).foregroundStyle(.secondary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: ODSpacing.md) {
+                Text("Providers").font(.title3)
+                ForEach(model.diagnostics) { row in
+                    HStack(spacing: ODSpacing.sm) {
+                        Image(systemName: row.status == "supported" ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(row.status == "supported" ? ODColor.connected : ODColor.caution)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(row.provider)
+                            Text("\(row.status) · risk \(row.risk)\(row.reasons.isEmpty ? "" : " · \(row.reasons.joined(separator: ", "))")")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if row.experimental {
+                            Text("Labs").font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(.quaternary, in: Capsule())
+                        }
+                        Spacer()
                     }
-                    if row.experimental {
-                        Text("Labs").font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(.quaternary, in: Capsule())
+                }
+
+                Divider()
+
+                Text("Recovery").font(.title3)
+                LabeledContent("Persistence policy", value: model.settings.persistencePolicy.rawValue)
+                LabeledContent("Global hotkey",
+                               value: model.settings.reconnectAllHotkeyEnabled ? model.reconnectAllHotkey : "disabled")
+                LabeledContent("Checkpoints", value: model.checkpointLocation)
+                Button {
+                    Task { await model.reconnectAll() }
+                } label: {
+                    Label("Reconnect All", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(model.busy)
+
+                Divider()
+
+                Text("Recent Activity").font(.title3)
+                if model.recentActivity.isEmpty {
+                    Text("No recorded activity yet.").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(model.recentActivity.enumerated()), id: \.offset) { _, entry in
+                        HStack(spacing: ODSpacing.sm) {
+                            Text(entry.command).font(.caption).bold()
+                            Text(entry.status).font(.caption).foregroundStyle(.secondary)
+                            if !entry.targets.isEmpty {
+                                Text(entry.targets.joined(separator: ", "))
+                                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Spacer()
+                            Text(entry.timestamp.formatted(date: .omitted, time: .shortened))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                     }
-                    Spacer()
                 }
             }
-
-            Divider()
-
-            Text("Recovery").font(.title3)
-            LabeledContent("Persistence policy", value: model.settings.persistencePolicy.rawValue)
-            LabeledContent("Global hotkey",
-                           value: model.settings.reconnectAllHotkeyEnabled ? model.reconnectAllHotkey : "disabled")
-            LabeledContent("Checkpoints", value: model.checkpointLocation)
-            Button {
-                Task { await model.reconnectAll() }
-            } label: {
-                Label("Reconnect All", systemImage: "arrow.triangle.2.circlepath")
-            }
-            .disabled(model.busy)
-
-            Spacer()
+            .padding(ODSpacing.lg)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .padding(ODSpacing.lg)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .task { await model.refreshDiagnostics() }
+        .task {
+            await model.refreshDiagnostics()
+            await model.refreshActivity()
+        }
     }
 }
 #endif

@@ -24,6 +24,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var diagnostics: [DisplayDiagnostic] = []
     @Published private(set) var phase: DisplayLoadPhase = .scanning
+    @Published private(set) var recentActivity: [AuditEntry] = []
 
     /// True when any provider isn't fully supported — drives the menu-bar caution banner.
     var isDegraded: Bool { diagnostics.contains { $0.status != "supported" } }
@@ -161,6 +162,12 @@ final class AppModel: ObservableObject {
                               risk: lifecycleProbe.risk.rawValue, experimental: lifecycle.isExperimental,
                               reasons: lifecycleProbe.reasons.map(\.rawValue))
         ]
+    }
+
+    /// Loads the most recent audit-log entries for Settings → Recent Activity.
+    func refreshActivity() async {
+        guard let directory = try? DiskAuditLog.defaultDirectory() else { return }
+        recentActivity = await DiskAuditLog(directory: directory).recent(limit: 8).reversed()
     }
 
     func refresh() async {
