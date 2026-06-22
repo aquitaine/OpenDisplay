@@ -4,6 +4,7 @@ import DisplayDomain
 import ExperimentalLifecycleProvider
 import Foundation
 import ProviderInterfaces
+import SceneEngine
 import TopologyCore
 
 // OpenDisplay automation CLI (PRD §12). Mutating commands route through CommandGateway (the same
@@ -64,6 +65,10 @@ let registryStore: any RegistryStoring =
     (try? DiskRegistryStore.defaultDirectory()).map { DiskRegistryStore(directory: $0) }
     ?? InMemoryRegistryStore()
 let registry = await DisplayRegistry(store: registryStore)
+let sceneStore: any SceneStoring =
+    (try? DiskSceneStore.defaultDirectory()).map { DiskSceneStore(directory: $0) }
+    ?? InMemorySceneStore()
+let sceneLibrary = await SceneLibrary(store: sceneStore)
 
 typealias ResolvedDisplay = (observation: DisplayObservation, record: DisplayRecord)
 
@@ -262,6 +267,101 @@ func runReconnect() async {
     }
 }
 
+// MARK: - Scenes
+
+/// Resolves a scene member selector to a single record id, or nil if absent/ambiguous (unlike the
+/// command selectors, a scene with an unresolved member is "missing", not an error).
+func resolveMember(_ selector: String, in pairs: [ResolvedDisplay]) -> DisplayRecordID? {
+    if let cgID = UInt32(selector) {
+        let matches = pairs.filter { $0.observation.cgDisplayID == cgID }
+        return matches.count == 1 ? matches[0].observation.recordID : nil
+    }
+    guard let parsed = try? DisplaySelector.parse(selector) else { return nil }
+    let matches: [DisplayRecordID]
+    switch parsed {
+    case .id(let recordID):
+        matches = pairs.filter { $0.observation.recordID == recordID || $0.record.id == recordID }.map(\.observation.recordID)
+    case .alias(let alias):
+        matches = pairs.filter { $0.record.alias == alias }.map(\.observation.recordID)
+    case .tag(let tag):
+        matches = pairs.filter { $0.record.tags.contains(tag) }.map(\.observation.recordID)
+    case .role(.main):
+        matches = pairs.filter { $0.observation.isMain }.map(\.observation.recordID)
+    case .role(.builtin):
+        matches = pairs.filter { $0.observation.displayClass == .builtIn }.map(\.observation.recordID)
+    default:
+        matches = []
+    }
+    return matches.count == 1 ? matches[0] : nil
+}
+
+func runScene() async {
+    let sub = positional.count > 1 ? positional[1] : "list"
+    let nameArg: String? = positional.count > 2 ? positional[2] : nil
+
+    switch sub {
+    case "list":
+        let scenes = await sceneLibrary.all()
+        if asJSON { emit(scenes) }
+        else if scenes.isEmpty { print("no saved scenes (capture one with: scene save <name>)") }
+        else { for scene in scenes { print("\(scene.name)  (\(scene.members.count) displays)") } }
+
+    case "save":
+        guard let nameArg else { fail("usage: opendisplay scene save <name>") }
+        let snapshot = await observer.currentSnapshot()
+        let id = await sceneLibrary.scene(named: nameArg)?.id ?? "scene_\(UUID().uuidString.prefix(8))"
+        let scene = SceneRecorder.capture(from: snapshot, name: nameArg, id: String(id))
+        await sceneLibrary.save(scene)
+        print("saved scene \"\(nameArg)\" (\(scene.members.count) displays)")
+
+    case "show":
+        guard let nameArg, let scene = await sceneLibrary.scene(named: nameArg) else {
+            fail("no scene named '\(nameArg ?? "")'")
+        }
+        if asJSON { emit(scene); return }
+        print("Scene \"\(scene.name)\":")
+        for member in scene.members {
+            var parts: [String] = []
+            if let connected = member.desired.connected { parts.append(connected ? "connected" : "offline") }
+            if member.desired.main == true { parts.append("main") }
+            if let p = member.desired.position { parts.append("pos=(\(p.x),\(p.y))") }
+            if let m = member.desired.mode { parts.append("\(m.pixelWidth)x\(m.pixelHeight)") }
+            print("  \(member.selector): \(parts.joined(separator: ", "))")
+        }
+
+    case "plan":
+        guard let nameArg, let scene = await sceneLibrary.scene(named: nameArg) else {
+            fail("no scene named '\(nameArg ?? "")'")
+        }
+        let pairs = await resolveCurrentDisplays()
+        let snapshot = await observer.currentSnapshot()
+        var resolution: ScenePlanner.Resolution = [:]
+        for member in scene.members {
+            if let recordID = resolveMember(member.selector, in: pairs) { resolution[member.selector] = recordID }
+        }
+        let plan = ScenePlanner().plan(scene: scene, snapshot: snapshot, resolution: resolution)
+        if asJSON { emit(plan); return }
+        if plan.isBlocked { print("scene \"\(scene.name)\": BLOCKED — missing required: \(plan.missingRequired.joined(separator: ", "))") }
+        else if !plan.hasWork { print("scene \"\(scene.name)\": already satisfied (no changes)") }
+        for op in plan.operations where op.status == .willApply {
+            print("  → \(op.kind.rawValue) \(op.target.rawValue): \(op.detail)")
+        }
+        let satisfied = plan.operations.filter { $0.status == .alreadySatisfied }.count
+        if satisfied > 0 { print("  (\(satisfied) already satisfied)") }
+        for selector in plan.missingOptional { print("  · skipped (absent): \(selector)") }
+
+    case "delete":
+        guard let nameArg, let scene = await sceneLibrary.scene(named: nameArg) else {
+            fail("no scene named '\(nameArg ?? "")'")
+        }
+        await sceneLibrary.delete(id: scene.id)
+        print("deleted scene \"\(nameArg)\"")
+
+    default:
+        fail("unknown scene subcommand '\(sub)' (try: list, save, show, plan, delete)", code: 2)
+    }
+}
+
 // MARK: - Dispatch
 
 switch command {
@@ -272,6 +372,7 @@ case "tag": await runTag()
 case "recover": await runRecover()
 case "disconnect": await runDisconnect()
 case "reconnect": await runReconnect()
+case "scene": await runScene()
 case "help", "--help", "-h":
     print("""
     opendisplay — OpenDisplay automation CLI
@@ -284,9 +385,10 @@ case "help", "--help", "-h":
       opendisplay disconnect <selector> [--dry-run] [--json]
       opendisplay reconnect <selector> [--json]
       opendisplay recover [--json]
+      opendisplay scene <list|save|show|plan|delete> [name] [--json]
 
     SELECTORS: id:<recordID> · alias:<name> · tag:<tag> · main · builtin · state:<active|managedOffline> · <cgDisplayID>
     """)
 default:
-    fail("unknown command '\(command)' (try: list, diagnose, alias, tag, disconnect, reconnect, recover, help)", code: 2)
+    fail("unknown command '\(command)' (try: list, diagnose, alias, tag, disconnect, reconnect, recover, scene, help)", code: 2)
 }
