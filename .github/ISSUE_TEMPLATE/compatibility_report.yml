@@ -1,0 +1,63 @@
+name: Compatibility report
+description: Report hardware/OS compatibility results for a capability
+title: "[compat]: "
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Helps build the certified compatibility matrix. **Redact serials and other
+        identifying data.**
+  - type: input
+    id: mac-model
+    attributes:
+      label: Mac model & chip
+      placeholder: "e.g. Mac mini M2 (Apple Silicon)"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS build
+      placeholder: "e.g. 15.5 (24F74)"
+    validations:
+      required: true
+  - type: input
+    id: display
+    attributes:
+      label: Display model & firmware
+      placeholder: "e.g. Dell U2720Q (firmware M3B103)"
+    validations:
+      required: true
+  - type: dropdown
+    id: route
+    attributes:
+      label: Route
+      options: ["Direct", "Thunderbolt dock", "USB-C hub", "KVM", "Adapter", "Wireless"]
+    validations:
+      required: true
+  - type: dropdown
+    id: capability
+    attributes:
+      label: Capability tested
+      options:
+        - Logical disconnect / reconnect
+        - DDC brightness
+        - DDC volume / contrast / input
+        - Resolution / refresh / rotation modes
+        - HDR / XDR
+        - Mirroring / main display
+        - Virtual display
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options: ["Works (verified)", "Works (unverified read-back)", "Degraded", "Fails"]
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes

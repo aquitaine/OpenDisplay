@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenDisplay — Screen & Icon Plan</title>
+<link rel="stylesheet" href="ds/styles.css">
+<style>
+  html, body { margin: 0; height: 100%; font-family: var(--font-text); }
+  @keyframes od-spin { to { transform: rotate(360deg); } }
+  .od-spin { animation: od-spin 1.1s linear infinite; }
+  @media (prefers-reduced-motion: reduce) { .od-spin { animation: none; } }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="ds/_ds_bundle.js"></script>
+<script src="ds/od-icons.js"></script>
+<script src="od-icons-ext.js"></script>
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="screens-shared.jsx"></script>
+<script type="text/babel" src="screens-menubar.jsx"></script>
+<script type="text/babel" src="screens-settings-a.jsx"></script>
+<script type="text/babel" src="screens-settings-b.jsx"></script>
+<script type="text/babel" src="screens-icons.jsx"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+  const MB = window.ODMenubar, A = window.ODSettingsA, B = window.ODSettingsB, IC = window.ODIconInventory;
+  const AB = window.DCArtboard, S = window.DCSection, DesignCanvas = window.DesignCanvas;
+
+  function App() {
+    return (
+      <DesignCanvas>
+        <S id="icons" title="Iconography" subtitle="Existing kit glyphs + net-new glyphs proposed for the app">
+          <AB id="inv" label="Icon inventory — existing + net-new" width={1040} height={1680} style={{ background: "#ececec" }}><IC.Inventory /></AB>
+        </S>
+
+        <S id="menubar" title="Menu-bar popover" subtitle="Primary surface · 320pt · every reachability & recovery state">
+          <AB id="mb1" label="01 · Default — display expanded" width={392} height={648}><MB.Default /></AB>
+          <AB id="mb2" label="02 · All collapsed" width={392} height={470}><MB.Collapsed /></AB>
+          <AB id="mb3" label="03 · Built-in only (empty)" width={392} height={470}><MB.BuiltinOnly /></AB>
+          <AB id="mb4" label="04 · Scanning" width={392} height={380}><MB.Scanning /></AB>
+          <AB id="mb5" label="05 · Managed offline + Reconnect All" width={392} height={680}><MB.ManagedOffline /></AB>
+          <AB id="mb6" label="06 · Reconnecting" width={392} height={500}><MB.Reconnecting /></AB>
+          <AB id="mb7" label="07 · Disconnect countdown" width={392} height={370}><MB.DisconnectCountdown /></AB>
+          <AB id="mb8" label="08 · Black Out active" width={392} height={560}><MB.BlackOut /></AB>
+          <AB id="mb9" label="09 · Route degraded" width={392} height={620}><MB.Degraded /></AB>
+          <AB id="mb10" label="10 · Reconnect All in progress" width={392} height={420}><MB.ReconnectAll /></AB>
+          <AB id="mb11" label="11 · Identity ambiguous" width={392} height={520}><MB.Ambiguous /></AB>
+        </S>
+
+        <S id="settings" title="Settings window — Display detail" subtitle="Detailed surface · 760pt · per-display configuration & confirmations">
+          <AB id="sd1" label="01 · Display detail (default)" width={760} height={680}><A.DetailDefault /></AB>
+          <AB id="sd2" label="02 · Scaled resolution open" width={760} height={560}><A.DetailScaled /></AB>
+          <AB id="sd3" label="03 · Confirm-or-revert countdown" width={760} height={620}><A.DetailCountdown /></AB>
+          <AB id="sd4" label="04 · Capability reasons & degraded route" width={760} height={640}><A.DetailDegraded /></AB>
+          <AB id="sd5" label="05 · Managed offline" width={760} height={560}><A.DetailOffline /></AB>
+          <AB id="sd9" label="06 · Disconnect confirmation sheet" width={760} height={560}><A.DisconnectSheet /></AB>
+        </S>
+
+        <S id="topology" title="Settings window — Topology" subtitle="Arrange · mirror · identify">
+          <AB id="ar1" label="01 · Arrange displays" width={760} height={560}><A.Arrange /></AB>
+          <AB id="ar2" label="02 · Mirror on" width={760} height={560}><A.ArrangeMirror /></AB>
+          <AB id="ar3" label="03 · Identify overlay" width={760} height={560}><A.ArrangeIdentify /></AB>
+        </S>
+
+        <S id="scenes" title="Settings window — Scenes" subtitle="Desired-state authoring & dry-run diff">
+          <AB id="sc1" label="01 · No scenes (empty)" width={760} height={560}><B.ScenesEmpty /></AB>
+          <AB id="sc2" label="02 · Scenes list" width={760} height={600}><B.ScenesList /></AB>
+          <AB id="sc3" label="03 · Apply — dry-run diff" width={760} height={640}><B.SceneDryRun /></AB>
+        </S>
+
+        <S id="system" title="Settings window — Automation, Health, Labs" subtitle="Core 1.0 system surfaces & emergency recovery">
+          <AB id="sy1" label="01 · Automation" width={760} height={680}><B.Automation /></AB>
+          <AB id="sy2" label="02 · Health & Recovery" width={760} height={700}><B.Health /></AB>
+          <AB id="sy3" label="03 · Emergency recovery (full-screen)" width={820} height={520}><B.RecoveryOSD /></AB>
+          <AB id="sy4" label="04 · Labs" width={760} height={680}><B.Labs /></AB>
+          <AB id="sy5" label="05 · Add virtual display" width={760} height={600}><B.AddVirtual /></AB>
+        </S>
+      </DesignCanvas>
+    );
+  }
+
+  ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

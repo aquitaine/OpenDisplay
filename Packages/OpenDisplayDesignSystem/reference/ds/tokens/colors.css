@@ -1,0 +1,97 @@
+/* ============================================================
+   OpenDisplay — Color tokens
+   Modeled on the macOS (Sonoma/Sequoia) system palette: neutral
+   surfaces, a single restrained system-blue accent, and the
+   standard label/fill/separator hierarchy. Light is the default
+   (:root); add class="theme-dark" to any container for dark.
+   ============================================================ */
+
+:root {
+  /* ---- Accent (system blue) ---- */
+  --accent: #007aff;          /* primary control / selection */
+  --accent-hover: #0a6fe0;
+  --accent-active: #0860c4;
+  --accent-tint: rgba(0, 122, 255, 0.12);   /* selected-row wash */
+  --accent-fg: #ffffff;        /* text/glyph on accent */
+
+  /* ---- Semantic status ---- */
+  --green: #34c759;   /* connected / on / success */
+  --orange: #ff9500;  /* caution / unsupported */
+  --red: #ff3b30;     /* disconnect / destructive */
+  --yellow: #ffcc00;
+
+  /* ---- Labels (text) ---- */
+  --label-primary: rgba(0, 0, 0, 0.85);
+  --label-secondary: rgba(0, 0, 0, 0.5);
+  --label-tertiary: rgba(0, 0, 0, 0.26);
+  --label-quaternary: rgba(0, 0, 0, 0.16);
+
+  /* ---- Surfaces ---- */
+  --window-bg: #ececec;          /* settings window chrome */
+  --sidebar-bg: #e3e3e6;         /* translucent sidebar base */
+  --content-bg: #ffffff;         /* main content pane */
+  --panel-bg: rgba(255, 255, 255, 0.72);   /* menu-bar popover (over blur) */
+  --panel-solid: #f7f7f7;        /* opaque fallback panel */
+  --card-bg: #ffffff;            /* grouped/inset list card */
+  --raised-bg: #ffffff;          /* floating menu / picker */
+
+  /* ---- Control fills (unselected) ---- */
+  --fill-primary: rgba(120, 120, 128, 0.2);
+  --fill-secondary: rgba(120, 120, 128, 0.16);
+  --fill-tertiary: rgba(120, 120, 128, 0.12);
+  --fill-quaternary: rgba(120, 120, 128, 0.08);
+
+  /* ---- Separators / borders ---- */
+  --separator: rgba(0, 0, 0, 0.1);
+  --separator-opaque: #d6d6d6;
+  --border-control: rgba(0, 0, 0, 0.12);
+  --hairline: rgba(0, 0, 0, 0.08);
+
+  /* ---- Hover / press washes on neutral rows ---- */
+  --row-hover: rgba(0, 0, 0, 0.04);
+  --row-active: rgba(0, 0, 0, 0.07);
+
+  /* ---- Focus ring ---- */
+  --focus-ring: rgba(0, 122, 255, 0.5);
+}
+
+.theme-dark {
+  --accent: #0a84ff;
+  --accent-hover: #2b95ff;
+  --accent-active: #0a84ff;
+  --accent-tint: rgba(10, 132, 255, 0.22);
+  --accent-fg: #ffffff;
+
+  --green: #30d158;
+  --orange: #ff9f0a;
+  --red: #ff453a;
+  --yellow: #ffd60a;
+
+  --label-primary: rgba(255, 255, 255, 0.92);
+  --label-secondary: rgba(255, 255, 255, 0.55);
+  --label-tertiary: rgba(255, 255, 255, 0.3);
+  --label-quaternary: rgba(255, 255, 255, 0.18);
+
+  --window-bg: #1e1e1e;
+  --sidebar-bg: #2a2a2c;
+  --content-bg: #252527;
+  --panel-bg: rgba(40, 40, 42, 0.72);
+  --panel-solid: #2c2c2e;
+  --card-bg: #2f2f31;
+  --raised-bg: #353537;
+
+  --fill-primary: rgba(120, 120, 128, 0.36);
+  --fill-secondary: rgba(120, 120, 128, 0.3);
+  --fill-tertiary: rgba(120, 120, 128, 0.24);
+  --fill-quaternary: rgba(120, 120, 128, 0.18);
+
+  --separator: rgba(255, 255, 255, 0.12);
+  --separator-opaque: #3a3a3c;
+  --border-control: rgba(255, 255, 255, 0.16);
+  --hairline: rgba(255, 255, 255, 0.08);
+
+  --row-hover: rgba(255, 255, 255, 0.06);
+  --row-active: rgba(255, 255, 255, 0.1);
+
+  --focus-ring: rgba(10, 132, 255, 0.6);
+}

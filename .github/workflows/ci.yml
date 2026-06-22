@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The platform-independent domain (DisplayDomain, ProviderInterfaces, SceneEngine,
+  # AutomationSchema, TopologyCore, SimulatorProvider) builds and tests with no macOS
+  # frameworks, so we verify it on Linux first — it's the fastest signal and proves the
+  # safety/state-machine logic stays portable.
+  domain-linux:
+    name: Domain tests (Linux / Swift 6)
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version
+      - run: swift build
+      - run: swift test --parallel
+
+  # Same packages on macOS, the authoritative platform.
+  domain-macos:
+    name: Domain tests (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test --parallel
+
+  # Placeholder for the full app + provider build and the public-API-only flavor (NFR-010),
+  # enabled once the Xcode project lands on a Mac (M0). Kept here so the gate is visible.
+  app-macos:
+    name: App build (macOS) [placeholder]
+    runs-on: macos-14
+    if: ${{ false }} # flip to true once Apps/OpenDisplay.xcodeproj exists
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "TODO(M0): xcodebuild -scheme OpenDisplay build test"
+      - run: echo "TODO(M0): xcodebuild -scheme OpenDisplay-PublicAPIOnly build test"
+
+  lint:
+    name: SwiftLint
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install swiftlint
+      - run: swiftlint lint --reporter github-actions-logging

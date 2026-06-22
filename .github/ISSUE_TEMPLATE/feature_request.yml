@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest an improvement or new capability
+title: "[feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use-case
+      description: What are you trying to do? What's painful today?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: dropdown
+    id: domain
+    attributes:
+      label: Related capability domain
+      options:
+        - Display lifecycle & topology
+        - Modes, scaling & geometry
+        - Brightness, audio, color & input
+        - Virtual displays, capture & presentation
+        - Automation & integrations
+        - Diagnostics, configuration & recovery
+        - User experience & accessibility
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Core or Labs?
+      description: Labs = experimental / system-sensitive / undocumented behavior.
+      options: ["Core", "Labs", "Not sure"]
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

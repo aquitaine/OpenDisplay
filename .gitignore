@@ -1,0 +1,34 @@
+# Swift / SwiftPM
+.build/
+.swiftpm/
+Package.resolved.user
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS
+.DS_Store
+
+# Release / signing artifacts (never commit secrets or signed binaries)
+*.app
+*.pkg
+*.dmg
+*.zip
+ExportOptions.plist
+*.p12
+*.cer
+*.provisionprofile
+notarization-*.json
+
+# Editor
+.idea/
+*.swp

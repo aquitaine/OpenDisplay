@@ -1,0 +1,47 @@
+/* ============================================================
+   OpenDisplay — Typography tokens
+   Native Apple system fonts. On macOS these resolve to SF Pro
+   Text / SF Pro Display / SF Mono automatically — no webfont
+   shipped. See readme "Visual Foundations → Type" for the
+   substitution note for non-Apple platforms.
+   ============================================================ */
+
+:root {
+  /* ---- Families ---- */
+  /* -apple-system / BlinkMacSystemFont resolve to SF Pro Text & Display on
+     Apple platforms with no webfont download. See readme for the non-Apple
+     substitution (Inter) note. */
+  --font-text: -apple-system, BlinkMacSystemFont, "Helvetica Neue",
+    Helvetica, Arial, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "Helvetica Neue",
+    Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+
+  /* ---- Type scale (macOS HIG point sizes) ---- */
+  --text-largetitle: 26px;   /* settings pane headline */
+  --text-title1: 22px;
+  --text-title2: 17px;       /* group / section title */
+  --text-title3: 15px;
+  --text-headline: 13px;     /* emphasized body (semibold) */
+  --text-body: 13px;         /* default control + row label */
+  --text-callout: 12px;
+  --text-subhead: 11px;      /* secondary row detail */
+  --text-footnote: 11px;
+  --text-caption: 10px;      /* menu-bar dense labels */
+
+  /* ---- Weights ---- */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* ---- Line heights ---- */
+  --leading-tight: 1.2;
+  --leading-normal: 1.35;
+  --leading-relaxed: 1.5;
+
+  /* ---- Tracking (SF tightens at display sizes) ---- */
+  --tracking-display: -0.02em;
+  --tracking-tight: -0.01em;
+  --tracking-normal: 0;
+}

@@ -1,0 +1,46 @@
+# SwiftLint configuration for OpenDisplay.
+# Keep rules pragmatic; the domain packages are the strictest because they encode safety logic.
+included:
+  - Packages
+  - Providers
+  - Apps
+  - Tools
+excluded:
+  - .build
+  - "**/.build"
+  - Tests/Fixtures
+
+opt_in_rules:
+  - empty_count
+  - explicit_init
+  - first_where
+  - sorted_imports
+  - unused_import
+  - redundant_nil_coalescing
+  - closure_spacing
+  - operator_usage_whitespace
+
+line_length:
+  warning: 120
+  error: 160
+  ignores_comments: true
+
+type_body_length:
+  warning: 400
+  error: 600
+
+file_length:
+  warning: 600
+  error: 1000
+
+function_body_length:
+  warning: 80
+  error: 140
+
+identifier_name:
+  min_length: 2
+  excluded: [id, x, y, dx, dy, to, on]
+
+cyclomatic_complexity:
+  warning: 12
+  error: 20

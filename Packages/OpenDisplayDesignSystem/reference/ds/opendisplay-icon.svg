@@ -1,0 +1,32 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="OpenDisplay">
+  <defs>
+    <linearGradient id="od-bg" x1="0" y1="0" x2="0" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3a3a3c"></stop>
+      <stop offset="1" stop-color="#1c1c1e"></stop>
+    </linearGradient>
+    <linearGradient id="od-screen" x1="0" y1="34" x2="0" y2="86" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0a84ff"></stop>
+      <stop offset="1" stop-color="#0060df"></stop>
+    </linearGradient>
+  </defs>
+  
+  <rect x="6" y="6" width="116" height="116" rx="27" fill="url(#od-bg)"></rect>
+  <rect x="6.5" y="6.5" width="115" height="115" rx="26.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"></rect>
+  
+  <rect x="30" y="34" width="68" height="44" rx="6" fill="url(#od-screen)"></rect>
+  <rect x="30.5" y="34.5" width="67" height="43" rx="5.5" fill="none" stroke="#ffffff" stroke-opacity="0.25"></rect>
+  
+  <circle cx="64" cy="56" r="8.5" fill="#ffffff" fill-opacity="0.92"></circle>
+  <g stroke="#ffffff" stroke-opacity="0.92" stroke-width="2.4" stroke-linecap="round">
+    <line x1="64" y1="40.5" x2="64" y2="44.5"></line>
+    <line x1="64" y1="67.5" x2="64" y2="71.5"></line>
+    <line x1="48.5" y1="56" x2="52.5" y2="56"></line>
+    <line x1="75.5" y1="56" x2="79.5" y2="56"></line>
+  </g>
+  
+  <rect x="58" y="78" width="12" height="9" fill="#8e8e93"></rect>
+  <rect x="46" y="87" width="36" height="5" rx="2.5" fill="#aeaeb2"></rect>
+  
+  <rect x="86" y="44" width="22" height="15" rx="3" fill="#48484a"></rect>
+  <rect x="86.5" y="44.5" width="21" height="14" rx="2.5" fill="none" stroke="#ffffff" stroke-opacity="0.18"></rect>
+</svg>
