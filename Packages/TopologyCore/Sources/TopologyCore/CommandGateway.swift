@@ -14,18 +14,21 @@ public actor CommandGateway {
     private let lifecycle: LifecycleProvider
     private let coordinator: TopologyCoordinator
     private let safety: SafetyEngine
+    private let auditLog: (any AuditLogging)?
 
     public init(
         observer: TopologyObserving,
         lifecycleProvider: LifecycleProvider,
         checkpoints: CheckpointStoring,
         safety: SafetyEngine = SafetyEngine(),
+        auditLog: (any AuditLogging)? = nil,
         recoveryServiceHealthy: @escaping @Sendable () async -> Bool = { true },
         confirm: @escaping ConfirmationHandler = { _, _ in false }
     ) {
         self.observer = observer
         self.lifecycle = lifecycleProvider
         self.safety = safety
+        self.auditLog = auditLog
         self.coordinator = TopologyCoordinator(
             observer: observer,
             lifecycleProvider: lifecycleProvider,
@@ -53,26 +56,39 @@ public actor CommandGateway {
         let status: ResultEnvelope.Status = results.isEmpty
             ? .noOp
             : (results.values.allSatisfy { $0 } ? .committed : .partial)
-        return ResultEnvelope(
+        let envelope = ResultEnvelope(
             transactionId: "txn_reconnectAll", status: status, actor: actor,
             requestedAt: Date(), topologyGeneration: snapshot.generation.value, targets: targets
         )
+        await record(envelope, command: "reconnectAll")
+        return envelope
     }
 
     /// Runs a logical disconnect through the full staged transaction and returns its envelope.
     public func disconnect(_ target: DisplayRecordID, options: DisconnectOptions) async -> ResultEnvelope {
+        let envelope: ResultEnvelope
         do {
             let result = try await coordinator.disconnect(target, options: options)
             let after = await observer.currentSnapshot()
-            return Self.envelope(for: result, target: target, actor: options.actor, generation: after.generation.value)
+            envelope = Self.envelope(for: result, target: target, actor: options.actor, generation: after.generation.value)
         } catch {
             let snapshot = await observer.currentSnapshot()
-            return ResultEnvelope(
+            envelope = ResultEnvelope(
                 transactionId: "txn_disconnect", status: .failed, actor: options.actor,
                 requestedAt: Date(), topologyGeneration: snapshot.generation.value,
                 errors: [.init(code: "coordinatorError", message: "\(error)")]
             )
         }
+        await record(envelope, command: "disconnect")
+        return envelope
+    }
+
+    private func record(_ envelope: ResultEnvelope, command: String) async {
+        await auditLog?.append(AuditEntry(
+            timestamp: envelope.requestedAt, actor: envelope.actor, command: command,
+            transactionId: envelope.transactionId, status: envelope.status.rawValue,
+            targets: envelope.targets.map(\.displayId)
+        ))
     }
 
     /// Preview a disconnect's preflight decision without mutating anything (`--dry-run`, confirm UI).

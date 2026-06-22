@@ -89,6 +89,19 @@ final class CommandGatewayTests: XCTestCase {
         XCTAssertNil(blocked.safeSurface)
     }
 
+    func testCommandsAreRecordedToAuditLog() async {
+        let system = SimulatedDisplaySystem(observations: [obs("builtin", main: true, klass: .builtIn)])
+        let audit = InMemoryAuditLog()
+        let gateway = CommandGateway(observer: system, lifecycleProvider: system,
+                                     checkpoints: InMemoryCheckpointStore(), auditLog: audit)
+        _ = await gateway.reconnectAll(actor: .cli)
+        let entries = await audit.all
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.first?.command, "reconnectAll")
+        XCTAssertEqual(entries.first?.actor, .cli)
+        XCTAssertEqual(entries.first?.status, "noOp")
+    }
+
     func testEnvelopeMappingCoversEveryResult() {
         let target = DisplayRecordID(rawValue: "d")
         let tx = TransactionID(rawValue: "txn_1")

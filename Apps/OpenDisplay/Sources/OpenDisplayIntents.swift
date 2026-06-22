@@ -35,7 +35,9 @@ enum OpenDisplayAutomation {
         let checkpoints: any CheckpointStoring =
             (try? DiskCheckpointStore.defaultDirectory()).map(DiskCheckpointStore.init(directory:))
             ?? InMemoryCheckpointStore()
-        return CommandGateway(observer: observer, lifecycleProvider: lifecycle, checkpoints: checkpoints)
+        let audit = (try? DiskAuditLog.defaultDirectory()).map(DiskAuditLog.init(directory:))
+        return CommandGateway(observer: observer, lifecycleProvider: lifecycle,
+                              checkpoints: checkpoints, auditLog: audit)
     }
 }
 
