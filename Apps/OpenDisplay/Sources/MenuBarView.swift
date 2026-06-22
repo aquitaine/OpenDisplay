@@ -136,6 +136,8 @@ private struct DisplayCard: View {
     @Binding var expandedID: DisplayRecordID?
     let onOpenSettings: () -> Void
     @State private var resIndex: Double = 0
+    @State private var brightness: Float = 0.5
+    @State private var brightnessSupported = false
 
     private var isExpanded: Bool { expandedID == display.recordID }
 
@@ -151,7 +153,10 @@ private struct DisplayCard: View {
         }
         .padding(10)
         .background(Color.secondary.opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
-        .onAppear { resIndex = currentIndex(in: modes) }
+        .onAppear {
+            resIndex = currentIndex(in: modes)
+            syncBrightness()
+        }
         .onChange(of: display.mode) { _, _ in resIndex = currentIndex(in: model.availableModes(for: display)) }
     }
 
@@ -194,14 +199,32 @@ private struct DisplayCard: View {
             HStack {
                 Text("Brightness").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Text("Soon").font(.system(size: 10)).foregroundStyle(.secondary)
-                    .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background(.quaternary, in: Capsule())
+                if brightnessSupported {
+                    Text("\(Int((brightness * 100).rounded()))%").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("Soon").font(.system(size: 10)).foregroundStyle(.secondary)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(.quaternary, in: Capsule())
+                }
             }
             HStack(spacing: 7) {
                 Image(systemName: "sun.max").font(.caption).foregroundStyle(.tertiary)
-                Slider(value: .constant(0.5)).disabled(true).opacity(0.45)
+                if brightnessSupported {
+                    Slider(value: $brightness, in: 0...1)
+                        .onChange(of: brightness) { _, newValue in model.setBrightness(newValue, for: display) }
+                } else {
+                    Slider(value: .constant(0.5)).disabled(true).opacity(0.45)
+                }
             }
+        }
+    }
+
+    private func syncBrightness() {
+        if let value = model.brightness(for: display) {
+            brightness = value
+            brightnessSupported = true
+        } else {
+            brightnessSupported = false
         }
     }
 

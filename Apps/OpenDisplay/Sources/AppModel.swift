@@ -52,6 +52,9 @@ final class AppModel: ObservableObject {
     private let coordinator: TopologyCoordinator
     private let checkpoints: any CheckpointStoring
     private let lifecycle: any LifecycleProvider
+    #if !PUBLIC_API_ONLY
+    private let brightnessControl = DisplayServicesBrightnessProvider()
+    #endif
     private var hotKey: GlobalHotKey?
     private var registry: DisplayRegistry?
     private var sceneLibrary: SceneLibrary?
@@ -328,6 +331,27 @@ final class AppModel: ObservableObject {
     func availableModes(for observation: DisplayObservation) -> [DisplayMode] {
         guard let cgID = observation.cgDisplayID else { return [] }
         return observer.availableModes(for: cgID)
+    }
+
+    /// Current hardware brightness (0...1) for a display, or nil if it can't be controlled here —
+    /// the built-in (and DisplayServices-recognized externals) return a value; other externals (which
+    /// need DDC/CI) return nil and the UI leaves the brightness slider disabled. Always nil in the
+    /// public-API-only build, which has no private brightness SPI.
+    func brightness(for observation: DisplayObservation) -> Float? {
+        #if !PUBLIC_API_ONLY
+        guard let cgID = observation.cgDisplayID else { return nil }
+        return brightnessControl.brightness(for: cgID)
+        #else
+        return nil
+        #endif
+    }
+
+    /// Sets a display's hardware brightness (0...1). No-op where brightness isn't controllable.
+    func setBrightness(_ value: Float, for observation: DisplayObservation) {
+        #if !PUBLIC_API_ONLY
+        guard let cgID = observation.cgDisplayID else { return }
+        _ = brightnessControl.setBrightness(value, for: cgID)
+        #endif
     }
 
     /// Applies a chosen resolution/mode, then re-reads the topology.
