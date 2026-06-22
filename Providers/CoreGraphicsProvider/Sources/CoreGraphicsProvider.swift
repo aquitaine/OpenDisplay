@@ -212,6 +212,24 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
         return DisplayRecordID(rawValue: "cgid:\(id)")
     }
 
+    /// Builds the identity fingerprint for a display from public Core Graphics EDID accessors
+    /// (vendor/model/serial numbers + physical size). The registry scores this to recognize a
+    /// display across reconnects. Nonisolated — pure CG reads, no actor state.
+    public nonisolated func fingerprint(for cgID: CGDirectDisplayID) -> DisplayFingerprint {
+        func valid(_ value: UInt32) -> Int? {
+            (value == 0 || value == 0xFFFF_FFFF) ? nil : Int(value)
+        }
+        let serial = CGDisplaySerialNumber(cgID)
+        let size = CGDisplayScreenSize(cgID) // millimeters; (0,0) when unknown
+        return DisplayFingerprint(
+            vendorID: valid(CGDisplayVendorNumber(cgID)),
+            productID: valid(CGDisplayModelNumber(cgID)),
+            serialNumber: serial == 0 ? nil : String(serial),
+            physicalWidthMM: size.width > 0 ? Int(size.width.rounded()) : nil,
+            physicalHeightMM: size.height > 0 ? Int(size.height.rounded()) : nil
+        )
+    }
+
     private func displayUUID(_ id: CGDirectDisplayID) -> String? {
         guard let unmanaged = CGDisplayCreateUUIDFromDisplayID(id) else { return nil }
         let uuid = unmanaged.takeRetainedValue()

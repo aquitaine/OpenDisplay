@@ -6,10 +6,10 @@ import Foundation
 import ProviderInterfaces
 import TopologyCore
 
-// OpenDisplay automation CLI (PRD §12). Every mutating command routes through CommandGateway — the
-// same audited, safety-checked path the menu bar and App Intents use — and returns the stable JSON
-// ResultEnvelope. `disconnect --dry-run` previews the SafetyEngine decision without touching
-// hardware. Selector grammar per DisplaySelector (PRD §12.3).
+// OpenDisplay automation CLI (PRD §12). Mutating commands route through CommandGateway (the same
+// audited, safety-checked path the UI and App Intents use). A persisted DisplayRegistry recognizes
+// displays across reconnects and stores user aliases/tags, so `alias:`/`tag:` selectors resolve.
+// `disconnect --dry-run` previews the SafetyEngine decision without touching hardware.
 
 // MARK: - Argument parsing
 
@@ -18,6 +18,7 @@ let flags = Set(rawArgs.filter { $0.hasPrefix("--") })
 let positional = rawArgs.filter { !$0.hasPrefix("--") }
 let command = positional.first ?? "list"
 let selectorArg: String? = positional.count > 1 ? positional[1] : nil
+let valueArg: String? = positional.count > 2 ? positional[2] : nil
 let asJSON = flags.contains("--json")
 let dryRun = flags.contains("--dry-run")
 
@@ -42,7 +43,7 @@ func emit<T: Encodable>(_ value: T) {
     print(text)
 }
 
-// MARK: - Composition root (real providers, shared on-disk checkpoints + audit, one gateway)
+// MARK: - Composition root
 
 let observer = CoreGraphicsProvider()
 let environment = ProviderEnvironment(
@@ -59,81 +60,82 @@ let auditLog = (try? DiskAuditLog.defaultDirectory()).map(DiskAuditLog.init(dire
 let gateway = CommandGateway(
     observer: observer, lifecycleProvider: lifecycle, checkpoints: checkpoints, auditLog: auditLog
 )
+let registryStore: any RegistryStoring =
+    (try? DiskRegistryStore.defaultDirectory()).map { DiskRegistryStore(directory: $0) }
+    ?? InMemoryRegistryStore()
+let registry = await DisplayRegistry(store: registryStore)
 
-// MARK: - Selector resolution (against live observations)
+typealias ResolvedDisplay = (observation: DisplayObservation, record: DisplayRecord)
+
+/// Resolves every live display's fingerprint into the registry (recognizing or minting), so the
+/// registry learns the current displays and we can map observations <-> records for this run.
+func resolveCurrentDisplays() async -> [ResolvedDisplay] {
+    let snapshot = await observer.currentSnapshot()
+    var pairs: [ResolvedDisplay] = []
+    for observation in snapshot.observations {
+        guard let cgID = observation.cgDisplayID else { continue }
+        let fingerprint = observer.fingerprint(for: cgID)
+        let record = await registry.resolve(
+            fingerprint: fingerprint, cgUUID: observation.cgUUID, displayClass: observation.displayClass
+        )
+        pairs.append((observation, record))
+    }
+    return pairs
+}
+
+// MARK: - Selector resolution
 
 func reachability(of observation: DisplayObservation, managedOffline: Set<DisplayRecordID>) -> Reachability {
     if managedOffline.contains(observation.recordID) { return .managedOffline }
     return observation.isActive ? .active : .discoveredInactive
 }
 
-func resolve(_ raw: String, in snapshot: TopologySnapshot) throws -> [DisplayObservation] {
+func resolveObservation(_ raw: String, in pairs: [ResolvedDisplay],
+                        managedOffline: Set<DisplayRecordID>) -> [DisplayObservation] {
     if let cgID = UInt32(raw) {
-        return snapshot.observations.filter { $0.cgDisplayID == cgID }
+        return pairs.filter { $0.observation.cgDisplayID == cgID }.map(\.observation)
     }
-    let selector = try DisplaySelector.parse(raw)
-    let offline = Set(snapshot.managedOffline.map(\.displayID))
+    let selector: DisplaySelector
+    do { selector = try DisplaySelector.parse(raw) } catch { fail("could not parse selector '\(raw)': \(error)") }
     switch selector {
     case .id(let recordID):
-        return snapshot.observations.filter { $0.recordID == recordID }
+        return pairs.filter { $0.observation.recordID == recordID || $0.record.id == recordID }.map(\.observation)
+    case .alias(let alias):
+        return pairs.filter { $0.record.alias == alias }.map(\.observation)
+    case .tag(let tag):
+        return pairs.filter { $0.record.tags.contains(tag) }.map(\.observation)
     case .role(.main):
-        return snapshot.observations.filter(\.isMain)
+        return pairs.filter { $0.observation.isMain }.map(\.observation)
     case .role(.builtin):
-        return snapshot.observations.filter { $0.displayClass == .builtIn }
+        return pairs.filter { $0.observation.displayClass == .builtIn }.map(\.observation)
     case .state(let reach):
-        return snapshot.observations.filter { reachability(of: $0, managedOffline: offline) == reach }
-    case .role, .alias, .tag, .name, .fingerprint, .topology:
-        fail("selector '\(raw)' isn't resolvable yet from live observations (use id:/main/builtin/state:/<cgID>)")
+        return pairs.filter { reachability(of: $0.observation, managedOffline: managedOffline) == reach }.map(\.observation)
+    case .role, .name, .fingerprint, .topology:
+        fail("selector '\(raw)' isn't resolvable yet (use id:/alias:/tag:/main/builtin/state:/<cgID>)")
     }
 }
 
-func uniqueTarget(_ raw: String, in snapshot: TopologySnapshot) -> DisplayObservation {
-    let matches: [DisplayObservation]
-    do {
-        matches = try resolve(raw, in: snapshot)
-    } catch {
-        fail("could not parse selector '\(raw)': \(error)")
-    }
+func uniqueDisplay(_ raw: String, in pairs: [ResolvedDisplay],
+                   managedOffline: Set<DisplayRecordID>) -> ResolvedDisplay {
+    let matches = resolveObservation(raw, in: pairs, managedOffline: managedOffline)
     guard !matches.isEmpty else { fail("no display matches '\(raw)'") }
     guard matches.count == 1 else {
         fail("'\(raw)' is ambiguous (\(matches.count) displays): \(matches.map(\.recordID.rawValue).joined(separator: ", "))")
     }
-    return matches[0]
+    let observation = matches[0]
+    return pairs.first { $0.observation.recordID == observation.recordID }!
 }
 
 // MARK: - Output
 
-struct ListOutput: Encodable {
-    struct Display: Encodable {
-        var id: String
-        var cgDisplayID: UInt32?
-        var active: Bool
-        var main: Bool
-        var displayClass: String
-        var transport: String
-        var mode: String?
-        var origin: String
-    }
-    var topologyGeneration: UInt64
-    var displays: [Display]
-}
-
-struct DiagnoseOutput: Encodable {
-    struct Probe: Encodable {
-        var provider: String
-        var experimental: Bool
-        var status: String
-        var risk: String
-        var reasons: [String]
-    }
-    var providers: [Probe]
+func name(for pair: ResolvedDisplay) -> String {
+    pair.record.alias ?? pair.record.fingerprint.modelName ?? pair.observation.recordID.rawValue
 }
 
 func modeString(_ observation: DisplayObservation) -> String? {
     observation.mode.map { "\($0.pixelWidth)x\($0.pixelHeight)@\(Int($0.refreshHz.rounded()))" }
 }
 
-/// Prints a ResultEnvelope as JSON (--json) or a compact human summary.
 func emitEnvelope(_ envelope: ResultEnvelope) {
     if asJSON { emit(envelope); return }
     print("\(envelope.status.rawValue) [\(envelope.transactionId)]")
@@ -149,25 +151,26 @@ func emitEnvelope(_ envelope: ResultEnvelope) {
 // MARK: - Commands
 
 func runList() async {
-    let snapshot = await observer.currentSnapshot()
-    let sorted = snapshot.observations.sorted { $0.recordID.rawValue < $1.recordID.rawValue }
+    let pairs = await resolveCurrentDisplays().sorted { $0.observation.recordID.rawValue < $1.observation.recordID.rawValue }
     if asJSON {
-        emit(ListOutput(
-            topologyGeneration: snapshot.generation.value,
-            displays: sorted.map {
-                .init(id: $0.recordID.rawValue, cgDisplayID: $0.cgDisplayID, active: $0.isActive,
-                      main: $0.isMain, displayClass: $0.displayClass.rawValue,
-                      transport: $0.transport.rawValue, mode: modeString($0),
-                      origin: "(\($0.origin.x),\($0.origin.y))")
-            }
-        ))
+        struct Row: Encodable {
+            var id: String; var recordId: String; var alias: String?; var tags: [String]
+            var cgDisplayID: UInt32?; var active: Bool; var main: Bool
+            var displayClass: String; var mode: String?
+        }
+        emit(pairs.map {
+            Row(id: $0.observation.recordID.rawValue, recordId: $0.record.id.rawValue, alias: $0.record.alias,
+                tags: $0.record.tags.sorted(), cgDisplayID: $0.observation.cgDisplayID,
+                active: $0.observation.isActive, main: $0.observation.isMain,
+                displayClass: $0.observation.displayClass.rawValue, mode: modeString($0.observation))
+        })
         return
     }
-    for observation in sorted {
-        let mark = observation.isActive ? "●" : "○"
-        let main = observation.isMain ? " [main]" : ""
-        let mode = modeString(observation) ?? "—"
-        print("\(mark) \(observation.recordID.rawValue)\(main) \(observation.displayClass.rawValue) \(mode)")
+    for pair in pairs {
+        let mark = pair.observation.isActive ? "●" : "○"
+        let main = pair.observation.isMain ? " [main]" : ""
+        let tags = pair.record.tags.isEmpty ? "" : " #\(pair.record.tags.sorted().joined(separator: " #"))"
+        print("\(mark) \(name(for: pair))\(main) \(modeString(pair.observation) ?? "—")\(tags)")
     }
 }
 
@@ -177,18 +180,37 @@ func runDiagnose() async {
         ("experimentalLifecycle", true, await experimental.probe(environment))
     ]
     if asJSON {
-        emit(DiagnoseOutput(providers: probes.map { id, experimental, probe in
-            .init(provider: id, experimental: experimental, status: probe.status.rawValue,
+        struct Probe: Encodable { var provider: String; var experimental: Bool; var status: String; var risk: String; var reasons: [String] }
+        emit(probes.map { id, experimental, probe in
+            Probe(provider: id, experimental: experimental, status: probe.status.rawValue,
                   risk: probe.risk.rawValue, reasons: probe.reasons.map(\.rawValue))
-        }))
+        })
         return
     }
     for (id, experimental, probe) in probes {
         let labsTag = experimental ? " [labs]" : ""
         let reasons = probe.reasons.map(\.rawValue)
-        let reasonsSuffix = reasons.isEmpty ? "" : " (\(reasons.joined(separator: ",")))"
-        print("\(id)\(labsTag): \(probe.status.rawValue) · risk=\(probe.risk.rawValue)\(reasonsSuffix)")
+        let suffix = reasons.isEmpty ? "" : " (\(reasons.joined(separator: ",")))"
+        print("\(id)\(labsTag): \(probe.status.rawValue) · risk=\(probe.risk.rawValue)\(suffix)")
     }
+}
+
+func runAlias() async {
+    guard let selectorArg, let valueArg else { fail("usage: opendisplay alias <selector> <name>") }
+    let pairs = await resolveCurrentDisplays()
+    let snapshot = await observer.currentSnapshot()
+    let target = uniqueDisplay(selectorArg, in: pairs, managedOffline: Set(snapshot.managedOffline.map(\.displayID)))
+    await registry.setAlias(valueArg, for: target.record.id)
+    print("aliased \(target.observation.recordID.rawValue) → \"\(valueArg)\"")
+}
+
+func runTag() async {
+    guard let selectorArg, let valueArg else { fail("usage: opendisplay tag <selector> <tag>") }
+    let pairs = await resolveCurrentDisplays()
+    let snapshot = await observer.currentSnapshot()
+    let target = uniqueDisplay(selectorArg, in: pairs, managedOffline: Set(snapshot.managedOffline.map(\.displayID)))
+    await registry.addTag(valueArg, to: target.record.id)
+    print("tagged \(name(for: target)) #\(valueArg)")
 }
 
 func runRecover() async {
@@ -202,15 +224,16 @@ func runRecover() async {
 
 func runDisconnect() async {
     guard let selectorArg else { fail("usage: opendisplay disconnect <selector> [--dry-run] [--json]") }
+    let pairs = await resolveCurrentDisplays()
     let snapshot = await observer.currentSnapshot()
-    let target = uniqueTarget(selectorArg, in: snapshot)
+    let target = uniqueDisplay(selectorArg, in: pairs, managedOffline: Set(snapshot.managedOffline.map(\.displayID)))
 
     if dryRun {
-        let outcome = await gateway.preflightDisconnect(target.recordID, identityConfidence: 1.0)
+        let outcome = await gateway.preflightDisconnect(target.observation.recordID, identityConfidence: 1.0)
         let surface = outcome.safeSurface?.rawValue ?? "none"
         switch outcome.decision {
         case .allowed:
-            print("dry-run: ALLOWED — would disconnect \(target.recordID.rawValue); safe surface = \(surface)")
+            print("dry-run: ALLOWED — would disconnect \(name(for: target)); safe surface = \(surface)")
         case .needsConfirmation:
             print("dry-run: NEEDS CONFIRMATION (\(outcome.reasons.joined(separator: ","))) — safe surface = \(surface)")
         case .blocked:
@@ -220,22 +243,20 @@ func runDisconnect() async {
     }
 
     let envelope = await gateway.disconnect(
-        target.recordID, options: DisconnectOptions(actor: .cli, identityConfidence: 1.0)
+        target.observation.recordID, options: DisconnectOptions(actor: .cli, identityConfidence: 1.0)
     )
     emitEnvelope(envelope)
 }
 
 func runReconnect() async {
     guard let selectorArg else { fail("usage: opendisplay reconnect <selector> [--json]") }
+    let pairs = await resolveCurrentDisplays()
     let snapshot = await observer.currentSnapshot()
-    let target = uniqueTarget(selectorArg, in: snapshot)
+    let target = uniqueDisplay(selectorArg, in: pairs, managedOffline: Set(snapshot.managedOffline.map(\.displayID)))
     do {
-        try await lifecycle.reconnect(target.recordID, deadline: Date().addingTimeInterval(15))
-        if asJSON {
-            emit(["status": "committed", "target": target.recordID.rawValue])
-        } else {
-            print("reconnected \(target.recordID.rawValue)")
-        }
+        try await lifecycle.reconnect(target.observation.recordID, deadline: Date().addingTimeInterval(15))
+        if asJSON { emit(["status": "committed", "target": target.observation.recordID.rawValue]) }
+        else { print("reconnected \(name(for: target))") }
     } catch {
         fail("reconnect failed: \(error)")
     }
@@ -246,6 +267,8 @@ func runReconnect() async {
 switch command {
 case "list": await runList()
 case "diagnose": await runDiagnose()
+case "alias": await runAlias()
+case "tag": await runTag()
 case "recover": await runRecover()
 case "disconnect": await runDisconnect()
 case "reconnect": await runReconnect()
@@ -256,12 +279,14 @@ case "help", "--help", "-h":
     USAGE:
       opendisplay list [--json]
       opendisplay diagnose [--json]
+      opendisplay alias <selector> <name>
+      opendisplay tag <selector> <tag>
       opendisplay disconnect <selector> [--dry-run] [--json]
       opendisplay reconnect <selector> [--json]
       opendisplay recover [--json]
 
-    SELECTORS: id:<recordID> · main · builtin · state:<active|managedOffline> · <cgDisplayID>
+    SELECTORS: id:<recordID> · alias:<name> · tag:<tag> · main · builtin · state:<active|managedOffline> · <cgDisplayID>
     """)
 default:
-    fail("unknown command '\(command)' (try: list, diagnose, disconnect, reconnect, recover, help)", code: 2)
+    fail("unknown command '\(command)' (try: list, diagnose, alias, tag, disconnect, reconnect, recover, help)", code: 2)
 }
