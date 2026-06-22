@@ -45,7 +45,7 @@ final class AppModel: ObservableObject {
         // the menu bar isn't. Falls back to the menu-bar item if the chord can't be registered.
         self.hotKey = GlobalHotKey.reconnectAll { [weak self] in
             #if DEBUG
-            FileHandle.standardError.write(Data("HOTKEY: Reconnect All triggered\n".utf8))
+            AppModel.debugMarkHotKeyFired()
             #endif
             Task { await self?.reconnectAll() }
         }
@@ -205,6 +205,21 @@ final class AppModel: ObservableObject {
 
     private static func err(_ message: String) {
         FileHandle.standardError.write(Data((message + "\n").utf8))
+    }
+
+    /// Records a global-hotkey activation to stderr AND a fixed file, so a manual keypress test can
+    /// be confirmed even when the app is launched via LaunchServices (which doesn't inherit stderr).
+    private static func debugMarkHotKeyFired() {
+        let message = Data("HOTKEY: Reconnect All triggered\n".utf8)
+        FileHandle.standardError.write(message)
+        let url = URL(fileURLWithPath: "/tmp/opendisplay_hotkey_fired.log")
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(message)
+            try? handle.close()
+        } else {
+            try? message.write(to: url)
+        }
     }
     #endif
 }
