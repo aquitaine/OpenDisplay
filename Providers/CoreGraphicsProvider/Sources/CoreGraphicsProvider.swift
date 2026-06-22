@@ -361,6 +361,18 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
         }
     }
 
+    /// Every display mode (un-deduped), including scaled-HiDPI and refresh-rate variants — drives the
+    /// refresh-rate picker and HiDPI toggle, which need to see all modes at a given point-resolution.
+    public nonisolated func allModes(for cgID: CGDirectDisplayID) -> [DisplayMode] {
+        let options = [kCGDisplayShowDuplicateLowResolutionModes: true] as CFDictionary
+        guard let cgModes = CGDisplayCopyAllDisplayModes(cgID, options) as? [CGDisplayMode] else { return [] }
+        return cgModes.map {
+            DisplayMode(pixelWidth: $0.pixelWidth, pixelHeight: $0.pixelHeight,
+                        pointWidth: $0.width, pointHeight: $0.height,
+                        refreshHz: $0.refreshRate, isHiDPI: $0.pixelWidth > $0.width)
+        }
+    }
+
     /// All selectable resolutions for a display, de-duplicated to one mode per point-size (HiDPI
     /// preferred, then highest refresh) and sorted by area ascending — drives the resolution slider.
     public nonisolated func availableModes(for cgID: CGDirectDisplayID) -> [DisplayMode] {

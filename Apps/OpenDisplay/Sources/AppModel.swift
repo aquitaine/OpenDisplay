@@ -529,6 +529,40 @@ final class AppModel: ObservableObject {
         await refresh()
     }
 
+    /// Refresh rates available at the display's current resolution (same point size + HiDPI), descending.
+    func refreshRates(for observation: DisplayObservation) -> [Double] {
+        guard let cgID = observation.cgDisplayID, let current = observation.mode else { return [] }
+        let rates = observer.allModes(for: cgID)
+            .filter { $0.pointWidth == current.pointWidth && $0.pointHeight == current.pointHeight && $0.isHiDPI == current.isHiDPI }
+            .map { ($0.refreshHz * 10).rounded() / 10 }
+        return Array(Set(rates)).sorted(by: >)
+    }
+
+    /// Switches the refresh rate at the current resolution.
+    func setRefresh(_ hz: Double, for observation: DisplayObservation) async {
+        guard var target = observation.mode else { return }
+        target.refreshHz = hz
+        await setMode(target, for: observation)
+    }
+
+    /// True when the current resolution offers both a HiDPI (Retina) and a non-HiDPI variant.
+    func hiDPIToggleAvailable(for observation: DisplayObservation) -> Bool {
+        guard let cgID = observation.cgDisplayID, let current = observation.mode else { return false }
+        let modes = observer.allModes(for: cgID)
+            .filter { $0.pointWidth == current.pointWidth && $0.pointHeight == current.pointHeight }
+        return modes.contains(where: { $0.isHiDPI }) && modes.contains(where: { !$0.isHiDPI })
+    }
+
+    /// Switches the current resolution between HiDPI (Retina) and non-HiDPI, keeping the best refresh.
+    func setHiDPI(_ on: Bool, for observation: DisplayObservation) async {
+        guard let cgID = observation.cgDisplayID, let current = observation.mode else { return }
+        let candidate = observer.allModes(for: cgID)
+            .filter { $0.pointWidth == current.pointWidth && $0.pointHeight == current.pointHeight && $0.isHiDPI == on }
+            .max(by: { $0.refreshHz < $1.refreshHz })
+        guard let candidate else { return }
+        await setMode(candidate, for: observation)
+    }
+
     /// Makes a display the main display by re-anchoring every origin so this one sits at (0,0) —
     /// Core Graphics treats the display at the origin as main.
     func setMain(for observation: DisplayObservation) async {

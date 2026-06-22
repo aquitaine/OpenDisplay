@@ -140,6 +140,7 @@ private struct DisplayCard: View {
     @State private var hardwareProbed = false
     @State private var showInfo = false
     @State private var showImageAdj = false
+    @State private var showDisplayMode = false
 
     private var isExpanded: Bool { expandedID == display.recordID }
 
@@ -255,6 +256,10 @@ private struct DisplayCard: View {
                     Task { await model.setMain(for: display) }
                 }
             }
+            MenuActionRow(title: "Display mode", systemImage: "rectangle.badge.checkmark", showChevron: false) {
+                withAnimation(.easeInOut(duration: 0.15)) { showDisplayMode.toggle() }
+            }
+            if showDisplayMode { displayModeControls }
             if !display.isMain {
                 HStack(spacing: 10) {
                     Image(systemName: "rectangle.on.rectangle.angled").font(.system(size: 14))
@@ -297,6 +302,41 @@ private struct DisplayCard: View {
             }
             if showInfo { displayInfoPanel }
         }
+    }
+
+    private var displayModeControls: some View {
+        let rates = model.refreshRates(for: display)
+        let hiDPIAvailable = model.hiDPIToggleAvailable(for: display)
+        return VStack(alignment: .leading, spacing: 5) {
+            if rates.count > 1, let current = display.mode {
+                HStack(spacing: 6) {
+                    Image(systemName: "timer").font(.caption).foregroundStyle(.tertiary).frame(width: 15)
+                    Text("Refresh").font(.caption2).foregroundStyle(.secondary)
+                    Spacer()
+                    Menu("\(Int(current.refreshHz.rounded())) Hz") {
+                        ForEach(rates, id: \.self) { hz in
+                            Button("\(Int(hz.rounded())) Hz") { Task { await model.setRefresh(hz, for: display) } }
+                        }
+                    }
+                    .menuStyle(.borderlessButton).fixedSize()
+                }
+            }
+            if hiDPIAvailable, let current = display.mode {
+                HStack(spacing: 6) {
+                    Image(systemName: "sparkles").font(.caption).foregroundStyle(.tertiary).frame(width: 15)
+                    Text("Retina (HiDPI)").font(.caption2).foregroundStyle(.secondary)
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { current.isHiDPI },
+                        set: { isOn in Task { await model.setHiDPI(isOn, for: display) } }))
+                        .labelsHidden().toggleStyle(.switch).controlSize(.mini)
+                }
+            }
+            if rates.count <= 1 && !hiDPIAvailable {
+                Text("Single mode at this resolution").font(.system(size: 9)).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.leading, 26).padding(.trailing, 8).padding(.vertical, 2)
     }
 
     private var imageAdjustments: some View {
