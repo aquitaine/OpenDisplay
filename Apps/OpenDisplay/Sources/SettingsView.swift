@@ -73,7 +73,9 @@ struct SettingsView: View {
             Divider()
 
             Text("Recovery").font(.title3)
-            LabeledContent("Global hotkey", value: model.reconnectAllHotkey)
+            LabeledContent("Persistence policy", value: model.settings.persistencePolicy.rawValue)
+            LabeledContent("Global hotkey",
+                           value: model.settings.reconnectAllHotkeyEnabled ? model.reconnectAllHotkey : "disabled")
             LabeledContent("Checkpoints", value: model.checkpointLocation)
             Button {
                 Task { await model.reconnectAll() }

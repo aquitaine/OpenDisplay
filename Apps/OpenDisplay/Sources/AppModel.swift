@@ -33,6 +33,7 @@ final class AppModel: ObservableObject {
     private let checkpoints: any CheckpointStoring
     private let lifecycle: any LifecycleProvider
     private var hotKey: GlobalHotKey?
+    let settings: OpenDisplaySettings
 
     init() {
         let observer = CoreGraphicsProvider()
@@ -46,17 +47,23 @@ final class AppModel: ObservableObject {
             lifecycleProvider: lifecycle,
             checkpoints: checkpoints
         )
-        // Always-available global Reconnect-All (recovery hierarchy step 3): reachable even when
-        // the menu bar isn't. Falls back to the menu-bar item if the chord can't be registered.
-        self.hotKey = GlobalHotKey.reconnectAll { [weak self] in
-            #if DEBUG
-            AppModel.debugMarkHotKeyFired()
-            #endif
-            Task { await self?.reconnectAll() }
+        self.settings = AppModel.loadSettings()
+        // Always-available global Reconnect-All (recovery hierarchy step 3): reachable even when the
+        // menu bar isn't. Skipped if disabled in settings; falls back to the menu-bar item if the
+        // chord can't be registered.
+        if settings.reconnectAllHotkeyEnabled {
+            self.hotKey = GlobalHotKey.reconnectAll { [weak self] in
+                #if DEBUG
+                AppModel.debugMarkHotKeyFired()
+                #endif
+                Task { await self?.reconnectAll() }
+            }
         }
         #if DEBUG
-        FileHandle.standardError.write(Data(
-            "Global Reconnect-All hotkey (Ctrl-Opt-Cmd-R) \(hotKey != nil ? "registered" : "FAILED")\n".utf8))
+        let hotkeyState = settings.reconnectAllHotkeyEnabled
+            ? (hotKey != nil ? "registered" : "FAILED")
+            : "disabled in settings"
+        FileHandle.standardError.write(Data("Global Reconnect-All hotkey (Ctrl-Opt-Cmd-R) \(hotkeyState)\n".utf8))
         #endif
         Task {
             await refresh()
@@ -77,6 +84,11 @@ final class AppModel: ObservableObject {
         #else
         return RoutedLifecycleProvider(primary: ExperimentalLifecycleProvider(), fallback: publicProvider)
         #endif
+    }
+
+    /// Loads persisted user settings, or defaults if the store can't be resolved/read.
+    private static func loadSettings() -> OpenDisplaySettings {
+        (try? SettingsStore.defaultDirectory()).map(SettingsStore.init(directory:))?.load() ?? .default
     }
 
     /// Persistent, rescue-readable checkpoints in Application Support, falling back to in-memory
