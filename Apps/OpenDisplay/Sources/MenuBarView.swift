@@ -136,8 +136,6 @@ private struct DisplayCard: View {
     @Binding var expandedID: DisplayRecordID?
     let onOpenSettings: () -> Void
     @State private var resIndex: Double = 0
-    @State private var brightness: Float = 0.5
-    @State private var brightnessSupported = false
 
     private var isExpanded: Bool { expandedID == display.recordID }
 
@@ -155,7 +153,7 @@ private struct DisplayCard: View {
         .background(Color.secondary.opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
         .onAppear {
             resIndex = currentIndex(in: modes)
-            syncBrightness()
+            Task { await model.refreshBrightness(for: display) }
         }
         .onChange(of: display.mode) { _, _ in resIndex = currentIndex(in: model.availableModes(for: display)) }
     }
@@ -195,12 +193,13 @@ private struct DisplayCard: View {
     }
 
     private var brightnessControl: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let level = model.brightness[display.recordID]
+        return VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("Brightness").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                if brightnessSupported {
-                    Text("\(Int((brightness * 100).rounded()))%").font(.caption).foregroundStyle(.secondary)
+                if let level {
+                    Text("\(Int((level * 100).rounded()))%").font(.caption).foregroundStyle(.secondary)
                 } else {
                     Text("Soon").font(.system(size: 10)).foregroundStyle(.secondary)
                         .padding(.horizontal, 5).padding(.vertical, 1)
@@ -209,22 +208,14 @@ private struct DisplayCard: View {
             }
             HStack(spacing: 7) {
                 Image(systemName: "sun.max").font(.caption).foregroundStyle(.tertiary)
-                if brightnessSupported {
-                    Slider(value: $brightness, in: 0...1)
-                        .onChange(of: brightness) { _, newValue in model.setBrightness(newValue, for: display) }
+                if level != nil {
+                    Slider(value: Binding(
+                        get: { model.brightness[display.recordID] ?? 0.5 },
+                        set: { model.setBrightness($0, for: display) }), in: 0...1)
                 } else {
                     Slider(value: .constant(0.5)).disabled(true).opacity(0.45)
                 }
             }
-        }
-    }
-
-    private func syncBrightness() {
-        if let value = model.brightness(for: display) {
-            brightness = value
-            brightnessSupported = true
-        } else {
-            brightnessSupported = false
         }
     }
 

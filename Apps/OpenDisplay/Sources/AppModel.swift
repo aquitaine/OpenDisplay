@@ -32,6 +32,9 @@ final class AppModel: ObservableObject {
     /// Displays the app has logically turned off. The OS drops them from the online list, so we track
     /// them here to keep an "off" card in the menu (with a way back on) and to feed the safety net.
     @Published private(set) var managedOffline: [OfflineDisplay] = []
+    /// Cached brightness (0...1) for displays we can control — built-in via DisplayServices, externals
+    /// via DDC. A missing key means "not controllable here", so the menu shows a disabled slider.
+    @Published private(set) var brightness: [DisplayRecordID: Float] = [:]
 
     /// A display OpenDisplay turned off — remembered so it stays visible and re-enableable.
     struct OfflineDisplay: Identifiable, Equatable {
@@ -54,6 +57,10 @@ final class AppModel: ObservableObject {
     private let lifecycle: any LifecycleProvider
     #if !PUBLIC_API_ONLY
     private let brightnessControl = DisplayServicesBrightnessProvider()
+    private var ddc: [DisplayRecordID: ExternalDisplayDDC] = [:]
+    private var brightnessMax: [DisplayRecordID: Int] = [:]
+    private var ddcTarget: [DisplayRecordID: Int] = [:]
+    private var ddcWriters: [DisplayRecordID: Task<Void, Never>] = [:]
     #endif
     private var hotKey: GlobalHotKey?
     private var registry: DisplayRegistry?
@@ -333,26 +340,61 @@ final class AppModel: ObservableObject {
         return observer.availableModes(for: cgID)
     }
 
-    /// Current hardware brightness (0...1) for a display, or nil if it can't be controlled here —
-    /// the built-in (and DisplayServices-recognized externals) return a value; other externals (which
-    /// need DDC/CI) return nil and the UI leaves the brightness slider disabled. Always nil in the
-    /// public-API-only build, which has no private brightness SPI.
-    func brightness(for observation: DisplayObservation) -> Float? {
+    /// Refreshes the cached brightness for a display — built-in via DisplayServices, external via DDC
+    /// (async, since DDC round-trips over I2C). A display that can't be read is left out of the cache,
+    /// so the UI shows a disabled "Soon" control. No-op in the public-API-only build.
+    func refreshBrightness(for observation: DisplayObservation) async {
         #if !PUBLIC_API_ONLY
-        guard let cgID = observation.cgDisplayID else { return nil }
-        return brightnessControl.brightness(for: cgID)
-        #else
-        return nil
+        guard let cgID = observation.cgDisplayID else { return }
+        if observation.displayClass == .builtIn {
+            if let value = brightnessControl.brightness(for: cgID) {
+                brightness[observation.recordID] = value
+            }
+        } else if let controller = ddcController(for: observation),
+                  let reading = await controller.read(.brightness), reading.max > 0 {
+            brightness[observation.recordID] = Float(reading.current) / Float(reading.max)
+            brightnessMax[observation.recordID] = reading.max
+        }
         #endif
     }
 
-    /// Sets a display's hardware brightness (0...1). No-op where brightness isn't controllable.
+    /// Sets a display's brightness (0...1), updating the cache optimistically. Built-in writes are
+    /// immediate; external (DDC) writes are coalesced so a fast slider drag never floods the I2C bus —
+    /// only the latest pending value is sent once the previous write completes.
     func setBrightness(_ value: Float, for observation: DisplayObservation) {
         #if !PUBLIC_API_ONLY
         guard let cgID = observation.cgDisplayID else { return }
-        _ = brightnessControl.setBrightness(value, for: cgID)
+        let id = observation.recordID
+        brightness[id] = value
+        if observation.displayClass == .builtIn {
+            _ = brightnessControl.setBrightness(value, for: cgID)
+        } else {
+            ddcTarget[id] = Int((value * Float(brightnessMax[id] ?? 100)).rounded())
+            if ddcWriters[id] == nil {
+                ddcWriters[id] = Task { [weak self] in await self?.drainDDCWrites(id, observation) }
+            }
+        }
         #endif
     }
+
+    #if !PUBLIC_API_ONLY
+    private func ddcController(for observation: DisplayObservation) -> ExternalDisplayDDC? {
+        if let existing = ddc[observation.recordID] { return existing }
+        guard let cgID = observation.cgDisplayID,
+              let controller = ExternalDisplayDDC(displayID: cgID) else { return nil }
+        ddc[observation.recordID] = controller
+        return controller
+    }
+
+    private func drainDDCWrites(_ id: DisplayRecordID, _ observation: DisplayObservation) async {
+        guard let controller = ddcController(for: observation) else { ddcWriters[id] = nil; return }
+        while let target = ddcTarget[id] {
+            ddcTarget[id] = nil
+            await controller.write(.brightness, target)
+        }
+        ddcWriters[id] = nil
+    }
+    #endif
 
     /// Applies a chosen resolution/mode, then re-reads the topology.
     func setMode(_ mode: DisplayMode, for observation: DisplayObservation) async {
