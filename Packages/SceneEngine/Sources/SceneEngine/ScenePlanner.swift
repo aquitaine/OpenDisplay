@@ -94,7 +94,7 @@ public struct ScenePlanner: Sendable {
                 continue
             }
             let observed = snapshot.observation(for: recordID)
-            operations.append(contentsOf: operations(for: member.desired, target: recordID, observed: observed))
+            operations.append(contentsOf: plannedOperations(for: member.desired, target: recordID, observed: observed))
         }
 
         operations = ordered(operations)
@@ -107,9 +107,9 @@ public struct ScenePlanner: Sendable {
         )
     }
 
-    private func operations(for desired: DesiredState,
-                           target: DisplayRecordID,
-                           observed: DisplayObservation?) -> [PlannedOperation] {
+    private func plannedOperations(for desired: DesiredState,
+                                   target: DisplayRecordID,
+                                   observed: DisplayObservation?) -> [PlannedOperation] {
         var ops: [PlannedOperation] = []
 
         if let connected = desired.connected {
