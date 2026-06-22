@@ -145,6 +145,14 @@ final class AppModel: ObservableObject {
         } catch {
             Self.err("DISCONNECT error: \(error)")
         }
+        // Proof of mechanism: with the private disable, the target drops out of the online list
+        // (or is inactive with NO mirror source). The public mirror fallback would instead leave it
+        // online with mirrorSourceID set. Captured during the offline window, before reconnect.
+        let post = await observer.currentSnapshot()
+        let summary = post.observations
+            .map { "\($0.recordID.rawValue) active=\($0.isActive) mirror=\($0.mirrorSourceID?.rawValue ?? "none")" }
+            .joined(separator: " | ")
+        Self.err("POST-DISCONNECT online=\(post.observations.count): \(summary)")
         // Restore unconditionally so the test is self-healing.
         try? await Task.sleep(nanoseconds: 3_000_000_000)
         do {
