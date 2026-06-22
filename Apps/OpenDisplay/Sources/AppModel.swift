@@ -23,6 +23,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var statusText = "Scanning…"
     @Published private(set) var busy = false
     @Published private(set) var diagnostics: [DisplayDiagnostic] = []
+    @Published private(set) var phase: DisplayLoadPhase = .scanning
+
+    /// True when any provider isn't fully supported — drives the menu-bar caution banner.
+    var isDegraded: Bool { diagnostics.contains { $0.status != "supported" } }
 
     private let observer: CoreGraphicsProvider
     private let coordinator: TopologyCoordinator
@@ -151,6 +155,8 @@ final class AppModel: ObservableObject {
         let snapshot = await observer.currentSnapshot()
         displays = snapshot.observations.sorted { $0.recordID.rawValue < $1.recordID.rawValue }
         statusText = "\(snapshot.activeDisplays.count) active · \(snapshot.observations.count) total"
+        phase = displays.isEmpty ? .empty : .ready
+        await refreshDiagnostics()
         if ProcessInfo.processInfo.environment["OPENDISPLAY_DUMP"] != nil {
             Self.dump(snapshot)
             let names = displays.map { "cgID=\($0.cgDisplayID ?? 0) → \"\(displayName(for: $0))\"" }
@@ -299,6 +305,13 @@ private struct RoutedLifecycleProvider: LifecycleProvider {
         )
         return await primary.probe(environment).status == .supported ? primary : fallback
     }
+}
+
+/// Coarse menu-bar load state (a subset of the designed states: scanning → ready/empty).
+enum DisplayLoadPhase: Equatable {
+    case scanning
+    case ready
+    case empty
 }
 
 /// A provider status row shown in Settings → Diagnostics & Recovery.
