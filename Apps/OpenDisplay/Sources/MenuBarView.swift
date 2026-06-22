@@ -139,6 +139,7 @@ private struct DisplayCard: View {
     @State private var showHardware = false
     @State private var hardwareProbed = false
     @State private var showInfo = false
+    @State private var showImageAdj = false
 
     private var isExpanded: Bool { expandedID == display.recordID }
 
@@ -275,6 +276,10 @@ private struct DisplayCard: View {
             }
             MenuActionRow(title: "Screen rotation", systemImage: "rotate.right", soon: true)
             MenuActionRow(title: "Colour mode", systemImage: "paintpalette", soon: true)
+            MenuActionRow(title: "Image adjustments", systemImage: "circle.righthalf.filled", showChevron: false) {
+                withAnimation(.easeInOut(duration: 0.15)) { showImageAdj.toggle() }
+            }
+            if showImageAdj { imageAdjustments }
             if display.displayClass != .builtIn {
                 MenuActionRow(title: "Hardware control", systemImage: "slider.horizontal.3", showChevron: false) {
                     withAnimation(.easeInOut(duration: 0.15)) { showHardware.toggle() }
@@ -292,6 +297,22 @@ private struct DisplayCard: View {
             }
             if showInfo { displayInfoPanel }
         }
+    }
+
+    private var imageAdjustments: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Image(systemName: "sun.min").font(.caption).foregroundStyle(.tertiary).frame(width: 15)
+                Text("Dimming").font(.caption2).foregroundStyle(.secondary).frame(width: 52, alignment: .leading)
+                Slider(value: Binding(
+                    get: { model.softwareDim[display.recordID] ?? 1 },
+                    set: { model.setSoftwareDim($0, for: display) }), in: 0.15...1)
+                Text("\(Int(((model.softwareDim[display.recordID] ?? 1) * 100).rounded()))%")
+                    .font(.caption2).foregroundStyle(.secondary).frame(width: 30, alignment: .trailing)
+            }
+            Text("Software gamma dim — works on any display").font(.system(size: 9)).foregroundStyle(.tertiary)
+        }
+        .padding(.leading, 26).padding(.trailing, 8).padding(.vertical, 2)
     }
 
     private var displayInfoPanel: some View {

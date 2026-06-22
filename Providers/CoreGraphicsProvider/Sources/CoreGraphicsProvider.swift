@@ -144,6 +144,20 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
         }
     }
 
+    /// Software-dims a display by scaling its gamma transfer ramp (`level` 0.15...1, where 1 = no
+    /// dim). Works on any display — including externals without DDC and below the hardware minimum.
+    /// Floored so the screen can never go fully black. Public Core Graphics (CGSetDisplayTransferByFormula).
+    public nonisolated func setGammaDim(_ level: Float, for displayID: CGDirectDisplayID) {
+        let scale = CGGammaValue(max(0.15, min(1, level)))
+        _ = CGSetDisplayTransferByFormula(displayID, 0, scale, 1, 0, scale, 1, 0, scale, 1)
+    }
+
+    /// Restores every display's gamma to its ColorSync calibration, clearing any software dim. Call
+    /// on quit so a dim never outlives the app.
+    public nonisolated static func restoreGamma() {
+        CGDisplayRestoreColorSyncSettings()
+    }
+
     /// Mirrors `displayID` onto the current main display (both show the same content), or stops
     /// mirroring when `enabled` is false. Reversible; public Core Graphics only.
     public func setMirroring(of displayID: CGDirectDisplayID, enabled: Bool) -> Bool {

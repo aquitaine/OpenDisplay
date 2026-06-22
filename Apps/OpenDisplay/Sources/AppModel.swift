@@ -62,6 +62,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var brightness: [DisplayRecordID: Float] = [:]
     /// Cached DDC hardware-control levels (0...1) keyed by display then VCP code (contrast/volume).
     @Published private(set) var ddcControlLevel: [DisplayRecordID: [UInt8: Float]] = [:]
+    /// Per-display software (gamma) dim level, 1 = no dim. Applies on top of hardware brightness and
+    /// works on any display, including DDC-less externals and below the hardware minimum.
+    @Published private(set) var softwareDim: [DisplayRecordID: Float] = [:]
 
     /// A display OpenDisplay turned off — remembered so it stays visible and re-enableable.
     struct OfflineDisplay: Identifiable, Equatable {
@@ -144,6 +147,11 @@ final class AppModel: ObservableObject {
             #endif
         }
         Task { await observeTopologyChanges() }
+        // A software gamma dim persists until logout; restore on quit so it never outlives the app.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+            CoreGraphicsProvider.restoreGamma()
+        }
     }
 
     /// Builds the lifecycle provider: experimental-primary + public-fallback in the full build,
@@ -297,6 +305,13 @@ final class AppModel: ObservableObject {
         guard let cgID = observation.cgDisplayID else { return }
         _ = await observer.setMirroring(of: cgID, enabled: on)
         await refresh()
+    }
+
+    /// Sets a display's software (gamma) dim, 0.15...1 where 1 = no dim. Works on any display.
+    func setSoftwareDim(_ level: Float, for observation: DisplayObservation) {
+        guard let cgID = observation.cgDisplayID else { return }
+        softwareDim[observation.recordID] = level
+        observer.setGammaDim(level, for: cgID)
     }
 
     /// Read-only display metadata (EDID-derived) for the menu's info panel.
