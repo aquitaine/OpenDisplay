@@ -1,4 +1,5 @@
 #if os(macOS)
+import AppKit
 import CoreGraphicsProvider
 import DisplayDomain
 import Foundation
@@ -83,12 +84,33 @@ final class AppModel: ObservableObject {
         try? await checkpoints.writeAtomic(checkpoint)
     }
 
+    /// A human-readable name for a display: the OS-provided localized name when the display is live
+    /// (e.g. "Built-in Retina Display", "S34J55x"), otherwise a class + resolution fallback, and
+    /// finally the stable record ID. Identity-resolved aliases land later (PRD D-009).
+    func displayName(for observation: DisplayObservation) -> String {
+        let screenNumberKey = NSDeviceDescriptionKey("NSScreenNumber")
+        if let cgID = observation.cgDisplayID,
+           let screen = NSScreen.screens.first(where: {
+               ($0.deviceDescription[screenNumberKey] as? NSNumber)?.uint32Value == cgID
+           }) {
+            return screen.localizedName
+        }
+        if observation.displayClass == .builtIn { return "Built-in Display" }
+        if let mode = observation.mode {
+            return "\(observation.displayClass.rawValue.capitalized) · \(mode.pixelWidth)×\(mode.pixelHeight)"
+        }
+        return observation.recordID.rawValue
+    }
+
     func refresh() async {
         let snapshot = await observer.currentSnapshot()
         displays = snapshot.observations.sorted { $0.recordID.rawValue < $1.recordID.rawValue }
         statusText = "\(snapshot.activeDisplays.count) active · \(snapshot.observations.count) total"
         if ProcessInfo.processInfo.environment["OPENDISPLAY_DUMP"] != nil {
             Self.dump(snapshot)
+            let names = displays.map { "cgID=\($0.cgDisplayID ?? 0) → \"\(displayName(for: $0))\"" }
+                .joined(separator: ", ")
+            FileHandle.standardError.write(Data("names: \(names)\n".utf8))
         }
     }
 

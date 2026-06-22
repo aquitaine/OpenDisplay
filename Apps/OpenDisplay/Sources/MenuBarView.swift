@@ -25,7 +25,7 @@ struct MenuBarView: View {
                     Circle()
                         .fill(display.isActive ? ODColor.connected : ODColor.caution)
                         .frame(width: 8, height: 8)
-                    Text(display.recordID.rawValue)
+                    Text(model.displayName(for: display))
                     if display.isMain {
                         Text("Main").font(.caption2).foregroundStyle(.secondary)
                     }
