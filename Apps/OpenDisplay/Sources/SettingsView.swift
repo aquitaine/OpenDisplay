@@ -1,4 +1,5 @@
 #if os(macOS)
+import DisplayDomain
 import OpenDisplayDesignSystem
 import SwiftUI
 
@@ -18,31 +19,47 @@ struct SettingsView: View {
         .frame(width: 520, height: 360)
     }
 
+    /// One display row with an editable alias. The placeholder shows the resolved name (OS name or
+    /// existing alias); the field edits the user alias, committed to the registry on submit.
+    private struct DisplayRow: View {
+        @EnvironmentObject private var model: AppModel
+        let display: DisplayObservation
+        @State private var alias = ""
+
+        var body: some View {
+            HStack(spacing: ODSpacing.sm) {
+                Circle()
+                    .fill(display.isActive ? ODColor.connected : ODColor.caution)
+                    .frame(width: 8, height: 8)
+                VStack(alignment: .leading, spacing: 2) {
+                    TextField(model.displayName(for: display), text: $alias)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 200)
+                        .onSubmit { Task { await model.setAlias(alias, for: display) } }
+                    if let mode = display.mode {
+                        Text("\(mode.pixelWidth)×\(mode.pixelHeight) @ \(Int(mode.refreshHz.rounded())) Hz")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if display.isMain {
+                    Text("Main").font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(.quaternary, in: Capsule())
+                }
+                Spacer()
+                Text(display.isActive ? "Active" : "Managed offline")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .onAppear { alias = model.records[display.recordID]?.alias ?? "" }
+        }
+    }
+
     private var displaysTab: some View {
         VStack(alignment: .leading, spacing: ODSpacing.sm) {
             Text("Connected Displays").font(.title3)
             Text(model.statusText).font(.callout).foregroundStyle(.secondary)
             Divider()
             ForEach(model.displays, id: \.recordID) { display in
-                HStack(spacing: ODSpacing.sm) {
-                    Circle()
-                        .fill(display.isActive ? ODColor.connected : ODColor.caution)
-                        .frame(width: 8, height: 8)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(model.displayName(for: display))
-                        if let mode = display.mode {
-                            Text("\(mode.pixelWidth)×\(mode.pixelHeight) @ \(Int(mode.refreshHz.rounded())) Hz")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    if display.isMain {
-                        Text("Main").font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(.quaternary, in: Capsule())
-                    }
-                    Spacer()
-                    Text(display.isActive ? "Active" : "Managed offline")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                DisplayRow(display: display)
             }
             Spacer()
         }

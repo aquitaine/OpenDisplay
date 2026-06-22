@@ -25,6 +25,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var diagnostics: [DisplayDiagnostic] = []
     @Published private(set) var phase: DisplayLoadPhase = .scanning
     @Published private(set) var recentActivity: [AuditEntry] = []
+    /// Identity records for the current displays, keyed by the observation's record id.
+    @Published private(set) var records: [DisplayRecordID: DisplayRecord] = [:]
 
     /// True when any provider isn't fully supported — drives the menu-bar caution banner.
     var isDegraded: Bool { diagnostics.contains { $0.status != "supported" } }
@@ -34,6 +36,7 @@ final class AppModel: ObservableObject {
     private let checkpoints: any CheckpointStoring
     private let lifecycle: any LifecycleProvider
     private var hotKey: GlobalHotKey?
+    private var registry: DisplayRegistry?
     let settings: OpenDisplaySettings
 
     init() {
@@ -67,6 +70,7 @@ final class AppModel: ObservableObject {
         FileHandle.standardError.write(Data("Global Reconnect-All hotkey (Ctrl-Opt-Cmd-R) \(hotkeyState)\n".utf8))
         #endif
         Task {
+            await setUpRegistry()
             await refresh()
             await writeBaselineCheckpoint()
             #if DEBUG
@@ -119,6 +123,9 @@ final class AppModel: ObservableObject {
     /// (e.g. "Built-in Retina Display", "S34J55x"), otherwise a class + resolution fallback, and
     /// finally the stable record ID. Identity-resolved aliases land later (PRD D-009).
     func displayName(for observation: DisplayObservation) -> String {
+        if let alias = records[observation.recordID]?.alias, !alias.isEmpty {
+            return alias
+        }
         let screenNumberKey = NSDeviceDescriptionKey("NSScreenNumber")
         if let cgID = observation.cgDisplayID,
            let screen = NSScreen.screens.first(where: {
@@ -170,11 +177,41 @@ final class AppModel: ObservableObject {
         recentActivity = await DiskAuditLog(directory: directory).recent(limit: 8).reversed()
     }
 
+    private func setUpRegistry() async {
+        let store: any RegistryStoring =
+            (try? DiskRegistryStore.defaultDirectory()).map { DiskRegistryStore(directory: $0) }
+            ?? InMemoryRegistryStore()
+        registry = await DisplayRegistry(store: store)
+    }
+
+    /// Resolves each live display's fingerprint into the registry (recognizing or minting), so the
+    /// menu bar and Settings can show user aliases and remember them across reconnects.
+    private func resolveRecords(_ snapshot: TopologySnapshot) async {
+        guard let registry else { return }
+        var resolved: [DisplayRecordID: DisplayRecord] = [:]
+        for observation in snapshot.observations {
+            guard let cgID = observation.cgDisplayID else { continue }
+            let fingerprint = observer.fingerprint(for: cgID)
+            resolved[observation.recordID] = await registry.resolve(
+                fingerprint: fingerprint, cgUUID: observation.cgUUID, displayClass: observation.displayClass
+            )
+        }
+        records = resolved
+    }
+
+    /// Sets the user alias for a display and re-resolves so the change shows immediately.
+    func setAlias(_ alias: String, for observation: DisplayObservation) async {
+        guard let registry, let record = records[observation.recordID] else { return }
+        await registry.setAlias(alias, for: record.id)
+        await refresh()
+    }
+
     func refresh() async {
         let snapshot = await observer.currentSnapshot()
         displays = snapshot.observations.sorted { $0.recordID.rawValue < $1.recordID.rawValue }
         statusText = "\(snapshot.activeDisplays.count) active · \(snapshot.observations.count) total"
         phase = displays.isEmpty ? .empty : .ready
+        await resolveRecords(snapshot)
         await refreshDiagnostics()
         if ProcessInfo.processInfo.environment["OPENDISPLAY_DUMP"] != nil {
             Self.dump(snapshot)
