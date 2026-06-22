@@ -24,16 +24,22 @@ final class AppModel: ObservableObject {
 
     private let observer: CoreGraphicsProvider
     private let coordinator: TopologyCoordinator
+    private let checkpoints: any CheckpointStoring
 
     init() {
         let observer = CoreGraphicsProvider()
         self.observer = observer
+        let checkpoints = AppModel.makeCheckpointStore()
+        self.checkpoints = checkpoints
         self.coordinator = TopologyCoordinator(
             observer: observer,
             lifecycleProvider: AppModel.makeLifecycleProvider(public: observer),
-            checkpoints: InMemoryCheckpointStore()
+            checkpoints: checkpoints
         )
-        Task { await refresh() }
+        Task {
+            await refresh()
+            await writeBaselineCheckpoint()
+        }
     }
 
     /// Builds the lifecycle provider: experimental-primary + public-fallback in the full build,
@@ -44,6 +50,29 @@ final class AppModel: ObservableObject {
         #else
         return RoutedLifecycleProvider(primary: ExperimentalLifecycleProvider(), fallback: publicProvider)
         #endif
+    }
+
+    /// Persistent, rescue-readable checkpoints in Application Support, falling back to in-memory
+    /// only if that directory can't be resolved.
+    private static func makeCheckpointStore() -> any CheckpointStoring {
+        if let directory = try? DiskCheckpointStore.defaultDirectory() {
+            return DiskCheckpointStore(directory: directory)
+        }
+        return InMemoryCheckpointStore()
+    }
+
+    /// Records the current arrangement as a last-known-safe baseline so the rescue utility has
+    /// something to restore even before any disconnect runs (PRD §9.4).
+    private func writeBaselineCheckpoint() async {
+        let snapshot = await observer.currentSnapshot()
+        let checkpoint = Checkpoint(
+            transactionID: TransactionID(rawValue: "txn_baseline"),
+            generation: snapshot.generation,
+            observations: snapshot.observations,
+            mainDisplayID: snapshot.observations.first(where: { $0.isMain })?.recordID,
+            managedOffline: snapshot.managedOffline
+        )
+        try? await checkpoints.writeAtomic(checkpoint)
     }
 
     func refresh() async {

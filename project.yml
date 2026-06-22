@@ -158,12 +158,11 @@ targets:
         INFOPLIST_FILE: Apps/OpenDisplayRescue/Resources/Info.plist
         CODE_SIGN_ENTITLEMENTS: Apps/OpenDisplayRescue/Resources/OpenDisplayRescue.entitlements
     dependencies:
+      - target: CoreGraphicsProvider
       - package: OpenDisplay
         product: DisplayDomain
       - package: OpenDisplay
         product: TopologyCore
-      - package: OpenDisplay
-        product: SimulatorProvider
 
   # --- Automation CLI ---
   opendisplay:
