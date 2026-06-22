@@ -10,6 +10,7 @@ import SwiftUI
 /// land as the topology surface fills in (M1–M2).
 struct MenuBarView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.openSettings) private var openSettingsAction
 
     var body: some View {
         VStack(alignment: .leading, spacing: ODSpacing.sm) {
@@ -85,15 +86,32 @@ struct MenuBarView: View {
             .tint(ODColor.accent)
             .disabled(model.busy)
 
-            Button("Display Settings…") { openSettings() }
+            Button("Display Settings…") { showSettings() }
             Button("Quit OpenDisplay") { NSApp.terminate(nil) }
         }
     }
 
-    /// Opens the Settings scene (selector name is stable on macOS 13+).
-    private func openSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+    /// Opens Settings and brings the window to the display the user is actually looking at. With
+    /// "Displays have separate Spaces" the SwiftUI Settings window opens on the main display's
+    /// Space, so clicking the menu bar on an extended display otherwise appears to do nothing.
+    private func showSettings() {
+        openSettingsAction()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            guard let window = NSApp.windows.first(where: {
+                $0.styleMask.contains(.titled) && $0.canBecomeMain
+            }) else { return }
+            window.collectionBehavior.insert(.moveToActiveSpace)
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            if let screen = NSScreen.screens.first(where: {
+                NSMouseInRect(NSEvent.mouseLocation, $0.frame, false)
+            }) {
+                let visible = screen.visibleFrame
+                let size = window.frame.size
+                window.setFrameOrigin(NSPoint(x: visible.midX - size.width / 2,
+                                              y: visible.midY - size.height / 2))
+            }
+        }
     }
 }
 #endif
