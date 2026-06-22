@@ -61,10 +61,25 @@ make lint        # SwiftLint, if installed
 ```
 
 `make` with no target runs the tests. See `make help` for all targets. (`./scripts/test.sh`
-also works if you prefer not to use make.)
+also works if you prefer not to use make.) There is **no remote CI** — local `make test` is
+the verification gate.
 
-The macOS app, providers, rescue utility, CLI, and SwiftUI design system require
-**Xcode 16+ on macOS** and are wired into the Xcode project (added in milestone M0). They
+### Building the macOS app (on a Mac)
+
+The app, rescue utility, CLI, design system, and providers are macOS targets generated from
+[`project.yml`](project.yml) with [XcodeGen](https://github.com/yonaskolb/XcodeGen). The
+generated `OpenDisplay.xcodeproj` is **not committed** — regenerate it locally:
+
+```sh
+make xcode                 # installs XcodeGen if needed, runs `xcodegen generate`
+open OpenDisplay.xcodeproj  # build & run the OpenDisplay menu-bar app
+# or headless:
+xcodebuild -scheme OpenDisplay build
+xcodebuild -scheme OpenDisplay-PublicAPIOnly build   # public-API-only flavor (NFR-010)
+```
+
+The app runs immediately against the in-memory `SimulatedDisplaySystem`; the real
+`CoreGraphicsProvider`/`ExperimentalLifecycleProvider` land in the M0 spike. All macOS targets
 depend on the cross-platform packages through the protocols in `ProviderInterfaces`.
 
 ## Documentation

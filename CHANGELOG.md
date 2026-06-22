@@ -16,15 +16,19 @@ change until 1.0.
   `TopologyCoordinator` with checkpoint/rollback.
 - `SceneEngine` desired-state planner with deterministic, idempotent, safely-ordered diffs.
 - Stable `AutomationSchema` JSON result envelope and selector grammar.
-- CI workflow running cross-platform domain tests on Linux and macOS.
 - Initial documentation (architecture, recovery model, decisions, PRD) and open-source
   governance (contributing, security, code of conduct, RFC and issue/PR templates).
 - macOS target scaffolding for the app, rescue utility, CLI, providers, and design system.
-- Local-first developer tooling: `Makefile` (`make bootstrap`/`build`/`test`/`lint`) and
-  `scripts/bootstrap-swift.sh` to install a Swift 6 toolchain on Ubuntu / verify Xcode on macOS.
+- Local-first developer tooling: `Makefile` (`make bootstrap`/`build`/`test`/`lint`/`xcode`)
+  and `scripts/bootstrap-swift.sh` to install a Swift 6 toolchain on Ubuntu / verify Xcode on macOS.
+- Xcode project scaffolding via XcodeGen (`project.yml`, `scripts/generate-xcodeproj.sh`,
+  `make xcode`): macOS app + public-API-only variant, rescue app, CLI, design-system and
+  provider frameworks, with compile-ready stubs wired to the `SimulatorProvider`.
 
 ### Changed
 - Hardened the disconnect transaction after review: `.blocked` preflights are non-bypassable
   (removed the `userOverride` escape hatch); the confirmation handler now defaults to *cancel*
   rather than silently approving `.needsConfirmation`; and verification now rolls back if any
   unrelated active display is unexpectedly lost, not only the target (PRD §9.2/§9.4).
+- Verification is now **local-first**: removed the remote GitHub Actions CI workflow; run
+  `make test` locally before pushing.

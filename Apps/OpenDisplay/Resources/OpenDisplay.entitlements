@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Display-lifecycle management needs access incompatible with the App Sandbox, so it is
+	  disabled here. The exact entitlement set (and whether any Labs feature needs more) is an
+	  open question pending technical/legal review — PRD Q-002. Distribution is Developer ID +
+	  hardened runtime (set via build settings), not the App Store (D-007).
+	-->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+</dict>
+</plist>

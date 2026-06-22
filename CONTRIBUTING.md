@@ -23,19 +23,23 @@ asserts you have the right to submit the work under the project license.
 ## Getting started
 
 ```sh
-./scripts/test.sh     # builds & tests the cross-platform packages (Swift 6, macOS or Linux)
+make bootstrap   # ensure a Swift 6 toolchain (installs on Ubuntu; checks Xcode on macOS)
+make test        # builds & runs the cross-platform test suite (Swift 6, macOS or Linux)
 ```
 
 The macOS app, providers, rescue utility, CLI, and SwiftUI design system require **Xcode
-16+**. New safety/state logic should land in the cross-platform packages with unit tests so
-it runs in CI without hardware.
+16+** (generate the project with `make xcode`). New safety/state logic should land in the
+cross-platform packages with unit tests so it can be verified locally with `make test`,
+no hardware needed.
 
 ## What every PR needs
 
 - A linked issue and a clear summary.
 - **Tests:** unit/state-machine tests for logic; for provider changes, hardware evidence
   (Mac model/chip, OS build, route, display) per the compatibility report form.
-- `swift test` green; SwiftLint clean; the **public-API-only** build stays green.
+- **Verify locally before pushing:** `make test` green; SwiftLint clean; the
+  **public-API-only** build still compiles (no experimental-provider deps). There is no
+  remote CI — local verification is the gate.
 - Docs updated when behavior changes.
 - The PR checklist completed (see the pull request template).
 

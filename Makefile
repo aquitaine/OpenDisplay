@@ -43,6 +43,10 @@ format: ## Run swift-format in place if available
 		swift-format format -i -r Packages Providers Apps Tools; \
 	else echo "swift-format not installed. Skipping."; fi
 
+.PHONY: xcode
+xcode: ## Generate OpenDisplay.xcodeproj (XcodeGen) for the macOS app/providers/CLI
+	@./scripts/generate-xcodeproj.sh
+
 .PHONY: clean
 clean: ## Remove build artifacts
 	$(SWIFT) package clean || true

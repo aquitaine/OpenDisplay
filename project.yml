@@ -1,0 +1,191 @@
+# XcodeGen spec for the macOS targets that SwiftPM can't produce (app bundles, CLI tool,
+# frameworks). Generate with `make xcode` (runs `xcodegen generate`). The generated
+# OpenDisplay.xcodeproj is NOT committed — regenerate it locally.
+#
+# The cross-platform core stays in Package.swift and is consumed here as a local SPM package,
+# so `make test` on Linux/macOS and the Xcode build share one source of truth. Every target
+# explicitly lists each SPM product it imports (SwiftPM does not expose transitive modules).
+name: OpenDisplay
+
+options:
+  bundleIdPrefix: dev.opendisplay
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: YES
+
+packages:
+  OpenDisplay:
+    path: .
+
+targets:
+  # --- Design system (framework) ---
+  OpenDisplayDesignSystem:
+    type: framework
+    platform: macOS
+    sources: [Packages/OpenDisplayDesignSystem/Sources]
+    dependencies:
+      - package: OpenDisplay
+        product: DisplayDomain
+
+  # --- Providers (frameworks). Each imports DisplayDomain + ProviderInterfaces. ---
+  CoreGraphicsProvider:
+    type: framework
+    platform: macOS
+    sources: [Providers/CoreGraphicsProvider/Sources]
+    dependencies: &providerDeps
+      - package: OpenDisplay
+        product: DisplayDomain
+      - package: OpenDisplay
+        product: ProviderInterfaces
+
+  DDCProvider:
+    type: framework
+    platform: macOS
+    sources: [Providers/DDCProvider/Sources]
+    dependencies: *providerDeps
+
+  NativeControlProvider:
+    type: framework
+    platform: macOS
+    sources: [Providers/NativeControlProvider/Sources]
+    dependencies: *providerDeps
+
+  CaptureProvider:
+    type: framework
+    platform: macOS
+    sources: [Providers/CaptureProvider/Sources]
+    dependencies: *providerDeps
+
+  ExperimentalLifecycleProvider:
+    type: framework
+    platform: macOS
+    sources: [Providers/ExperimentalLifecycleProvider/Sources]
+    dependencies: *providerDeps
+
+  VirtualDisplayProvider:
+    type: framework
+    platform: macOS
+    sources: [Providers/VirtualDisplayProvider/Sources]
+    dependencies: *providerDeps
+
+  # --- Menu-bar + settings app (full: Core + experimental providers) ---
+  OpenDisplay:
+    type: application
+    platform: macOS
+    sources: [Apps/OpenDisplay/Sources]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.opendisplay.app
+        INFOPLIST_FILE: Apps/OpenDisplay/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Apps/OpenDisplay/Resources/OpenDisplay.entitlements
+    dependencies:
+      - target: OpenDisplayDesignSystem
+      - target: CoreGraphicsProvider
+      - target: DDCProvider
+      - target: NativeControlProvider
+      - target: CaptureProvider
+      - target: ExperimentalLifecycleProvider
+      - target: VirtualDisplayProvider
+      - package: OpenDisplay
+        product: DisplayDomain
+      - package: OpenDisplay
+        product: TopologyCore
+      - package: OpenDisplay
+        product: SceneEngine
+      - package: OpenDisplay
+        product: AutomationSchema
+      - package: OpenDisplay
+        product: SimulatorProvider
+
+  # --- Public-API-only flavor: same sources, experimental/virtual providers excluded
+  #     (NFR-010 / D-008); defines PUBLIC_API_ONLY for conditional wiring. ---
+  OpenDisplay-PublicAPIOnly:
+    type: application
+    platform: macOS
+    sources: [Apps/OpenDisplay/Sources]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.opendisplay.app.publicapionly
+        INFOPLIST_FILE: Apps/OpenDisplay/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Apps/OpenDisplay/Resources/OpenDisplay.entitlements
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: PUBLIC_API_ONLY
+    dependencies:
+      - target: OpenDisplayDesignSystem
+      - target: CoreGraphicsProvider
+      - target: DDCProvider
+      - target: NativeControlProvider
+      - target: CaptureProvider
+      - package: OpenDisplay
+        product: DisplayDomain
+      - package: OpenDisplay
+        product: TopologyCore
+      - package: OpenDisplay
+        product: SceneEngine
+      - package: OpenDisplay
+        product: AutomationSchema
+      - package: OpenDisplay
+        product: SimulatorProvider
+
+  # --- Independent rescue utility ---
+  OpenDisplayRescue:
+    type: application
+    platform: macOS
+    sources: [Apps/OpenDisplayRescue/Sources]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.opendisplay.rescue
+        INFOPLIST_FILE: Apps/OpenDisplayRescue/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Apps/OpenDisplayRescue/Resources/OpenDisplayRescue.entitlements
+    dependencies:
+      - package: OpenDisplay
+        product: DisplayDomain
+      - package: OpenDisplay
+        product: TopologyCore
+      - package: OpenDisplay
+        product: SimulatorProvider
+
+  # --- Automation CLI ---
+  opendisplay:
+    type: tool
+    platform: macOS
+    sources: [Tools/opendisplay/Sources]
+    dependencies:
+      - package: OpenDisplay
+        product: DisplayDomain
+      - package: OpenDisplay
+        product: AutomationSchema
+      - package: OpenDisplay
+        product: TopologyCore
+      - package: OpenDisplay
+        product: SimulatorProvider
+
+schemes:
+  OpenDisplay:
+    build:
+      targets: { OpenDisplay: all }
+    run:
+      config: Debug
+  OpenDisplay-PublicAPIOnly:
+    build:
+      targets: { OpenDisplay-PublicAPIOnly: all }
+    run:
+      config: Debug
+  OpenDisplayRescue:
+    build:
+      targets: { OpenDisplayRescue: all }
+    run:
+      config: Debug
+  opendisplay:
+    build:
+      targets: { opendisplay: all }
+    run:
+      config: Debug

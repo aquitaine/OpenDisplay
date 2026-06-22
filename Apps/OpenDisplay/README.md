@@ -11,4 +11,6 @@ command gateway — it never mutates domain state directly.
 
 Milestone: **M1 (menu-bar + connect/disconnect) → M3 (Core 1.0)**.
 
-> Stub — Xcode app target added on macOS. Logic lives in the cross-platform packages.
+> Scaffolded: run `make xcode` to generate the project, then build/run the `OpenDisplay`
+> scheme. The app currently runs against `SimulatedDisplaySystem`; real providers land in M0.
+> Sources: `Apps/OpenDisplay/Sources` (`OpenDisplayApp`, `AppModel`, `MenuBarView`, `SettingsView`).

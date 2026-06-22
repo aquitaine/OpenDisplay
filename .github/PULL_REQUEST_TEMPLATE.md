@@ -19,8 +19,8 @@ Closes #
 - [ ] **Clean-room:** this contribution is my original work, or its source and license are
       identified. No proprietary code, copied UI, copy, or assets.
 - [ ] Tests added/updated (unit/state-machine for logic; hardware evidence for provider changes).
-- [ ] `./scripts/test.sh` passes (`swift test` green) and SwiftLint is clean.
-- [ ] The **public-API-only** build remains green (NFR-010).
+- [ ] `make test` passes locally (`swift test` green) and SwiftLint is clean. (No remote CI — local verification is the gate.)
+- [ ] The **public-API-only** build still compiles with experimental providers absent (NFR-010).
 - [ ] Docs updated where behavior changed.
 - [ ] Commits are signed off (`git commit -s`, DCO).
 
