@@ -6,10 +6,10 @@ import Foundation
 import ProviderInterfaces
 import TopologyCore
 
-// OpenDisplay automation CLI (PRD §12). Runs real commands through the same platform-independent
-// core the UI uses: live Core Graphics enumeration, the safety-checked TopologyCoordinator, and a
-// stable JSON result envelope. `disconnect --dry-run` previews the SafetyEngine decision without
-// touching hardware. Selector grammar per DisplaySelector (PRD §12.3).
+// OpenDisplay automation CLI (PRD §12). Every mutating command routes through CommandGateway — the
+// same audited, safety-checked path the menu bar and App Intents use — and returns the stable JSON
+// ResultEnvelope. `disconnect --dry-run` previews the SafetyEngine decision without touching
+// hardware. Selector grammar per DisplaySelector (PRD §12.3).
 
 // MARK: - Argument parsing
 
@@ -42,23 +42,22 @@ func emit<T: Encodable>(_ value: T) {
     print(text)
 }
 
-// MARK: - Composition root (real providers, shared on-disk checkpoints)
+// MARK: - Composition root (real providers, shared on-disk checkpoints + audit, one gateway)
 
 let observer = CoreGraphicsProvider()
 let environment = ProviderEnvironment(
     osBuild: ProcessInfo.processInfo.operatingSystemVersionString,
     isAppleSilicon: isAppleSilicon, transport: .unknown, displayClass: .unknown
 )
-// Prefer the experimental SkyLight provider when its probe reports supported; otherwise the public
-// mirroring provider. Probe status is a value comparison, so it is safe across framework images.
 let experimental = ExperimentalLifecycleProvider()
 let lifecycle: any LifecycleProvider =
     await experimental.probe(environment).status == .supported ? experimental : observer
 let checkpoints: any CheckpointStoring =
     (try? DiskCheckpointStore.defaultDirectory()).map(DiskCheckpointStore.init(directory:))
     ?? InMemoryCheckpointStore()
-let coordinator = TopologyCoordinator(
-    observer: observer, lifecycleProvider: lifecycle, checkpoints: checkpoints
+let auditLog = (try? DiskAuditLog.defaultDirectory()).map(DiskAuditLog.init(directory:))
+let gateway = CommandGateway(
+    observer: observer, lifecycleProvider: lifecycle, checkpoints: checkpoints, auditLog: auditLog
 )
 
 // MARK: - Selector resolution (against live observations)
@@ -69,7 +68,6 @@ func reachability(of observation: DisplayObservation, managedOffline: Set<Displa
 }
 
 func resolve(_ raw: String, in snapshot: TopologySnapshot) throws -> [DisplayObservation] {
-    // Convenience: a bare integer matches a CGDirectDisplayID.
     if let cgID = UInt32(raw) {
         return snapshot.observations.filter { $0.cgDisplayID == cgID }
     }
@@ -85,13 +83,25 @@ func resolve(_ raw: String, in snapshot: TopologySnapshot) throws -> [DisplayObs
     case .state(let reach):
         return snapshot.observations.filter { reachability(of: $0, managedOffline: offline) == reach }
     case .role, .alias, .tag, .name, .fingerprint, .topology:
-        // alias/tag/name/fingerprint/topology resolution needs the persisted DisplayRegistry,
-        // which isn't wired into the CLI yet; id/main/builtin/state/<cgID> are supported today.
         fail("selector '\(raw)' isn't resolvable yet from live observations (use id:/main/builtin/state:/<cgID>)")
     }
 }
 
-// MARK: - Output payloads
+func uniqueTarget(_ raw: String, in snapshot: TopologySnapshot) -> DisplayObservation {
+    let matches: [DisplayObservation]
+    do {
+        matches = try resolve(raw, in: snapshot)
+    } catch {
+        fail("could not parse selector '\(raw)': \(error)")
+    }
+    guard !matches.isEmpty else { fail("no display matches '\(raw)'") }
+    guard matches.count == 1 else {
+        fail("'\(raw)' is ambiguous (\(matches.count) displays): \(matches.map(\.recordID.rawValue).joined(separator: ", "))")
+    }
+    return matches[0]
+}
+
+// MARK: - Output
 
 struct ListOutput: Encodable {
     struct Display: Encodable {
@@ -121,6 +131,19 @@ struct DiagnoseOutput: Encodable {
 
 func modeString(_ observation: DisplayObservation) -> String? {
     observation.mode.map { "\($0.pixelWidth)x\($0.pixelHeight)@\(Int($0.refreshHz.rounded()))" }
+}
+
+/// Prints a ResultEnvelope as JSON (--json) or a compact human summary.
+func emitEnvelope(_ envelope: ResultEnvelope) {
+    if asJSON { emit(envelope); return }
+    print("\(envelope.status.rawValue) [\(envelope.transactionId)]")
+    for target in envelope.targets {
+        let ops = target.operations.map { "\($0.field)=\($0.verification.rawValue)" }.joined(separator: ", ")
+        print("  \(target.displayId): \(ops)")
+    }
+    for error in envelope.errors {
+        print("  ! \(error.code): \(error.message)")
+    }
 }
 
 // MARK: - Commands
@@ -162,48 +185,19 @@ func runDiagnose() async {
     }
     for (id, experimental, probe) in probes {
         let labsTag = experimental ? " [labs]" : ""
-        let reasons = probe.reasons.isEmpty ? "" : " (\(probe.reasons.map(\.rawValue).joined(separator: ",")))"
-        print("\(id)\(labsTag): \(probe.status.rawValue) · risk=\(probe.risk.rawValue)\(reasons)")
+        let reasons = probe.reasons.map(\.rawValue)
+        let reasonsSuffix = reasons.isEmpty ? "" : " (\(reasons.joined(separator: ",")))"
+        print("\(id)\(labsTag): \(probe.status.rawValue) · risk=\(probe.risk.rawValue)\(reasonsSuffix)")
     }
-}
-
-func envelope(_ status: ResultEnvelope.Status, txID: String, generation: UInt64,
-              targets: [ResultEnvelope.TargetResult] = [], errors: [ResultEnvelope.ErrorInfo] = []) -> ResultEnvelope {
-    ResultEnvelope(transactionId: txID, status: status, actor: .cli, requestedAt: Date(),
-                   topologyGeneration: generation, targets: targets, errors: errors)
 }
 
 func runRecover() async {
-    let results = await coordinator.reconnectAll()
-    let snapshot = await observer.currentSnapshot()
-    let targets = results.sorted { $0.key.rawValue < $1.key.rawValue }.map { id, ok in
-        ResultEnvelope.TargetResult(
-            displayId: id.rawValue, alias: nil, identityConfidence: 1.0,
-            operations: [.init(field: "reconnect", verification: ok ? .verified : .readBackUnavailable)]
-        )
+    let envelope = await gateway.reconnectAll(actor: .cli)
+    if !asJSON && envelope.targets.isEmpty {
+        print("recover: nothing to reconnect")
+        return
     }
-    let status: ResultEnvelope.Status = results.isEmpty ? .noOp : (results.values.allSatisfy { $0 } ? .committed : .partial)
-    if asJSON {
-        emit(envelope(status, txID: "txn_recover", generation: snapshot.generation.value, targets: targets))
-    } else {
-        print(results.isEmpty ? "recover: nothing to reconnect" :
-            results.sorted { $0.key.rawValue < $1.key.rawValue }
-                .map { "\($0.value ? "reconnected" : "failed     ") \($0.key.rawValue)" }.joined(separator: "\n"))
-    }
-}
-
-func uniqueTarget(_ raw: String, in snapshot: TopologySnapshot) -> DisplayObservation {
-    let matches: [DisplayObservation]
-    do {
-        matches = try resolve(raw, in: snapshot)
-    } catch {
-        fail("could not parse selector '\(raw)': \(error)")
-    }
-    guard !matches.isEmpty else { fail("no display matches '\(raw)'") }
-    guard matches.count == 1 else {
-        fail("'\(raw)' is ambiguous (\(matches.count) displays): \(matches.map(\.recordID.rawValue).joined(separator: ", "))")
-    }
-    return matches[0]
+    emitEnvelope(envelope)
 }
 
 func runDisconnect() async {
@@ -212,31 +206,23 @@ func runDisconnect() async {
     let target = uniqueTarget(selectorArg, in: snapshot)
 
     if dryRun {
-        // Preview only — never touches hardware. Reports the SafetyEngine preflight decision.
-        let decision = SafetyEngine().preflightDisconnect(
-            target: target.recordID, snapshot: snapshot, identityConfidence: 1.0,
-            recoveryServiceHealthy: true, isFirstUseForRoute: false
-        )
-        switch decision {
-        case .allowed(let surface):
-            print("dry-run: ALLOWED — would disconnect \(target.recordID.rawValue); safe surface = \(surface.rawValue)")
-        case .needsConfirmation(let surface, let reasons):
-            print("dry-run: NEEDS CONFIRMATION (\(reasons.map(\.rawValue).joined(separator: ","))) — safe surface = \(surface.rawValue)")
-        case .blocked(let reasons):
-            print("dry-run: BLOCKED (\(reasons.map(\.rawValue).joined(separator: ",")))")
+        let outcome = await gateway.preflightDisconnect(target.recordID, identityConfidence: 1.0)
+        let surface = outcome.safeSurface?.rawValue ?? "none"
+        switch outcome.decision {
+        case .allowed:
+            print("dry-run: ALLOWED — would disconnect \(target.recordID.rawValue); safe surface = \(surface)")
+        case .needsConfirmation:
+            print("dry-run: NEEDS CONFIRMATION (\(outcome.reasons.joined(separator: ","))) — safe surface = \(surface)")
+        case .blocked:
+            print("dry-run: BLOCKED (\(outcome.reasons.joined(separator: ",")))")
         }
         return
     }
 
-    do {
-        let result = try await coordinator.disconnect(
-            target.recordID, options: DisconnectOptions(actor: .cli, identityConfidence: 1.0)
-        )
-        let after = await observer.currentSnapshot()
-        report(result, target: target.recordID, generation: after.generation.value)
-    } catch {
-        fail("disconnect failed: \(error)")
-    }
+    let envelope = await gateway.disconnect(
+        target.recordID, options: DisconnectOptions(actor: .cli, identityConfidence: 1.0)
+    )
+    emitEnvelope(envelope)
 }
 
 func runReconnect() async {
@@ -245,44 +231,13 @@ func runReconnect() async {
     let target = uniqueTarget(selectorArg, in: snapshot)
     do {
         try await lifecycle.reconnect(target.recordID, deadline: Date().addingTimeInterval(15))
-        let after = await observer.currentSnapshot()
         if asJSON {
-            emit(envelope(.committed, txID: "txn_reconnect", generation: after.generation.value,
-                          targets: [.init(displayId: target.recordID.rawValue, alias: nil, identityConfidence: 1.0,
-                                          operations: [.init(field: "reconnect", verification: .verified)])]))
+            emit(["status": "committed", "target": target.recordID.rawValue])
         } else {
             print("reconnected \(target.recordID.rawValue)")
         }
     } catch {
         fail("reconnect failed: \(error)")
-    }
-}
-
-func report(_ result: LifecycleResult, target: DisplayRecordID, generation: UInt64) {
-    let status: ResultEnvelope.Status
-    var errors: [ResultEnvelope.ErrorInfo] = []
-    switch result {
-    case .committed: status = .committed
-    case .noOp: status = .noOp
-    case .rolledBack(_, let recovered):
-        status = .rolledBack
-        errors = [.init(code: "rolledBack", message: "recovered=\(recovered)")]
-    case .blocked(let reasons):
-        status = .failed
-        errors = reasons.map { .init(code: "blocked", message: "\($0)") }
-    case .cancelled:
-        status = .noOp
-    case .failed(_, let failure):
-        status = .failed
-        errors = [.init(code: "providerFailure", message: "\(failure)")]
-    }
-    if asJSON {
-        emit(envelope(status, txID: "txn_disconnect", generation: generation,
-                      targets: [.init(displayId: target.rawValue, alias: nil, identityConfidence: 1.0,
-                                      operations: [.init(field: "disconnect", verification: status == .committed ? .verified : .notApplicable)])],
-                      errors: errors))
-    } else {
-        print("disconnect \(target.rawValue): \(status.rawValue)\(errors.isEmpty ? "" : " (\(errors.map(\.message).joined(separator: "; ")))")")
     }
 }
 
