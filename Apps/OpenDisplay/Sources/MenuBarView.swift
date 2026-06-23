@@ -143,6 +143,7 @@ private struct DisplayCard: View {
     @State private var showDisplayMode = false
     @State private var showInput = false
     @State private var showColour = false
+    @State private var showProfile = false
     @State private var showRotation = false
 
     private var isExpanded: Bool { expandedID == display.recordID }
@@ -295,6 +296,11 @@ private struct DisplayCard: View {
             } else {
                 MenuActionRow(title: "Colour mode", systemImage: "paintpalette", soon: true)
             }
+            MenuActionRow(title: "Colour profile", systemImage: "swatchpalette", showChevron: false) {
+                withAnimation(.easeInOut(duration: 0.15)) { showProfile.toggle() }
+                if showProfile { model.refreshColorProfile(for: display) }
+            }
+            if showProfile { profileControls }
             MenuActionRow(title: "Image adjustments", systemImage: "circle.righthalf.filled", showChevron: false) {
                 withAnimation(.easeInOut(duration: 0.15)) { showImageAdj.toggle() }
             }
@@ -402,6 +408,36 @@ private struct DisplayCard: View {
                 Text("Open Display Settings…").font(.caption2).foregroundStyle(ODColor.accent)
             }
             .buttonStyle(.plain)
+        }
+        .padding(.leading, 26).padding(.trailing, 8).padding(.vertical, 2)
+    }
+
+    private var profileControls: some View {
+        let current = model.colorProfileName[display.recordID]
+        let controllable = model.isColorProfileControllable(display)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "swatchpalette").font(.caption).foregroundStyle(.tertiary).frame(width: 15)
+                Text("Profile").font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                if controllable {
+                    Menu(current ?? "—") {
+                        Button("Factory Default") { model.resetColorProfile(for: display) }
+                        Divider()
+                        ForEach(model.availableColorProfiles()) { profile in
+                            Button(profile.name) { model.setColorProfile(profile, for: display) }
+                        }
+                    }
+                    .menuStyle(.borderlessButton).fixedSize()
+                } else {
+                    Text("Unavailable").font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+            if controllable, let current {
+                Text(current).font(.system(size: 9)).foregroundStyle(.tertiary).lineLimit(1)
+            } else if !controllable {
+                Text("This display has no ColorSync device.").font(.system(size: 9)).foregroundStyle(.tertiary)
+            }
         }
         .padding(.leading, 26).padding(.trailing, 8).padding(.vertical, 2)
     }

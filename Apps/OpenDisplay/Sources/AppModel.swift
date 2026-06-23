@@ -35,6 +35,19 @@ enum HardwareControl: CaseIterable, Hashable {
     }
 }
 
+/// Build/runtime feature flags for the experimental control paths (PRD: risky behaviour is opt-in).
+enum FeatureFlags {
+    /// ICC profile writing uses *public* ColorSync, so it's App-Store-safe and on by default.
+    static var iccProfileWrite: Bool { true }
+    #if !PUBLIC_API_ONLY
+    /// Rotation writing uses a *private* API — OFF unless explicitly enabled, and the whole path is
+    /// compiled out of the public-API-only / App Store build.
+    static var experimentalRotation: Bool { UserDefaults.standard.bool(forKey: "OpenDisplayExperimentalRotation") }
+    #else
+    static var experimentalRotation: Bool { false }
+    #endif
+}
+
 /// The app's composition root. It wires the platform-independent `TopologyCoordinator`
 /// (Packages/TopologyCore) to a display system and exposes an observable snapshot for the UI.
 ///
@@ -72,6 +85,8 @@ final class AppModel: ObservableObject {
     /// Current DDC colour-preset code (VCP 0x14) per external display, and the max code it reports.
     @Published private(set) var colorPreset: [DisplayRecordID: Int] = [:]
     @Published private(set) var colorPresetMax: [DisplayRecordID: Int] = [:]
+    /// Current ICC colour-profile name per display (ColorSync), for the Colour profile row.
+    @Published private(set) var colorProfileName: [DisplayRecordID: String] = [:]
 
     /// Standard DDC colour-preset labels (VCP 0x14). Monitors vary; the menu offers 1...max and labels
     /// the standard ones, falling back to "Preset N".
@@ -577,6 +592,35 @@ final class AppModel: ObservableObject {
             _ = await controller.write(.inputSource, code)
         }
         #endif
+    }
+
+    /// Current ICC profile name per display (custom override or factory default).
+    func refreshColorProfile(for observation: DisplayObservation) {
+        guard let cgID = observation.cgDisplayID else { return }
+        colorProfileName[observation.recordID] = ColorProfileService.currentProfileName(for: cgID)
+    }
+
+    /// Installed display ICC profiles the user can assign.
+    func availableColorProfiles() -> [ICCProfile] { ColorProfileService.availableProfiles() }
+
+    /// Whether this display exposes a ColorSync device that profile writes can target.
+    func isColorProfileControllable(_ observation: DisplayObservation) -> Bool {
+        guard let cgID = observation.cgDisplayID else { return false }
+        return ColorProfileService.isControllable(cgID)
+    }
+
+    /// Assigns an ICC profile to a display (validated), then refreshes the cached name.
+    func setColorProfile(_ profile: ICCProfile, for observation: DisplayObservation) {
+        guard FeatureFlags.iccProfileWrite, let cgID = observation.cgDisplayID else { return }
+        _ = ColorProfileService.setProfile(profile, for: cgID)
+        colorProfileName[observation.recordID] = ColorProfileService.currentProfileName(for: cgID)
+    }
+
+    /// Reverts a display to its factory ICC profile.
+    func resetColorProfile(for observation: DisplayObservation) {
+        guard FeatureFlags.iccProfileWrite, let cgID = observation.cgDisplayID else { return }
+        _ = ColorProfileService.resetToFactory(for: cgID)
+        colorProfileName[observation.recordID] = ColorProfileService.currentProfileName(for: cgID)
     }
 
     /// Current rotation of a display in degrees (0/90/180/270), read via public Core Graphics.
