@@ -141,6 +141,7 @@ private struct DisplayCard: View {
     @State private var showInfo = false
     @State private var showImageAdj = false
     @State private var showDisplayMode = false
+    @State private var showInput = false
 
     private var isExpanded: Bool { expandedID == display.recordID }
 
@@ -293,6 +294,11 @@ private struct DisplayCard: View {
                     }
                 }
                 if showHardware { hardwareControls }
+                MenuActionRow(title: "Input source", systemImage: "cable.connector", showChevron: false) {
+                    withAnimation(.easeInOut(duration: 0.15)) { showInput.toggle() }
+                    if showInput { Task { await model.refreshInputSource(for: display) } }
+                }
+                if showInput { inputControls }
             } else {
                 MenuActionRow(title: "Hardware control", systemImage: "slider.horizontal.3", soon: true)
             }
@@ -364,6 +370,26 @@ private struct DisplayCard: View {
                     Text(item.value).font(.caption2).lineLimit(1)
                 }
             }
+        }
+        .padding(.leading, 26).padding(.trailing, 8).padding(.vertical, 2)
+    }
+
+    private var inputControls: some View {
+        let current = model.inputSource[display.recordID]
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Image(systemName: "cable.connector").font(.caption).foregroundStyle(.tertiary).frame(width: 15)
+                Text("Switch to").font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Menu(current.map { model.inputName($0) } ?? "—") {
+                    ForEach(AppModel.standardInputs, id: \.code) { input in
+                        Button(input.name) { model.setInputSource(input.code, for: display) }
+                    }
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+            }
+            Text(current == nil ? "Reading…" : "Current code: \(current!). Switching is reversible.")
+                .font(.system(size: 9)).foregroundStyle(.tertiary)
         }
         .padding(.leading, 26).padding(.trailing, 8).padding(.vertical, 2)
     }

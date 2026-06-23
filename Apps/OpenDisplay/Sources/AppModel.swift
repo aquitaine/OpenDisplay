@@ -65,6 +65,20 @@ final class AppModel: ObservableObject {
     /// Per-display software (gamma) dim level, 1 = no dim. Applies on top of hardware brightness and
     /// works on any display, including DDC-less externals and below the hardware minimum.
     @Published private(set) var softwareDim: [DisplayRecordID: Float] = [:]
+    /// Current DDC input-source code (VCP 0x60) per external display.
+    @Published private(set) var inputSource: [DisplayRecordID: Int] = [:]
+
+    /// Common DDC/CI input-source codes (VCP 0x60). Monitors mostly follow these; the menu shows the
+    /// live code too, so a non-standard panel is still legible.
+    static let standardInputs: [(name: String, code: Int)] = [
+        ("HDMI 1", 0x11), ("HDMI 2", 0x12), ("DisplayPort 1", 0x0F), ("DisplayPort 2", 0x10),
+        ("USB-C", 0x1B), ("DVI", 0x03), ("VGA", 0x01),
+    ]
+
+    /// Human label for a DDC input code, or "Code N" if non-standard.
+    func inputName(_ code: Int) -> String {
+        Self.standardInputs.first { $0.code == code }?.name ?? "Code \(code)"
+    }
 
     /// A display OpenDisplay turned off — remembered so it stays visible and re-enableable.
     struct OfflineDisplay: Identifiable, Equatable {
@@ -521,6 +535,27 @@ final class AppModel: ObservableObject {
         ddcControlWriter[key] = nil
     }
     #endif
+
+    /// Reads the external display's current DDC input source into the cache.
+    func refreshInputSource(for observation: DisplayObservation) async {
+        #if !PUBLIC_API_ONLY
+        guard observation.displayClass != .builtIn, let controller = ddcController(for: observation),
+              let reading = await controller.read(.inputSource) else { return }
+        inputSource[observation.recordID] = reading.current
+        #endif
+    }
+
+    /// Switches the external display's DDC input source to `code` (e.g. HDMI/DisplayPort). User-driven.
+    func setInputSource(_ code: Int, for observation: DisplayObservation) {
+        #if !PUBLIC_API_ONLY
+        guard observation.displayClass != .builtIn else { return }
+        inputSource[observation.recordID] = code
+        Task { [weak self] in
+            guard let controller = await self?.ddcController(for: observation) else { return }
+            _ = await controller.write(.inputSource, code)
+        }
+        #endif
+    }
 
     /// Applies a chosen resolution/mode, then re-reads the topology.
     func setMode(_ mode: DisplayMode, for observation: DisplayObservation) async {
