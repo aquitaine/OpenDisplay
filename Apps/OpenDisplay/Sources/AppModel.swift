@@ -75,6 +75,11 @@ final class AppModel: ObservableObject {
     /// Cached brightness (0...1) for displays we can control — built-in via DisplayServices, externals
     /// via DDC. A missing key means "not controllable here", so the menu shows a disabled slider.
     @Published private(set) var brightness: [DisplayRecordID: Float] = [:]
+    /// Opt-in toggle for the experimental (private-API) rotation writer; persisted to UserDefaults.
+    /// Drives the rotation backend live and stays false in the public-API-only build.
+    @Published var experimentalRotationEnabled: Bool = FeatureFlags.experimentalRotation {
+        didSet { UserDefaults.standard.set(experimentalRotationEnabled, forKey: "OpenDisplayExperimentalRotation") }
+    }
     /// Cached DDC hardware-control levels (0...1) keyed by display then VCP code (contrast/volume).
     @Published private(set) var ddcControlLevel: [DisplayRecordID: [UInt8: Float]] = [:]
     /// Per-display software (gamma) dim level, 1 = no dim. Applies on top of hardware brightness and
@@ -128,14 +133,15 @@ final class AppModel: ObservableObject {
     private let coordinator: TopologyCoordinator
     private let checkpoints: any CheckpointStoring
     private let lifecycle: any LifecycleProvider
-    /// Read-only by default; the experimental SkyLight rotator is selected only when its opt-in flag
-    /// is set (and is compiled out of the public-API-only build entirely).
-    private let rotationBackend: any RotationBackend = {
+    /// Read-only by default; the experimental SkyLight rotator is selected only when the opt-in toggle
+    /// is on (and is compiled out of the public-API-only build entirely). Computed so toggling the
+    /// setting takes effect immediately, without a relaunch.
+    private var rotationBackend: any RotationBackend {
         #if !PUBLIC_API_ONLY
-        if FeatureFlags.experimentalRotation { return ExperimentalRotationBackend() }
+        if experimentalRotationEnabled { return ExperimentalRotationBackend() }
         #endif
         return ReadOnlyRotationBackend()
-    }()
+    }
     #if !PUBLIC_API_ONLY
     private let brightnessControl = DisplayServicesBrightnessProvider()
     private var ddc: [DisplayRecordID: ExternalDisplayDDC] = [:]

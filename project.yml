@@ -232,6 +232,8 @@ targets:
         LD_RUNPATH_SEARCH_PATHS:
           - "@executable_path"
           - "@loader_path"
+          # Bundled at OpenDisplay.app/Contents/Helpers, the embedded frameworks are in ../Frameworks.
+          - "@executable_path/../Frameworks"
     dependencies:
       - target: DisplayDomain
         embed: false

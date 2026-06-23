@@ -79,13 +79,15 @@ struct ExperimentalRotationBackend: RotationBackend {
         }
     }
 
-    /// The `opendisplay` helper: built beside the app in dev, shipped under Contents/Helpers in a bundle.
+    /// Locate the `opendisplay` helper: shipped under Contents/Helpers in a release bundle, or sitting
+    /// beside the .app in the build-products dir during development.
     private static var helperURL: URL? {
-        guard let dir = Bundle.main.executableURL?.deletingLastPathComponent() else { return nil }
-        let candidates = [
-            dir.appendingPathComponent("opendisplay"),
-            dir.deletingLastPathComponent().appendingPathComponent("Helpers/opendisplay"),
-        ]
+        var candidates: [URL] = []
+        if let macOS = Bundle.main.executableURL?.deletingLastPathComponent() {
+            candidates.append(macOS.deletingLastPathComponent().appendingPathComponent("Helpers/opendisplay"))
+        }
+        // Dev: the CLI is a sibling of OpenDisplay.app in the build-products directory.
+        candidates.append(Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("opendisplay"))
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
 }

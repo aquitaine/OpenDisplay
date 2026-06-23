@@ -51,3 +51,6 @@ xcode: ## Generate OpenDisplay.xcodeproj (XcodeGen) for the macOS app/providers/
 clean: ## Remove build artifacts
 	$(SWIFT) package clean || true
 	rm -rf .build
+
+bundle-helper: ## Bundle the opendisplay CLI into OpenDisplay.app/Contents/Helpers (for experimental rotation)
+	@./scripts/bundle-helper.sh $(CONFIG)

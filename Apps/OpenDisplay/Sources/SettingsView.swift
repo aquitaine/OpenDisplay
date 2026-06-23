@@ -233,6 +233,20 @@ struct SettingsView: View {
                 }
                 .disabled(model.busy)
 
+                #if !PUBLIC_API_ONLY
+                Divider()
+
+                Text("Labs").font(.title3)
+                Toggle(isOn: $model.experimentalRotationEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Experimental display rotation")
+                        Text("Rotate displays via a private API. Off by default; runs through a safety-checked, "
+                             + "isolated helper with automatic rollback, and is excluded from App Store builds.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                #endif
+
                 Divider()
 
                 Text("Recent Activity").font(.title3)
