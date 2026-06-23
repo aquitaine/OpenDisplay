@@ -97,17 +97,45 @@ public actor DisplayRegistry {
         displayClass: DisplayClass = .unknown,
         now: Date = Date()
     ) async -> DisplayRecord {
+        let record = resolveLocked(fingerprint: fingerprint, cgUUID: cgUUID, displayClass: displayClass, now: now)
+        await persist()
+        return record
+    }
+
+    /// Batched resolve: recognizes/mints every input against in-memory state, then persists EXACTLY
+    /// once. Per-input behaviour (serial/cgUUID/scored/mint, recency + fingerprint merge) is identical
+    /// to `resolve`; only the disk write is coalesced, so N-displays-per-refresh no longer means N
+    /// full-registry JSON writes.
+    public func resolveAll(
+        _ inputs: [(fingerprint: DisplayFingerprint, cgUUID: String?, displayClass: DisplayClass)],
+        now: Date = Date()
+    ) async -> [DisplayRecord] {
+        let records = inputs.map {
+            resolveLocked(fingerprint: $0.fingerprint, cgUUID: $0.cgUUID, displayClass: $0.displayClass, now: now)
+        }
+        if !inputs.isEmpty { await persist() }
+        return records
+    }
+
+    /// The recognize-or-mint logic plus the recency/fingerprint mutation, WITHOUT persisting. Callers
+    /// persist once after applying every mutation they intend to (see `resolve` / `resolveAll`).
+    private func resolveLocked(
+        fingerprint: DisplayFingerprint,
+        cgUUID: String?,
+        displayClass: DisplayClass,
+        now: Date
+    ) -> DisplayRecord {
         // 1. Exact serial match.
         if let serial = fingerprint.serialNumber ?? fingerprint.serialHash,
            let match = state.records.first(where: {
                ($0.fingerprint.serialNumber ?? $0.fingerprint.serialHash) == serial
            }) {
-            return await touch(match.id, fingerprint: fingerprint, cgUUID: cgUUID, now: now)
+            return touchLocked(match.id, fingerprint: fingerprint, cgUUID: cgUUID, now: now)
         }
 
         // 2. Same-Mac CG-UUID fast path.
         if let cgUUID, let id = state.cgUUIDIndex[cgUUID], record(for: id) != nil {
-            return await touch(id, fingerprint: fingerprint, cgUUID: cgUUID, now: now)
+            return touchLocked(id, fingerprint: fingerprint, cgUUID: cgUUID, now: now)
         }
 
         // 3. Best scored fingerprint match.
@@ -115,7 +143,7 @@ public actor DisplayRegistry {
             .map { ($0, IdentityScorer.score(observed: fingerprint, candidate: $0).score) }
             .max { $0.1 < $1.1 }
         if let best, best.1 >= recognitionThreshold {
-            return await touch(best.0.id, fingerprint: fingerprint, cgUUID: cgUUID, now: now)
+            return touchLocked(best.0.id, fingerprint: fingerprint, cgUUID: cgUUID, now: now)
         }
 
         // 4. Mint a new record.
@@ -124,7 +152,6 @@ public actor DisplayRegistry {
         )
         state.records.append(record)
         if let cgUUID { state.cgUUIDIndex[cgUUID] = record.id }
-        await persist()
         return record
     }
 
@@ -157,14 +184,13 @@ public actor DisplayRegistry {
         await persist()
     }
 
-    private func touch(
+    private func touchLocked(
         _ id: DisplayRecordID, fingerprint: DisplayFingerprint, cgUUID: String?, now: Date
-    ) async -> DisplayRecord {
+    ) -> DisplayRecord {
         let index = state.records.firstIndex { $0.id == id }!
         state.records[index].fingerprint = Self.merged(state.records[index].fingerprint, fingerprint)
         state.records[index].lastSeen = now
         if let cgUUID { state.cgUUIDIndex[cgUUID] = id }
-        await persist()
         return state.records[index]
     }
 

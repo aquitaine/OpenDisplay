@@ -8,7 +8,7 @@ import Foundation
 /// panel and any external the framework recognizes (many do not — those need DDC/CI, a separate
 /// provider). Undocumented SPI, so — like the SkyLight lifecycle path — it lives in this experimental
 /// module and is excluded from the public-API-only build (NFR-010 / D-008).
-public struct DisplayServicesBrightnessProvider {
+public struct DisplayServicesBrightnessProvider: Sendable {
     /// `(CGDirectDisplayID, float *out) -> 0 on success`.
     private typealias GetFn = @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32
     /// `(CGDirectDisplayID, float value 0...1) -> 0 on success`.

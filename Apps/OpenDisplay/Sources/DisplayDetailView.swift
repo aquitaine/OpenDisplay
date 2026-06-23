@@ -27,7 +27,7 @@ struct DisplayDetailView: View {
         }
         .task(id: display.recordID) {
             await model.refreshBrightness(for: display)
-            model.refreshColorProfile(for: display)
+            await model.refreshColorProfile(for: display)
             if display.displayClass != .builtIn {
                 await model.refreshHardwareControls(for: display)
                 await model.refreshColorPreset(for: display)
@@ -42,16 +42,44 @@ struct DisplayDetailView: View {
 private struct ResolutionCard: View {
     @EnvironmentObject private var model: AppModel
     let display: DisplayObservation
+    /// Full mode list, enumerated once per display (off the per-render path) and filtered locally for
+    /// the resolution list, refresh rates, and HiDPI toggle — avoids three CGDisplayCopyAllDisplayModes
+    /// enumerations on every body evaluation. Filters use the *current* display.mode, so they stay
+    /// correct across resolution switches without re-enumerating.
+    @State private var allModes: [DisplayMode] = []
 
+    /// One entry per point-size (HiDPI preferred, then highest refresh), area-sorted.
     private var resolutions: [DisplayMode] {
-        var seen = Set<String>()
-        return model.availableModes(for: display).filter {
-            seen.insert("\($0.pointWidth)x\($0.pointHeight)").inserted
+        var best: [String: DisplayMode] = [:]
+        for mode in allModes {
+            let key = "\(mode.pointWidth)x\(mode.pointHeight)"
+            let rank = (mode.isHiDPI ? 1 : 0, mode.refreshHz)
+            if let existing = best[key] {
+                if rank > (existing.isHiDPI ? 1 : 0, existing.refreshHz) { best[key] = mode }
+            } else {
+                best[key] = mode
+            }
         }
+        return best.values.sorted { $0.pointWidth * $0.pointHeight < $1.pointWidth * $1.pointHeight }
+    }
+
+    /// Refresh rates at the current resolution (same point-size + HiDPI), descending.
+    private var rates: [Double] {
+        guard let current = display.mode else { return [] }
+        let hz = allModes
+            .filter { $0.pointWidth == current.pointWidth && $0.pointHeight == current.pointHeight && $0.isHiDPI == current.isHiDPI }
+            .map { ($0.refreshHz * 10).rounded() / 10 }
+        return Array(Set(hz)).sorted(by: >)
+    }
+
+    /// True when the current resolution offers both a HiDPI and a non-HiDPI variant.
+    private var hiDPIAvailable: Bool {
+        guard let current = display.mode else { return false }
+        let here = allModes.filter { $0.pointWidth == current.pointWidth && $0.pointHeight == current.pointHeight }
+        return here.contains(where: { $0.isHiDPI }) && here.contains(where: { !$0.isHiDPI })
     }
 
     var body: some View {
-        let rates = model.refreshRates(for: display)
         ODCard(title: "Resolution",
                footnote: "Scaled resolutions use HiDPI (Retina) rendering for crisper text.") {
             ODRow("Resolution") {
@@ -80,7 +108,7 @@ private struct ResolutionCard: View {
                     .menuStyle(.borderlessButton).fixedSize()
                 }
             }
-            if model.hiDPIToggleAvailable(for: display), let mode = display.mode {
+            if hiDPIAvailable, let mode = display.mode {
                 ODDivider()
                 ODRow("Retina (HiDPI)") {
                     Toggle("", isOn: Binding(get: { mode.isHiDPI },
@@ -89,6 +117,7 @@ private struct ResolutionCard: View {
                 }
             }
         }
+        .task(id: display.recordID) { allModes = model.allModes(for: display) }
     }
 }
 
@@ -129,12 +158,12 @@ private struct AppearanceCard: View {
             }
             ODDivider()
             ODRow("Colour profile") {
-                if model.isColorProfileControllable(display) {
+                if model.colorProfileControllable[display.recordID] == true {
                     Menu(model.colorProfileName[display.recordID] ?? "—") {
-                        Button("Factory Default") { model.resetColorProfile(for: display) }
+                        Button("Factory Default") { Task { await model.resetColorProfile(for: display) } }
                         Divider()
-                        ForEach(model.availableColorProfiles()) { profile in
-                            Button(profile.name) { model.setColorProfile(profile, for: display) }
+                        ForEach(model.availableColorProfilesCache) { profile in
+                            Button(profile.name) { Task { await model.setColorProfile(profile, for: display) } }
                         }
                     }
                     .menuStyle(.borderlessButton).fixedSize()

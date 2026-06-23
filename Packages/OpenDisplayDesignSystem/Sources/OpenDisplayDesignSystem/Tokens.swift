@@ -64,18 +64,4 @@ public enum ODRadius {
     public static let popover: CGFloat = 12
     public static let window: CGFloat = 16
 }
-
-/// Type scale (`reference/ds/tokens/typography.css`), resolving to the Apple system font. Metrics
-/// use tabular figures so changing numbers don't shift layout.
-public enum ODFont {
-    public static let caption = Font.system(size: 10)                       // dense menu-bar labels
-    public static let subhead = Font.system(size: 11)                       // secondary row detail
-    public static let footnote = Font.system(size: 11)
-    public static let callout = Font.system(size: 12)
-    public static let body = Font.system(size: 13)                          // default control + row label
-    public static let headline = Font.system(size: 13, weight: .semibold)   // emphasized body
-    public static let title3 = Font.system(size: 15, weight: .semibold)
-    public static let title2 = Font.system(size: 17, weight: .semibold)     // group / section title
-    public static let largeTitle = Font.system(size: 26, weight: .bold)
-}
 #endif

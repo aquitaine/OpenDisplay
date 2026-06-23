@@ -40,17 +40,32 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
 
     private var generation: TopologyGeneration = .initial
     private var lastSignature = ""
+    /// Opaque retained-self token while the OS reconfiguration callback is registered; nil otherwise.
+    /// Retaining self keeps the instance alive across an in-flight callback, so a topology event can
+    /// never resurrect a deallocating provider.
+    private var observingToken: UnsafeMutableRawPointer?
 
-    public init() {
-        let opaque = Unmanaged.passUnretained(self).toOpaque()
-        CGDisplayRegisterReconfigurationCallback(openDisplayReconfigurationCallback, opaque)
+    public init() {}
+    // No deinit: startObserving() takes a +1 self-retain, so a registered observer is kept alive by the
+    // OS for the app's lifetime and can never deinit mid-callback (closing the resurrection race); an
+    // un-registered provider (intents/CLI/rescue) holds no callback, so there is nothing to clean up.
+
+    /// Begins delivering reconfiguration events to `changes()` subscribers. Idempotent. Only the
+    /// long-lived observer that consumes the stream registers; short-lived providers (App Intents,
+    /// CLI, one-shot rescue) never call this, so their teardown can't race the global callback table.
+    public func startObserving() {
+        guard observingToken == nil else { return }
+        let token = Unmanaged.passRetained(self).toOpaque()
+        observingToken = token
+        CGDisplayRegisterReconfigurationCallback(openDisplayReconfigurationCallback, token)
     }
 
-    deinit {
-        CGDisplayRemoveReconfigurationCallback(
-            openDisplayReconfigurationCallback,
-            Unmanaged.passUnretained(self).toOpaque()
-        )
+    /// Stops delivering events and balances the self-retain taken in `startObserving`.
+    public func stopObserving() {
+        guard let token = observingToken else { return }
+        CGDisplayRemoveReconfigurationCallback(openDisplayReconfigurationCallback, token)
+        observingToken = nil
+        Unmanaged<CoreGraphicsProvider>.fromOpaque(token).release()
     }
 
     // MARK: TopologyObserving
@@ -178,6 +193,7 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
     /// enable/disable). The app subscribes to refresh promptly and to enforce the
     /// always-one-active-display invariant when a display is physically unplugged.
     public func changes() -> AsyncStream<Void> {
+        startObserving()  // lazily register the OS callback on the first (long-lived) subscriber
         let (stream, continuation) = AsyncStream<Void>.makeStream()
         let id = UUID()
         changeContinuations[id] = continuation

@@ -70,12 +70,19 @@ struct ExperimentalRotationBackend: RotationBackend {
         process.arguments = ["_rotate-exp", String(displayID), String(degrees)]
         process.environment = ProcessInfo.processInfo.environment
             .merging(["OPENDISPLAY_EXPERIMENTAL_ROTATION": "1"]) { _, new in new }
-        let pipe = Pipe(); process.standardError = pipe; process.standardOutput = pipe
-        try process.run()
-        process.waitUntilExit()
-        if process.terminationStatus != 0 {
-            let message = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw RotationError.verificationFailed
+        // Await the helper's verified exit WITHOUT blocking a cooperative-pool thread for the whole
+        // rotation (spawn + private rotation + verification + possible rollback): resume from the
+        // termination handler instead of Process.waitUntilExit(). The helper does its own angle/display
+        // validation, post-rotation verification, and rollback; success gates strictly on exit code 0.
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            process.terminationHandler = { proc in
+                if proc.terminationStatus == 0 {
+                    continuation.resume()
+                } else {
+                    continuation.resume(throwing: RotationError.verificationFailed)
+                }
+            }
+            do { try process.run() } catch { continuation.resume(throwing: error) }
         }
     }
 

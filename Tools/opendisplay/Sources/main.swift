@@ -77,16 +77,15 @@ typealias ResolvedDisplay = (observation: DisplayObservation, record: DisplayRec
 /// registry learns the current displays and we can map observations <-> records for this run.
 func resolveCurrentDisplays() async -> [ResolvedDisplay] {
     let snapshot = await observer.currentSnapshot()
-    var pairs: [ResolvedDisplay] = []
-    for observation in snapshot.observations {
-        guard let cgID = observation.cgDisplayID else { continue }
-        let fingerprint = observer.fingerprint(for: cgID)
-        let record = await registry.resolve(
-            fingerprint: fingerprint, cgUUID: observation.cgUUID, displayClass: observation.displayClass
-        )
-        pairs.append((observation, record))
+    let observations = snapshot.observations.filter { $0.cgDisplayID != nil }
+    let inputs = observations.compactMap {
+        obs -> (fingerprint: DisplayFingerprint, cgUUID: String?, displayClass: DisplayClass)? in
+        guard let cgID = obs.cgDisplayID else { return nil }
+        return (observer.fingerprint(for: cgID), obs.cgUUID, obs.displayClass)
     }
-    return pairs
+    // One batched resolve → exactly one registry write for the whole display set this run.
+    let records = await registry.resolveAll(inputs)
+    return Array(zip(observations, records))
 }
 
 // MARK: - Selector resolution

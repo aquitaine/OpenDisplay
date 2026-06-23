@@ -112,20 +112,6 @@ targets:
       - target: DisplayDomain
       - target: ProviderInterfaces
 
-  DDCProvider:
-    type: framework
-    platform: macOS
-    settings: *frameworkSettings
-    sources: [Providers/DDCProvider/Sources]
-    dependencies: *providerDeps
-
-  NativeControlProvider:
-    type: framework
-    platform: macOS
-    settings: *frameworkSettings
-    sources: [Providers/NativeControlProvider/Sources]
-    dependencies: *providerDeps
-
   CaptureProvider:
     type: framework
     platform: macOS
@@ -163,8 +149,6 @@ targets:
     dependencies:
       - target: OpenDisplayDesignSystem
       - target: CoreGraphicsProvider
-      - target: DDCProvider
-      - target: NativeControlProvider
       - target: CaptureProvider
       - target: ExperimentalLifecycleProvider
       - target: VirtualDisplayProvider
@@ -190,8 +174,6 @@ targets:
     dependencies:
       - target: OpenDisplayDesignSystem
       - target: CoreGraphicsProvider
-      - target: DDCProvider
-      - target: NativeControlProvider
       - target: CaptureProvider
       - target: DisplayDomain
       - target: ProviderInterfaces

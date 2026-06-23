@@ -28,29 +28,13 @@ public enum PresentationOverlay: String, Hashable, Sendable, Codable {
 
 /// What we know about the monitor's own power state. A DDC/network sleep command's outcome may
 /// be unverifiable — that is its own state, never reported as success (PRD LIF-019, §9.2).
+/// NOTE: part of the documented lifecycle vocabulary but not yet wired to a consumer.
 public enum MonitorPower: String, Hashable, Sendable, Codable {
     case unknown
     case awake
     case sleepRequested
     case asleepVerified
     case powerFailed
-}
-
-/// The full lifecycle state of a display = reachability × overlay × monitor power.
-public struct LifecycleState: Hashable, Sendable, Codable {
-    public var reachability: Reachability
-    public var overlay: PresentationOverlay
-    public var monitorPower: MonitorPower
-
-    public init(
-        reachability: Reachability,
-        overlay: PresentationOverlay = .visible,
-        monitorPower: MonitorPower = .unknown
-    ) {
-        self.reachability = reachability
-        self.overlay = overlay
-        self.monitorPower = monitorPower
-    }
 }
 
 extension Reachability {

@@ -114,6 +114,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var colorPresetMax: [DisplayRecordID: Int] = [:]
     /// Current ICC colour-profile name per display (ColorSync), for the Colour profile row.
     @Published private(set) var colorProfileName: [DisplayRecordID: String] = [:]
+    /// Whether each display exposes a ColorSync device that profile writes can target — resolved
+    /// off-main and cached so the menu never probes ColorSync during a view body.
+    @Published private(set) var colorProfileControllable: [DisplayRecordID: Bool] = [:]
+    /// Installed ICC profiles the user can assign, enumerated off-main once and cached (the scan reads
+    /// and parses every installed profile from disk, so it must never run during a SwiftUI body).
+    @Published private(set) var availableColorProfilesCache: [ICCProfile] = []
 
     /// Standard DDC colour-preset labels (VCP 0x14). Monitors vary; the menu offers 1...max and labels
     /// the standard ones, falling back to "Preset N".
@@ -167,6 +173,9 @@ final class AppModel: ObservableObject {
     #if !PUBLIC_API_ONLY
     private let brightnessControl = DisplayServicesBrightnessProvider()
     private var ddc: [DisplayRecordID: ExternalDisplayDDC] = [:]
+    /// In-flight DDC-controller constructions, so concurrent first-uses of one display await the same
+    /// build instead of each spinning up (and binding) a duplicate IOAVService.
+    private var ddcBuilders: [DisplayRecordID: Task<ExternalDisplayDDC?, Never>] = [:]
     private var brightnessMax: [DisplayRecordID: Int] = [:]
     private var ddcTarget: [DisplayRecordID: Int] = [:]
     private var ddcWriters: [DisplayRecordID: Task<Void, Never>] = [:]
@@ -174,6 +183,10 @@ final class AppModel: ObservableObject {
     private var ddcControlMax: [DDCControlKey: Int] = [:]
     private var ddcControlTarget: [DDCControlKey: Int] = [:]
     private var ddcControlWriter: [DDCControlKey: Task<Void, Never>] = [:]
+    private var inputSourceTarget: [DisplayRecordID: Int] = [:]
+    private var inputSourceWriter: [DisplayRecordID: Task<Void, Never>] = [:]
+    private var colorPresetTarget: [DisplayRecordID: Int] = [:]
+    private var colorPresetWriter: [DisplayRecordID: Task<Void, Never>] = [:]
     #endif
     private var hotKey: GlobalHotKey?
     private var registry: DisplayRegistry?
@@ -323,7 +336,9 @@ final class AppModel: ObservableObject {
         )
         let observation = await observer.probe(environment)
         let lifecycleProbe = await lifecycle.probe(environment)
-        diagnostics = [
+        // Probes are static for a given environment, so republish only when something actually changed
+        // (this is read on every topology event to drive the menu-bar "degraded" banner via isDegraded).
+        let updated = [
             DisplayDiagnostic(provider: "Core Graphics (observation)", status: observation.status.rawValue,
                               risk: observation.risk.rawValue, experimental: observer.isExperimental,
                               reasons: observation.reasons.map(\.rawValue)),
@@ -331,6 +346,7 @@ final class AppModel: ObservableObject {
                               risk: lifecycleProbe.risk.rawValue, experimental: lifecycle.isExperimental,
                               reasons: lifecycleProbe.reasons.map(\.rawValue))
         ]
+        if diagnostics != updated { diagnostics = updated }
     }
 
     /// Loads the most recent audit-log entries for Settings → Recent Activity.
@@ -350,15 +366,24 @@ final class AppModel: ObservableObject {
     /// menu bar and Settings can show user aliases and remember them across reconnects.
     private func resolveRecords(_ snapshot: TopologySnapshot) async {
         guard let registry else { return }
-        var resolved: [DisplayRecordID: DisplayRecord] = [:]
-        for observation in snapshot.observations {
-            guard let cgID = observation.cgDisplayID else { continue }
-            let fingerprint = observer.fingerprint(for: cgID)
-            resolved[observation.recordID] = await registry.resolve(
-                fingerprint: fingerprint, cgUUID: observation.cgUUID, displayClass: observation.displayClass
-            )
-        }
-        records = resolved
+        let observer = self.observer
+        let observations = snapshot.observations.filter { $0.cgDisplayID != nil }
+        guard !observations.isEmpty else { if !records.isEmpty { records = [:] }; return }
+        // EDID fingerprint reads are nonisolated CG/IOKit accessors — gather them OFF the main actor,
+        // then resolve the whole set in ONE batched (single disk-write) registry call.
+        let prepared: [(DisplayRecordID, DisplayFingerprint, String?, DisplayClass)] =
+            await Task.detached(priority: .utility) {
+                observations.compactMap { obs -> (DisplayRecordID, DisplayFingerprint, String?, DisplayClass)? in
+                    guard let cgID = obs.cgDisplayID else { return nil }
+                    return (obs.recordID, observer.fingerprint(for: cgID), obs.cgUUID, obs.displayClass)
+                }
+            }.value
+        let resolved = await registry.resolveAll(
+            prepared.map { (fingerprint: $0.1, cgUUID: $0.2, displayClass: $0.3) }
+        )
+        var byID: [DisplayRecordID: DisplayRecord] = [:]
+        for (input, record) in zip(prepared, resolved) { byID[input.0] = record }
+        records = byID
     }
 
     private func setUpScenes() async {
@@ -535,8 +560,33 @@ final class AppModel: ObservableObject {
         if !inputSource.keys.allSatisfy(ids.contains) { inputSource = inputSource.filter { ids.contains($0.key) } }
         if !colorProfileName.keys.allSatisfy(ids.contains) { colorProfileName = colorProfileName.filter { ids.contains($0.key) } }
         if !softwareDim.keys.allSatisfy(ids.contains) { softwareDim = softwareDim.filter { ids.contains($0.key) } }
+        if !colorProfileControllable.keys.allSatisfy(ids.contains) { colorProfileControllable = colorProfileControllable.filter { ids.contains($0.key) } }
         if !blackedOut.allSatisfy(ids.contains) { blackedOut = blackedOut.filter(ids.contains) }
+        #if !PUBLIC_API_ONLY
+        pruneDDCCaches(to: ids)
+        #endif
     }
+
+    #if !PUBLIC_API_ONLY
+    /// Releases DDC infrastructure (controllers + their retained IOAVService handles, coalescing maps,
+    /// and writer tasks) for displays no longer present, so handles don't accumulate across reconnect
+    /// cycles. Writer tasks are cancelled before their controller is dropped so a draining task can't
+    /// re-acquire and recreate a removed entry; controllers are lazily rebuilt on next use.
+    private func pruneDDCCaches(to ids: Set<DisplayRecordID>) {
+        for (id, task) in ddcWriters where !ids.contains(id) { task.cancel(); ddcWriters[id] = nil }
+        for (id, task) in inputSourceWriter where !ids.contains(id) { task.cancel(); inputSourceWriter[id] = nil }
+        for (id, task) in colorPresetWriter where !ids.contains(id) { task.cancel(); colorPresetWriter[id] = nil }
+        for (key, task) in ddcControlWriter where !ids.contains(key.id) { task.cancel(); ddcControlWriter[key] = nil }
+        for (id, task) in ddcBuilders where !ids.contains(id) { task.cancel(); ddcBuilders[id] = nil }
+        ddc = ddc.filter { ids.contains($0.key) }
+        brightnessMax = brightnessMax.filter { ids.contains($0.key) }
+        ddcTarget = ddcTarget.filter { ids.contains($0.key) }
+        inputSourceTarget = inputSourceTarget.filter { ids.contains($0.key) }
+        colorPresetTarget = colorPresetTarget.filter { ids.contains($0.key) }
+        ddcControlMax = ddcControlMax.filter { ids.contains($0.key.id) }
+        ddcControlTarget = ddcControlTarget.filter { ids.contains($0.key.id) }
+    }
+    #endif
 
     func refresh() async {
         var snapshot = await observer.currentSnapshot()
@@ -557,10 +607,14 @@ final class AppModel: ObservableObject {
             displays.contains { $0.recordID == offline.recordID && $0.isActive }
         }
         if managedOffline != priorOffline { persistManagedOffline() }
-        statusText = "\(snapshot.activeDisplays.count) active · \(snapshot.observations.count) total"
+        // Guard against a no-op republish: the active/total count string is usually unchanged across
+        // a refresh, and reassigning @Published fires objectWillChange and re-evaluates every view.
+        let status = "\(snapshot.activeDisplays.count) active · \(snapshot.observations.count) total"
+        if statusText != status { statusText = status }
         phase = displays.isEmpty ? .empty : .ready
         await resolveRecords(snapshot)
         await refreshDiagnostics()
+        #if DEBUG
         if ProcessInfo.processInfo.environment["OPENDISPLAY_DUMP"] != nil {
             Self.dump(snapshot)
             let names = displays.map { "cgID=\($0.cgDisplayID ?? 0) → \"\(displayName(for: $0))\"" }
@@ -571,6 +625,7 @@ final class AppModel: ObservableObject {
                 FileHandle.standardError.write(Data("managedOffline: \(offline)\n".utf8))
             }
         }
+        #endif
     }
 
     // MARK: - Menu controls (Phase 1)
@@ -579,6 +634,14 @@ final class AppModel: ObservableObject {
     func availableModes(for observation: DisplayObservation) -> [DisplayMode] {
         guard let cgID = observation.cgDisplayID else { return [] }
         return observer.availableModes(for: cgID)
+    }
+
+    /// Every mode (un-deduped) for a display — the detail view caches this once per display and filters
+    /// it locally for the resolution list, refresh rates, and HiDPI toggle, avoiding three separate
+    /// CGDisplayCopyAllDisplayModes enumerations per render.
+    func allModes(for observation: DisplayObservation) -> [DisplayMode] {
+        guard let cgID = observation.cgDisplayID else { return [] }
+        return observer.allModes(for: cgID)
     }
 
     /// Resolves and caches the best brightness route for a display, then reads its current level:
@@ -590,12 +653,16 @@ final class AppModel: ObservableObject {
         let id = observation.recordID
         #if !PUBLIC_API_ONLY
         if observation.displayClass == .builtIn {
-            if let value = brightnessControl.brightness(for: cgID) {
+            // DisplayServices is private SPI with a blocking IPC round-trip — read it off the main actor.
+            let control = brightnessControl
+            if let value = await Task.detached(priority: .userInitiated, operation: {
+                control.brightness(for: cgID)
+            }).value {
                 brightness[id] = value
                 brightnessMethod[id] = .native
                 return
             }
-        } else if let controller = ddcController(for: observation),
+        } else if let controller = await ddcController(for: observation),
                   let reading = await controller.read(.brightness), reading.max > 0 {
             brightness[id] = Float(reading.current) / Float(reading.max)
             brightnessMax[id] = reading.max
@@ -629,7 +696,11 @@ final class AppModel: ObservableObject {
         switch method {
         case .native:
             #if !PUBLIC_API_ONLY
-            _ = brightnessControl.setBrightness(value, for: cgID)
+            // Private DisplayServices SPI off the main actor; the optimistic cache is already updated.
+            // DisplayServices is fast IPC (unlike slow I2C), so a fire-and-forget per tick is fine —
+            // no DDC-style coalescing needed.
+            let control = brightnessControl
+            Task.detached(priority: .userInitiated) { _ = control.setBrightness(value, for: cgID) }
             #endif
         case .hardware:
             #if !PUBLIC_API_ONLY
@@ -646,16 +717,25 @@ final class AppModel: ObservableObject {
     }
 
     #if !PUBLIC_API_ONLY
-    private func ddcController(for observation: DisplayObservation) -> ExternalDisplayDDC? {
-        if let existing = ddc[observation.recordID] { return existing }
-        guard let cgID = observation.cgDisplayID,
-              let controller = ExternalDisplayDDC(displayID: cgID) else { return nil }
-        ddc[observation.recordID] = controller
+    /// Returns (and caches) the DDC controller for an external display, building it OFF the main actor
+    /// — `ExternalDisplayDDC.init` does `dlopen` + IOKit registry enumeration, which must not run on
+    /// the UI thread when a display row first expands. Concurrent first-uses await one shared build,
+    /// so a display can't end up with two bound IOAVService handles.
+    private func ddcController(for observation: DisplayObservation) async -> ExternalDisplayDDC? {
+        let id = observation.recordID
+        if let existing = ddc[id] { return existing }
+        if let building = ddcBuilders[id] { return await building.value }
+        guard let cgID = observation.cgDisplayID else { return nil }
+        let builder = Task.detached(priority: .utility) { ExternalDisplayDDC(displayID: cgID) }
+        ddcBuilders[id] = builder
+        let controller = await builder.value
+        ddcBuilders[id] = nil
+        if let controller { ddc[id] = controller }
         return controller
     }
 
     private func drainDDCWrites(_ id: DisplayRecordID, _ observation: DisplayObservation) async {
-        guard let controller = ddcController(for: observation) else { ddcWriters[id] = nil; return }
+        guard let controller = await ddcController(for: observation) else { ddcWriters[id] = nil; return }
         while let target = ddcTarget[id] {
             ddcTarget[id] = nil
             await controller.write(.brightness, target)
@@ -673,7 +753,7 @@ final class AppModel: ObservableObject {
     /// and any feature the panel reports as unsupported. No-op in the public-API-only build.
     func refreshHardwareControls(for observation: DisplayObservation) async {
         #if !PUBLIC_API_ONLY
-        guard observation.displayClass != .builtIn, let controller = ddcController(for: observation) else { return }
+        guard observation.displayClass != .builtIn, let controller = await ddcController(for: observation) else { return }
         let id = observation.recordID
         for control in HardwareControl.allCases {
             guard let feature = ExternalDisplayDDC.Feature(rawValue: control.vcp),
@@ -702,7 +782,7 @@ final class AppModel: ObservableObject {
     #if !PUBLIC_API_ONLY
     private func drainHardwareWrites(_ key: DDCControlKey, _ control: HardwareControl, _ observation: DisplayObservation) async {
         guard let feature = ExternalDisplayDDC.Feature(rawValue: control.vcp),
-              let controller = ddcController(for: observation) else { ddcControlWriter[key] = nil; return }
+              let controller = await ddcController(for: observation) else { ddcControlWriter[key] = nil; return }
         while let target = ddcControlTarget[key] {
             ddcControlTarget[key] = nil
             await controller.write(feature, target)
@@ -714,51 +794,76 @@ final class AppModel: ObservableObject {
     /// Reads the external display's current DDC input source into the cache.
     func refreshInputSource(for observation: DisplayObservation) async {
         #if !PUBLIC_API_ONLY
-        guard observation.displayClass != .builtIn, let controller = ddcController(for: observation),
+        guard observation.displayClass != .builtIn, let controller = await ddcController(for: observation),
               let reading = await controller.read(.inputSource) else { return }
         inputSource[observation.recordID] = reading.current
         #endif
     }
 
     /// Switches the external display's DDC input source to `code` (e.g. HDMI/DisplayPort). User-driven.
+    /// Coalesced through a single per-display writer (like brightness/contrast) so rapid selections
+    /// settle the panel on the last choice and can't reorder on the shared I2C bus.
     func setInputSource(_ code: Int, for observation: DisplayObservation) {
         #if !PUBLIC_API_ONLY
         guard observation.displayClass != .builtIn else { return }
-        inputSource[observation.recordID] = code
-        Task { [weak self] in
-            guard let controller = await self?.ddcController(for: observation) else { return }
-            _ = await controller.write(.inputSource, code)
+        let id = observation.recordID
+        inputSource[id] = code
+        inputSourceTarget[id] = code
+        if inputSourceWriter[id] == nil {
+            inputSourceWriter[id] = Task { [weak self] in await self?.drainInputSourceWrites(id, observation) }
         }
         #endif
     }
 
-    /// Current ICC profile name per display (custom override or factory default).
-    func refreshColorProfile(for observation: DisplayObservation) {
+    #if !PUBLIC_API_ONLY
+    private func drainInputSourceWrites(_ id: DisplayRecordID, _ observation: DisplayObservation) async {
+        guard let controller = await ddcController(for: observation) else { inputSourceWriter[id] = nil; return }
+        while let target = inputSourceTarget[id] {
+            inputSourceTarget[id] = nil
+            await controller.write(.inputSource, target)
+        }
+        inputSourceWriter[id] = nil
+    }
+    #endif
+
+    /// Refreshes a display's cached ICC state — controllability, current profile name, and (once) the
+    /// installed-profile list — all OFF the main actor, since ColorSync iterates and parses profiles
+    /// from disk. The menu reads only the published caches and never touches ColorSync in a view body.
+    func refreshColorProfile(for observation: DisplayObservation) async {
         guard let cgID = observation.cgDisplayID else { return }
-        colorProfileName[observation.recordID] = ColorProfileService.currentProfileName(for: cgID)
+        let id = observation.recordID
+        let needProfiles = availableColorProfilesCache.isEmpty
+        let result = await Task.detached(priority: .userInitiated) {
+            (controllable: ColorProfileService.isControllable(cgID),
+             name: ColorProfileService.currentProfileName(for: cgID),
+             profiles: needProfiles ? ColorProfileService.availableProfiles() : nil)
+        }.value
+        colorProfileControllable[id] = result.controllable
+        colorProfileName[id] = result.name
+        if let profiles = result.profiles { availableColorProfilesCache = profiles }
     }
 
-    /// Installed display ICC profiles the user can assign.
-    func availableColorProfiles() -> [ICCProfile] { ColorProfileService.availableProfiles() }
-
-    /// Whether this display exposes a ColorSync device that profile writes can target.
-    func isColorProfileControllable(_ observation: DisplayObservation) -> Bool {
-        guard let cgID = observation.cgDisplayID else { return false }
-        return ColorProfileService.isControllable(cgID)
-    }
-
-    /// Assigns an ICC profile to a display (validated), then refreshes the cached name.
-    func setColorProfile(_ profile: ICCProfile, for observation: DisplayObservation) {
+    /// Assigns an ICC profile to a display (validated by ColorSyncProfileVerify inside the service),
+    /// then re-reads the applied name off-main ("verify, don't assume"). User-driven.
+    func setColorProfile(_ profile: ICCProfile, for observation: DisplayObservation) async {
         guard FeatureFlags.iccProfileWrite, let cgID = observation.cgDisplayID else { return }
-        _ = ColorProfileService.setProfile(profile, for: cgID)
-        colorProfileName[observation.recordID] = ColorProfileService.currentProfileName(for: cgID)
+        let id = observation.recordID
+        let name = await Task.detached(priority: .userInitiated) { () -> String? in
+            ColorProfileService.setProfile(profile, for: cgID)
+            return ColorProfileService.currentProfileName(for: cgID)
+        }.value
+        colorProfileName[id] = name
     }
 
-    /// Reverts a display to its factory ICC profile.
-    func resetColorProfile(for observation: DisplayObservation) {
+    /// Reverts a display to its factory ICC profile, then re-reads the resulting name off-main.
+    func resetColorProfile(for observation: DisplayObservation) async {
         guard FeatureFlags.iccProfileWrite, let cgID = observation.cgDisplayID else { return }
-        _ = ColorProfileService.resetToFactory(for: cgID)
-        colorProfileName[observation.recordID] = ColorProfileService.currentProfileName(for: cgID)
+        let id = observation.recordID
+        let name = await Task.detached(priority: .userInitiated) { () -> String? in
+            ColorProfileService.resetToFactory(for: cgID)
+            return ColorProfileService.currentProfileName(for: cgID)
+        }.value
+        colorProfileName[id] = name
     }
 
     /// Current rotation of a display in degrees (0/90/180/270), read via public Core Graphics.
@@ -832,7 +937,7 @@ final class AppModel: ObservableObject {
     /// Reads the external display's current DDC colour preset (VCP 0x14) + its max code into the cache.
     func refreshColorPreset(for observation: DisplayObservation) async {
         #if !PUBLIC_API_ONLY
-        guard observation.displayClass != .builtIn, let controller = ddcController(for: observation),
+        guard observation.displayClass != .builtIn, let controller = await ddcController(for: observation),
               let reading = await controller.read(.colorPreset) else { return }
         colorPreset[observation.recordID] = reading.current
         colorPresetMax[observation.recordID] = max(reading.max, 1)
@@ -840,16 +945,29 @@ final class AppModel: ObservableObject {
     }
 
     /// Sets the external display's DDC colour preset (sRGB / colour-temperature / native). User-driven.
+    /// Coalesced per display (like input source) so rapid taps settle on the last choice in order.
     func setColorPreset(_ code: Int, for observation: DisplayObservation) {
         #if !PUBLIC_API_ONLY
         guard observation.displayClass != .builtIn else { return }
-        colorPreset[observation.recordID] = code
-        Task { [weak self] in
-            guard let controller = await self?.ddcController(for: observation) else { return }
-            _ = await controller.write(.colorPreset, code)
+        let id = observation.recordID
+        colorPreset[id] = code
+        colorPresetTarget[id] = code
+        if colorPresetWriter[id] == nil {
+            colorPresetWriter[id] = Task { [weak self] in await self?.drainColorPresetWrites(id, observation) }
         }
         #endif
     }
+
+    #if !PUBLIC_API_ONLY
+    private func drainColorPresetWrites(_ id: DisplayRecordID, _ observation: DisplayObservation) async {
+        guard let controller = await ddcController(for: observation) else { colorPresetWriter[id] = nil; return }
+        while let target = colorPresetTarget[id] {
+            colorPresetTarget[id] = nil
+            await controller.write(.colorPreset, target)
+        }
+        colorPresetWriter[id] = nil
+    }
+    #endif
 
     /// Applies a chosen resolution/mode, then re-reads the topology.
     func setMode(_ mode: DisplayMode, for observation: DisplayObservation) async {
@@ -980,9 +1098,10 @@ final class AppModel: ObservableObject {
         await refresh()
     }
 
+    #if DEBUG
     /// Diagnostic dump of the observed topology to stderr, gated on `OPENDISPLAY_DUMP` so it is
     /// silent in normal runs. Run the app binary directly with the env var set to verify live
-    /// enumeration without needing the menu-bar UI.
+    /// enumeration without needing the menu-bar UI. DEBUG-only (excluded from release / App Store).
     private static func dump(_ snapshot: TopologySnapshot) {
         var out = "OpenDisplay topology \(snapshot.generation):\n"
         for o in snapshot.observations.sorted(by: { $0.recordID.rawValue < $1.recordID.rawValue }) {
@@ -996,7 +1115,6 @@ final class AppModel: ObservableObject {
         FileHandle.standardError.write(Data(out.utf8))
     }
 
-    #if DEBUG
     /// M0 live-test harness (DEBUG only, gated on `OPENDISPLAY_DISCONNECT=<cgID|recordID>`): runs
     /// one real disconnect through the full coordinator transaction, logs the result + stage path
     /// to stderr, then **always reconnects after 3s** so a live test can never strand a display.

@@ -74,6 +74,9 @@ public struct Checkpoint: Hashable, Sendable, Codable, Identifiable {
 
 /// Health of a provider for a given environment key. Three bounded failures trip the circuit
 /// breaker and disable the provider (PRD DIA-007, §9.2 invariant 10).
+// TODO(DIA-007): implemented but not yet wired — no capability gate or health store consumes it.
+// Tracks PRD DIA-007 / §9.2 invariant 10 (disable a failing provider after 3 bounded failures
+// and stop destabilizing writes).
 public struct ProviderHealth: Hashable, Sendable, Codable {
     public enum Status: String, Hashable, Sendable, Codable {
         case ok

@@ -74,28 +74,8 @@ public protocol LifecycleProvider: DisplayProvider {
     /// Requests reactivation. Must tolerate an already-active target and be idempotent.
     func reconnect(_ target: DisplayRecordID, deadline: Date) async throws
 
-    /// Optional optimized bulk path; the coordinator still verifies each target individually.
-    func reconnectAll(_ candidates: [DisplayRecordID], deadline: Date) async throws
-
     /// Best-effort emergency restoration usable with minimal dependencies (PRD §9.9 `recover`).
     func recover(to checkpoint: Checkpoint) async throws
-}
-
-public extension LifecycleProvider {
-    func reconnectAll(_ candidates: [DisplayRecordID], deadline: Date) async throws {
-        for candidate in candidates {
-            try await reconnect(candidate, deadline: deadline)
-        }
-    }
-}
-
-/// A control provider (native/DDC/software/network) for brightness, volume, contrast, input, etc.
-public protocol ControlProvider: DisplayProvider {
-    func capabilities(for target: DisplayRecordID, in environment: ProviderEnvironment) async -> [CapabilitySnapshot]
-    /// Applies a normalized 0...100 value for a capability, returning whether it could be verified.
-    func apply(_ capability: Capability, value: Double, to target: DisplayRecordID) async throws -> VerificationState
-    /// Reads back a normalized 0...100 value where supported.
-    func read(_ capability: Capability, from target: DisplayRecordID) async throws -> Double?
 }
 
 /// Reads the normalized observed topology. Implemented on macOS by the DisplayRegistry's event
