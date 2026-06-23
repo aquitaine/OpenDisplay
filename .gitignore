@@ -37,3 +37,6 @@ notarization-*.json
 # Local build output (XcodeGen `make build` writes here) and local agent/session config
 build/
 .claude/
+
+# Signed/notarized release artifacts (scripts/release-signed.sh)
+dist/

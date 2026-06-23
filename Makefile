@@ -54,3 +54,7 @@ clean: ## Remove build artifacts
 
 bundle-helper: ## Bundle the opendisplay CLI into OpenDisplay.app/Contents/Helpers (for experimental rotation)
 	@./scripts/bundle-helper.sh $(CONFIG)
+
+.PHONY: release-signed
+release-signed: ## Build, sign (Developer ID + hardened runtime), notarize, staple, and zip a release .app
+	@./scripts/release-signed.sh
