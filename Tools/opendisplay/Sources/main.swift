@@ -427,12 +427,13 @@ func runBrightness() async {
 func runDDC() async {
     let featureNames: [String: ExternalDisplayDDC.Feature] = [
         "brightness": .brightness, "contrast": .contrast, "volume": .volume, "input": .inputSource,
+        "colour": .colorPreset, "color": .colorPreset, "preset": .colorPreset,
     ]
     guard let sel = selectorArg, let featureArg = valueArg else {
-        fail("usage: opendisplay ddc <selector> <brightness|contrast|volume|input> [value]")
+        fail("usage: opendisplay ddc <selector> <brightness|contrast|volume|input|colour> [value]")
     }
     guard let feature = featureNames[featureArg.lowercased()] else {
-        fail("unknown feature '\(featureArg)' (brightness|contrast|volume|input)")
+        fail("unknown feature '\(featureArg)' (brightness|contrast|volume|input|colour)")
     }
     let pairs = await resolveCurrentDisplays()
     let target = uniqueDisplay(sel, in: pairs, managedOffline: [])

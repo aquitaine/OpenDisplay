@@ -142,6 +142,7 @@ private struct DisplayCard: View {
     @State private var showImageAdj = false
     @State private var showDisplayMode = false
     @State private var showInput = false
+    @State private var showColour = false
 
     private var isExpanded: Bool { expandedID == display.recordID }
 
@@ -281,7 +282,15 @@ private struct DisplayCard: View {
                 onOpenSettings()
             }
             MenuActionRow(title: "Screen rotation", systemImage: "rotate.right", soon: true)
-            MenuActionRow(title: "Colour mode", systemImage: "paintpalette", soon: true)
+            if display.displayClass != .builtIn {
+                MenuActionRow(title: "Colour mode", systemImage: "paintpalette", showChevron: false) {
+                    withAnimation(.easeInOut(duration: 0.15)) { showColour.toggle() }
+                    if showColour { Task { await model.refreshColorPreset(for: display) } }
+                }
+                if showColour { colourControls }
+            } else {
+                MenuActionRow(title: "Colour mode", systemImage: "paintpalette", soon: true)
+            }
             MenuActionRow(title: "Image adjustments", systemImage: "circle.righthalf.filled", showChevron: false) {
                 withAnimation(.easeInOut(duration: 0.15)) { showImageAdj.toggle() }
             }
@@ -370,6 +379,27 @@ private struct DisplayCard: View {
                     Text(item.value).font(.caption2).lineLimit(1)
                 }
             }
+        }
+        .padding(.leading, 26).padding(.trailing, 8).padding(.vertical, 2)
+    }
+
+    private var colourControls: some View {
+        let current = model.colorPreset[display.recordID]
+        let maxCode = max(model.colorPresetMax[display.recordID] ?? 5, 1)
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Image(systemName: "paintpalette").font(.caption).foregroundStyle(.tertiary).frame(width: 15)
+                Text("Preset").font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Menu(current.map { model.presetName($0) } ?? "—") {
+                    ForEach(1...maxCode, id: \.self) { code in
+                        Button(model.presetName(code)) { model.setColorPreset(code, for: display) }
+                    }
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+            }
+            Text(current == nil ? "Reading…" : "Monitor colour preset (DDC). Reversible.")
+                .font(.system(size: 9)).foregroundStyle(.tertiary)
         }
         .padding(.leading, 26).padding(.trailing, 8).padding(.vertical, 2)
     }

@@ -67,6 +67,17 @@ final class AppModel: ObservableObject {
     @Published private(set) var softwareDim: [DisplayRecordID: Float] = [:]
     /// Current DDC input-source code (VCP 0x60) per external display.
     @Published private(set) var inputSource: [DisplayRecordID: Int] = [:]
+    /// Current DDC colour-preset code (VCP 0x14) per external display, and the max code it reports.
+    @Published private(set) var colorPreset: [DisplayRecordID: Int] = [:]
+    @Published private(set) var colorPresetMax: [DisplayRecordID: Int] = [:]
+
+    /// Standard DDC colour-preset labels (VCP 0x14). Monitors vary; the menu offers 1...max and labels
+    /// the standard ones, falling back to "Preset N".
+    static let presetNames: [Int: String] = [
+        1: "sRGB", 2: "Display native", 3: "4000K", 4: "5000K", 5: "6500K",
+        6: "7500K", 7: "8200K", 8: "9300K", 9: "10000K", 11: "User 1",
+    ]
+    func presetName(_ code: Int) -> String { Self.presetNames[code] ?? "Preset \(code)" }
 
     /// Common DDC/CI input-source codes (VCP 0x60). Monitors mostly follow these; the menu shows the
     /// live code too, so a non-standard panel is still legible.
@@ -553,6 +564,28 @@ final class AppModel: ObservableObject {
         Task { [weak self] in
             guard let controller = await self?.ddcController(for: observation) else { return }
             _ = await controller.write(.inputSource, code)
+        }
+        #endif
+    }
+
+    /// Reads the external display's current DDC colour preset (VCP 0x14) + its max code into the cache.
+    func refreshColorPreset(for observation: DisplayObservation) async {
+        #if !PUBLIC_API_ONLY
+        guard observation.displayClass != .builtIn, let controller = ddcController(for: observation),
+              let reading = await controller.read(.colorPreset) else { return }
+        colorPreset[observation.recordID] = reading.current
+        colorPresetMax[observation.recordID] = max(reading.max, 1)
+        #endif
+    }
+
+    /// Sets the external display's DDC colour preset (sRGB / colour-temperature / native). User-driven.
+    func setColorPreset(_ code: Int, for observation: DisplayObservation) {
+        #if !PUBLIC_API_ONLY
+        guard observation.displayClass != .builtIn else { return }
+        colorPreset[observation.recordID] = code
+        Task { [weak self] in
+            guard let controller = await self?.ddcController(for: observation) else { return }
+            _ = await controller.write(.colorPreset, code)
         }
         #endif
     }

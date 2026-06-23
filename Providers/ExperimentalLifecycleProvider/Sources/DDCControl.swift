@@ -16,6 +16,7 @@ public actor ExternalDisplayDDC {
         case contrast = 0x12
         case volume = 0x62
         case inputSource = 0x60
+        case colorPreset = 0x14
     }
 
     private typealias CreateFn = @convention(c) (CFAllocator?, io_service_t) -> Unmanaged<AnyObject>?
