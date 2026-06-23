@@ -193,8 +193,10 @@ final class AppModel: ObservableObject {
             await refresh()
             await enforceActiveSurfaceInvariant()  // recover if we launched into a stranded (0-active) state
             await writeBaselineCheckpoint()
-            if Self.rotationMarkerPresent() {
-                // A prior experimental rotation didn't confirm — restore a safe layout, then clear.
+            if let marker = Self.readRotationMarker() {
+                // A prior experimental rotation didn't confirm — restore that display's safe angle and
+                // a safe layout, then clear the marker.
+                try? await rotationBackend.setRotation(marker.safeAngle, for: marker.cgID)
                 _ = await coordinator.reconnectAll()
                 Self.clearRotationMarker()
                 await refresh()
@@ -471,6 +473,18 @@ final class AppModel: ObservableObject {
         await refresh()
     }
 
+    /// Drops cached control values (brightness, DDC, ICC, dim) for displays that are no longer present,
+    /// so a reconnected display re-reads fresh state instead of showing a stale cached value. Only
+    /// reassigns a cache when it actually has a stale key, to avoid needless UI invalidation.
+    private func pruneControlCaches(to ids: Set<DisplayRecordID>) {
+        if !brightness.keys.allSatisfy(ids.contains) { brightness = brightness.filter { ids.contains($0.key) } }
+        if !ddcControlLevel.keys.allSatisfy(ids.contains) { ddcControlLevel = ddcControlLevel.filter { ids.contains($0.key) } }
+        if !colorPreset.keys.allSatisfy(ids.contains) { colorPreset = colorPreset.filter { ids.contains($0.key) } }
+        if !inputSource.keys.allSatisfy(ids.contains) { inputSource = inputSource.filter { ids.contains($0.key) } }
+        if !colorProfileName.keys.allSatisfy(ids.contains) { colorProfileName = colorProfileName.filter { ids.contains($0.key) } }
+        if !softwareDim.keys.allSatisfy(ids.contains) { softwareDim = softwareDim.filter { ids.contains($0.key) } }
+    }
+
     func refresh() async {
         var snapshot = await observer.currentSnapshot()
         // Another display-manager app (e.g. BetterDisplay) holding a reconfiguration can make
@@ -483,6 +497,7 @@ final class AppModel: ObservableObject {
             attempts += 1
         }
         displays = snapshot.observations.sorted { $0.recordID.rawValue < $1.recordID.rawValue }
+        pruneControlCaches(to: Set(displays.map(\.recordID)))
         // Drop any tracked off-display that has come back on its own (e.g. re-enabled elsewhere).
         let priorOffline = managedOffline
         managedOffline.removeAll { offline in
@@ -690,28 +705,37 @@ final class AppModel: ObservableObject {
         guard let cgID = observation.cgDisplayID else { return }
         busy = true
         defer { busy = false }
-        Self.writeRotationMarker()
+        let safeAngle = rotationBackend.currentRotation(for: cgID)
+        Self.writeRotationMarker(RotationMarker(cgID: cgID, safeAngle: safeAngle))
         do {
             try await rotationBackend.setRotation(degrees, for: cgID)
         } catch {
+            // The helper validates + rolls back itself, but ensure the safe angle is restored and a
+            // safe surface remains even if the helper died before its own rollback.
+            try? await rotationBackend.setRotation(safeAngle, for: cgID)
             _ = await coordinator.reconnectAll()
         }
         Self.clearRotationMarker()
         await refresh()
     }
 
+    /// Pending-rotation marker: records which display was being rotated and the angle it was at before,
+    /// so that if the app/helper dies mid-rotation, the next launch can restore that exact safe angle.
+    private struct RotationMarker: Codable { let cgID: CGDirectDisplayID; let safeAngle: Int }
+
     private static func rotationMarkerURL() -> URL? {
         (try? DiskCheckpointStore.defaultDirectory())?.appendingPathComponent("rotation.pending")
     }
-    private static func writeRotationMarker() {
-        if let url = rotationMarkerURL() { try? Data().write(to: url) }
+    private static func writeRotationMarker(_ marker: RotationMarker) {
+        guard let url = rotationMarkerURL(), let data = try? JSONEncoder().encode(marker) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+    private static func readRotationMarker() -> RotationMarker? {
+        guard let url = rotationMarkerURL(), let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(RotationMarker.self, from: data)
     }
     private static func clearRotationMarker() {
         if let url = rotationMarkerURL() { try? FileManager.default.removeItem(at: url) }
-    }
-    static func rotationMarkerPresent() -> Bool {
-        guard let url = rotationMarkerURL() else { return false }
-        return FileManager.default.fileExists(atPath: url.path)
     }
 
     /// Opens System Settings → Displays — the supported way to rotate on this macOS.
