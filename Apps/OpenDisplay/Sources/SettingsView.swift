@@ -25,6 +25,10 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: ODSpacing.md) {
                 Text("Saved Scenes").font(.title3)
+                if let warning = model.sceneWarning {
+                    Label(warning, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(ODColor.caution)
+                }
                 if model.scenes.isEmpty {
                     Text("No saved scenes yet. Arrange your displays below, then save.")
                         .font(.callout).foregroundStyle(.secondary)

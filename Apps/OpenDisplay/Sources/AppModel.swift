@@ -54,6 +54,8 @@ final class AppModel: ObservableObject {
     /// Identity records for the current displays, keyed by the observation's record id.
     @Published private(set) var records: [DisplayRecordID: DisplayRecord] = [:]
     @Published private(set) var scenes: [Scene] = []
+    /// Non-fatal note from the last scene apply (e.g. rotation skipped) — shown in the Scenes tab.
+    @Published var sceneWarning: String?
     /// Displays the app has logically turned off. The OS drops them from the online list, so we track
     /// them here to keep an "off" card in the menu (with a way back on) and to feed the safety net.
     @Published private(set) var managedOffline: [OfflineDisplay] = []
@@ -110,6 +112,8 @@ final class AppModel: ObservableObject {
     private let coordinator: TopologyCoordinator
     private let checkpoints: any CheckpointStoring
     private let lifecycle: any LifecycleProvider
+    /// Read-only in the stable build; the experimental SkyLight rotator is opt-in only (never default).
+    private let rotationBackend: any RotationBackend = ReadOnlyRotationBackend()
     #if !PUBLIC_API_ONLY
     private let brightnessControl = DisplayServicesBrightnessProvider()
     private var ddc: [DisplayRecordID: ExternalDisplayDDC] = [:]
@@ -368,13 +372,20 @@ final class AppModel: ObservableObject {
     func applyScene(_ scene: Scene) async {
         let snapshot = await observer.currentSnapshot()
         var targets: [CoreGraphicsProvider.ArrangementTarget] = []
+        var rotationSkipped = false
         for member in scene.members {
             guard let observation = resolveSceneMember(member.selector, in: snapshot),
                   let cgID = observation.cgDisplayID else { continue }
+            // Rotation writes aren't safely supported — skip the property but still apply the rest,
+            // surfacing a non-fatal note (PRD: scenes apply everything they safely can).
+            if let wanted = member.desired.rotation, wanted != observation.rotation { rotationSkipped = true }
             targets.append(.init(displayID: cgID, origin: member.desired.position, mode: member.desired.mode))
         }
         _ = observer.applyArrangement(targets)
         await refresh()
+        sceneWarning = rotationSkipped
+            ? "Applied. Rotation in this scene was skipped — not supported on this macOS version."
+            : nil
     }
 
     func deleteScene(_ scene: Scene) async {
@@ -566,6 +577,29 @@ final class AppModel: ObservableObject {
             _ = await controller.write(.inputSource, code)
         }
         #endif
+    }
+
+    /// Current rotation of a display in degrees (0/90/180/270), read via public Core Graphics.
+    func currentRotation(for observation: DisplayObservation) -> Int {
+        guard let cgID = observation.cgDisplayID else { return 0 }
+        return rotationBackend.currentRotation(for: cgID)
+    }
+
+    /// The reason rotation writes are unavailable (drives the read-only UI label), or nil if writable.
+    var rotationUnavailableReason: String? {
+        if case .unavailable(let reason) = rotationBackend.capability { return reason }
+        return nil
+    }
+
+    /// Opens System Settings → Displays — the supported way to rotate on this macOS.
+    func openDisplaySettings() {
+        let candidates = [
+            "x-apple.systempreferences:com.apple.Displays-Settings.extension",
+            "x-apple.systempreferences:com.apple.preference.displays",
+        ]
+        for string in candidates {
+            if let url = URL(string: string), NSWorkspace.shared.open(url) { return }
+        }
     }
 
     /// Reads the external display's current DDC colour preset (VCP 0x14) + its max code into the cache.

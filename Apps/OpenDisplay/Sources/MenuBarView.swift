@@ -143,6 +143,7 @@ private struct DisplayCard: View {
     @State private var showDisplayMode = false
     @State private var showInput = false
     @State private var showColour = false
+    @State private var showRotation = false
 
     private var isExpanded: Bool { expandedID == display.recordID }
 
@@ -281,7 +282,10 @@ private struct DisplayCard: View {
             MenuActionRow(title: "Move in arrangement…", systemImage: "arrow.up.left.and.arrow.down.right") {
                 onOpenSettings()
             }
-            MenuActionRow(title: "Screen rotation", systemImage: "rotate.right", soon: true)
+            MenuActionRow(title: "Screen rotation", systemImage: "rotate.right", showChevron: false) {
+                withAnimation(.easeInOut(duration: 0.15)) { showRotation.toggle() }
+            }
+            if showRotation { rotationControls }
             if display.displayClass != .builtIn {
                 MenuActionRow(title: "Colour mode", systemImage: "paintpalette", showChevron: false) {
                     withAnimation(.easeInOut(duration: 0.15)) { showColour.toggle() }
@@ -379,6 +383,25 @@ private struct DisplayCard: View {
                     Text(item.value).font(.caption2).lineLimit(1)
                 }
             }
+        }
+        .padding(.leading, 26).padding(.trailing, 8).padding(.vertical, 2)
+    }
+
+    private var rotationControls: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "rotate.right").font(.caption).foregroundStyle(.tertiary).frame(width: 15)
+                Text("Orientation").font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Text("\(model.currentRotation(for: display))°").font(.caption2)
+            }
+            if let reason = model.rotationUnavailableReason {
+                Text(reason).font(.system(size: 9)).foregroundStyle(.tertiary)
+            }
+            Button { model.openDisplaySettings() } label: {
+                Text("Open Display Settings…").font(.caption2).foregroundStyle(ODColor.accent)
+            }
+            .buttonStyle(.plain)
         }
         .padding(.leading, 26).padding(.trailing, 8).padding(.vertical, 2)
     }
