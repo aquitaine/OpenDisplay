@@ -283,12 +283,14 @@ private struct DisplayCard: View {
             MenuActionRow(title: "Move in arrangement…", systemImage: "arrow.up.left.and.arrow.down.right") {
                 onOpenSettings()
             }
-            MenuActionRow(title: "Screen rotation", systemImage: "rotate.right", showChevron: false) {
+            MenuActionRow(title: "Screen rotation", systemImage: "rotate.right", showChevron: false,
+                          trailingText: "\(model.currentRotation(for: display))°") {
                 withAnimation(.easeInOut(duration: 0.15)) { showRotation.toggle() }
             }
             if showRotation { rotationControls }
             if display.displayClass != .builtIn {
-                MenuActionRow(title: "Colour mode", systemImage: "paintpalette", showChevron: false) {
+                MenuActionRow(title: "Colour mode", systemImage: "paintpalette", showChevron: false,
+                              trailingText: model.colorPreset[display.recordID].map { model.presetName($0) }) {
                     withAnimation(.easeInOut(duration: 0.15)) { showColour.toggle() }
                     if showColour { Task { await model.refreshColorPreset(for: display) } }
                 }
@@ -296,7 +298,8 @@ private struct DisplayCard: View {
             } else {
                 MenuActionRow(title: "Colour mode", systemImage: "paintpalette", soon: true)
             }
-            MenuActionRow(title: "Colour profile", systemImage: "swatchpalette", showChevron: false) {
+            MenuActionRow(title: "Colour profile", systemImage: "swatchpalette", showChevron: false,
+                          trailingText: model.colorProfileName[display.recordID]) {
                 withAnimation(.easeInOut(duration: 0.15)) { showProfile.toggle() }
                 if showProfile { model.refreshColorProfile(for: display) }
             }
@@ -568,6 +571,7 @@ private struct MenuActionRow: View {
     var soon = false
     var showChevron = true
     var enabled = true
+    var trailingText: String? = nil
     var action: () -> Void = {}
     @State private var hovering = false
 
@@ -581,6 +585,9 @@ private struct MenuActionRow: View {
                 Text(title).font(.system(size: 13))
                     .foregroundStyle(active ? .primary : .secondary)
                 Spacer()
+                if let trailingText {
+                    Text(trailingText).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }
                 if soon {
                     Text("Soon").font(.system(size: 10)).foregroundStyle(.secondary)
                         .padding(.horizontal, 5).padding(.vertical, 1)
