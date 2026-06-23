@@ -35,6 +35,23 @@ enum HardwareControl: CaseIterable, Hashable {
     }
 }
 
+/// Which route a display's unified brightness slider drives. Resolved per display when brightness is
+/// read: built-in panels use the OS (`native`), externals that answer DDC use `hardware`, and anything
+/// else falls back to `software` gamma dimming (works on any display). Surfaced as a small caption so
+/// the single slider stays honest about *how* it's dimming.
+enum BrightnessMethod: String, Hashable {
+    case native, hardware, software
+
+    /// Caption shown beneath the slider. `native` needs none — it *is* the system brightness.
+    var caption: String? {
+        switch self {
+        case .native: return nil
+        case .hardware: return "Hardware · DDC"
+        case .software: return "Software · gamma"
+        }
+    }
+}
+
 /// Build/runtime feature flags for the experimental control paths (PRD: risky behaviour is opt-in).
 enum FeatureFlags {
     /// ICC profile writing uses *public* ColorSync, so it's App-Store-safe and on by default.
@@ -73,8 +90,13 @@ final class AppModel: ObservableObject {
     /// them here to keep an "off" card in the menu (with a way back on) and to feed the safety net.
     @Published private(set) var managedOffline: [OfflineDisplay] = []
     /// Cached brightness (0...1) for displays we can control — built-in via DisplayServices, externals
-    /// via DDC. A missing key means "not controllable here", so the menu shows a disabled slider.
+    /// via DDC, or software gamma as a universal fallback. A missing key means "not yet read".
     @Published private(set) var brightness: [DisplayRecordID: Float] = [:]
+    /// The route the unified brightness slider drives for each display (resolved on read).
+    @Published private(set) var brightnessMethod: [DisplayRecordID: BrightnessMethod] = [:]
+    /// The display selected in the Settings → Displays detail pane. The menu bar sets this when it
+    /// deep-links into Settings ("Display settings…"), so the right display is shown on arrival.
+    @Published var selectedDisplayID: DisplayRecordID?
     /// Opt-in toggle for the experimental (private-API) rotation writer; persisted to UserDefaults.
     /// Drives the rotation backend live and stays false in the public-API-only build.
     @Published var experimentalRotationEnabled: Bool = FeatureFlags.experimentalRotation {
@@ -403,6 +425,29 @@ final class AppModel: ObservableObject {
         observer.setGammaDim(level, for: cgID)
     }
 
+    /// Displays currently blacked out (gamma driven to zero — the panel stays logically connected so it
+    /// can be restored instantly). Reversible and public-API-safe; gamma also resets on display
+    /// reconfiguration, wake, and logout, so a blackout can never strand a surface.
+    @Published private(set) var blackedOut: Set<DisplayRecordID> = []
+
+    /// True when the display is currently blacked out.
+    func isBlackedOut(_ observation: DisplayObservation) -> Bool {
+        blackedOut.contains(observation.recordID)
+    }
+
+    /// Toggles Black Out: drive gamma to zero, or restore the display's effective dim level.
+    func toggleBlackOut(for observation: DisplayObservation) {
+        guard let cgID = observation.cgDisplayID else { return }
+        let id = observation.recordID
+        if blackedOut.contains(id) {
+            blackedOut.remove(id)
+            observer.setGammaDim(softwareDim[id] ?? 1.0, for: cgID)
+        } else {
+            blackedOut.insert(id)
+            observer.setGammaDim(0.0, for: cgID)
+        }
+    }
+
     /// Read-only display metadata (EDID-derived) for the menu's info panel.
     func displayInfo(for observation: DisplayObservation) -> [(label: String, value: String)] {
         guard let cgID = observation.cgDisplayID else { return [] }
@@ -484,11 +529,13 @@ final class AppModel: ObservableObject {
     /// reassigns a cache when it actually has a stale key, to avoid needless UI invalidation.
     private func pruneControlCaches(to ids: Set<DisplayRecordID>) {
         if !brightness.keys.allSatisfy(ids.contains) { brightness = brightness.filter { ids.contains($0.key) } }
+        if !brightnessMethod.keys.allSatisfy(ids.contains) { brightnessMethod = brightnessMethod.filter { ids.contains($0.key) } }
         if !ddcControlLevel.keys.allSatisfy(ids.contains) { ddcControlLevel = ddcControlLevel.filter { ids.contains($0.key) } }
         if !colorPreset.keys.allSatisfy(ids.contains) { colorPreset = colorPreset.filter { ids.contains($0.key) } }
         if !inputSource.keys.allSatisfy(ids.contains) { inputSource = inputSource.filter { ids.contains($0.key) } }
         if !colorProfileName.keys.allSatisfy(ids.contains) { colorProfileName = colorProfileName.filter { ids.contains($0.key) } }
         if !softwareDim.keys.allSatisfy(ids.contains) { softwareDim = softwareDim.filter { ids.contains($0.key) } }
+        if !blackedOut.allSatisfy(ids.contains) { blackedOut = blackedOut.filter(ids.contains) }
     }
 
     func refresh() async {
@@ -534,41 +581,68 @@ final class AppModel: ObservableObject {
         return observer.availableModes(for: cgID)
     }
 
-    /// Refreshes the cached brightness for a display — built-in via DisplayServices, external via DDC
-    /// (async, since DDC round-trips over I2C). A display that can't be read is left out of the cache,
-    /// so the UI shows a disabled "Soon" control. No-op in the public-API-only build.
+    /// Resolves and caches the best brightness route for a display, then reads its current level:
+    /// built-in via DisplayServices (`native`), external via DDC (`hardware`), or — when neither
+    /// answers — software gamma (`software`), which works on any display including DDC-less externals.
+    /// This is what lets the popover show a single, always-usable brightness slider.
     func refreshBrightness(for observation: DisplayObservation) async {
-        #if !PUBLIC_API_ONLY
         guard let cgID = observation.cgDisplayID else { return }
+        let id = observation.recordID
+        #if !PUBLIC_API_ONLY
         if observation.displayClass == .builtIn {
             if let value = brightnessControl.brightness(for: cgID) {
-                brightness[observation.recordID] = value
+                brightness[id] = value
+                brightnessMethod[id] = .native
+                return
             }
         } else if let controller = ddcController(for: observation),
                   let reading = await controller.read(.brightness), reading.max > 0 {
-            brightness[observation.recordID] = Float(reading.current) / Float(reading.max)
-            brightnessMax[observation.recordID] = reading.max
+            brightness[id] = Float(reading.current) / Float(reading.max)
+            brightnessMax[id] = reading.max
+            brightnessMethod[id] = .hardware
+            return
         }
         #endif
+        // Universal fallback: software gamma is public Core Graphics and works on every display.
+        brightnessMethod[id] = .software
+        brightness[id] = softwareDim[id] ?? 1.0
     }
 
-    /// Sets a display's brightness (0...1), updating the cache optimistically. Built-in writes are
-    /// immediate; external (DDC) writes are coalesced so a fast slider drag never floods the I2C bus —
-    /// only the latest pending value is sent once the previous write completes.
+    /// The caption for a display's brightness slider ("Hardware · DDC", "Software · gamma"), or nil for
+    /// native control where no qualifier is needed.
+    func brightnessCaption(for observation: DisplayObservation) -> String? {
+        brightnessMethod[observation.recordID]?.caption
+    }
+
+    /// Sets a display's brightness (0...1) through whichever route was resolved for it, updating the
+    /// cache optimistically. Native writes are immediate; DDC writes are coalesced so a fast slider
+    /// drag never floods the I2C bus; the software route maps onto gamma dimming with a usable floor.
     func setBrightness(_ value: Float, for observation: DisplayObservation) {
-        #if !PUBLIC_API_ONLY
         guard let cgID = observation.cgDisplayID else { return }
         let id = observation.recordID
         brightness[id] = value
-        if observation.displayClass == .builtIn {
+        #if PUBLIC_API_ONLY
+        let method = BrightnessMethod.software
+        #else
+        let method = brightnessMethod[id] ?? (observation.displayClass == .builtIn ? .native : .hardware)
+        #endif
+        switch method {
+        case .native:
+            #if !PUBLIC_API_ONLY
             _ = brightnessControl.setBrightness(value, for: cgID)
-        } else {
+            #endif
+        case .hardware:
+            #if !PUBLIC_API_ONLY
             ddcTarget[id] = Int((value * Float(brightnessMax[id] ?? 100)).rounded())
             if ddcWriters[id] == nil {
                 ddcWriters[id] = Task { [weak self] in await self?.drainDDCWrites(id, observation) }
             }
+            #endif
+        case .software:
+            let gamma = max(0.15, value)
+            softwareDim[id] = gamma
+            observer.setGammaDim(gamma, for: cgID)
         }
-        #endif
     }
 
     #if !PUBLIC_API_ONLY

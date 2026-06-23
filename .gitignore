@@ -33,3 +33,7 @@ notarization-*.json
 # Editor
 .idea/
 *.swp
+
+# Local build output (XcodeGen `make build` writes here) and local agent/session config
+build/
+.claude/
