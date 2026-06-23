@@ -398,8 +398,21 @@ private struct DisplayCard: View {
             HStack(spacing: 6) {
                 Image(systemName: "rotate.right").font(.caption).foregroundStyle(.tertiary).frame(width: 15)
                 Text("Orientation").font(.caption2).foregroundStyle(.secondary)
+                if model.rotationWritable {
+                    Text("Experimental").font(.system(size: 9)).foregroundStyle(ODColor.caution)
+                        .padding(.horizontal, 5).padding(.vertical, 1).background(.quaternary, in: Capsule())
+                }
                 Spacer()
-                Text("\(model.currentRotation(for: display))°").font(.caption2)
+                if model.rotationWritable {
+                    Menu("\(model.currentRotation(for: display))°") {
+                        ForEach([0, 90, 180, 270], id: \.self) { degrees in
+                            Button("\(degrees)°") { Task { await model.setRotation(degrees, for: display) } }
+                        }
+                    }
+                    .menuStyle(.borderlessButton).fixedSize().disabled(model.busy)
+                } else {
+                    Text("\(model.currentRotation(for: display))°").font(.caption2)
+                }
             }
             if let reason = model.rotationUnavailableReason {
                 Text(reason).font(.system(size: 9)).foregroundStyle(.tertiary)

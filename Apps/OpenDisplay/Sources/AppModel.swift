@@ -127,8 +127,14 @@ final class AppModel: ObservableObject {
     private let coordinator: TopologyCoordinator
     private let checkpoints: any CheckpointStoring
     private let lifecycle: any LifecycleProvider
-    /// Read-only in the stable build; the experimental SkyLight rotator is opt-in only (never default).
-    private let rotationBackend: any RotationBackend = ReadOnlyRotationBackend()
+    /// Read-only by default; the experimental SkyLight rotator is selected only when its opt-in flag
+    /// is set (and is compiled out of the public-API-only build entirely).
+    private let rotationBackend: any RotationBackend = {
+        #if !PUBLIC_API_ONLY
+        if FeatureFlags.experimentalRotation { return ExperimentalRotationBackend() }
+        #endif
+        return ReadOnlyRotationBackend()
+    }()
     #if !PUBLIC_API_ONLY
     private let brightnessControl = DisplayServicesBrightnessProvider()
     private var ddc: [DisplayRecordID: ExternalDisplayDDC] = [:]
@@ -184,6 +190,12 @@ final class AppModel: ObservableObject {
             await setUpScenes()
             await refresh()
             await writeBaselineCheckpoint()
+            if Self.rotationMarkerPresent() {
+                // A prior experimental rotation didn't confirm — restore a safe layout, then clear.
+                _ = await coordinator.reconnectAll()
+                Self.clearRotationMarker()
+                await refresh()
+            }
             #if DEBUG
             if let token = ProcessInfo.processInfo.environment["OPENDISPLAY_DISCONNECT"] {
                 await debugDisconnectCycle(token: token)
@@ -633,6 +645,42 @@ final class AppModel: ObservableObject {
     var rotationUnavailableReason: String? {
         if case .unavailable(let reason) = rotationBackend.capability { return reason }
         return nil
+    }
+
+    /// Whether rotation writes are available (the experimental backend is enabled).
+    var rotationWritable: Bool {
+        if case .experimental = rotationBackend.capability { return true }
+        return false
+    }
+
+    /// Rotates a display (experimental path). Writes a recovery marker first so a stranded layout is
+    /// detected + recovered on next launch; on failure runs Reconnect All; clears the marker after.
+    func setRotation(_ degrees: Int, for observation: DisplayObservation) async {
+        guard let cgID = observation.cgDisplayID else { return }
+        busy = true
+        defer { busy = false }
+        Self.writeRotationMarker()
+        do {
+            try await rotationBackend.setRotation(degrees, for: cgID)
+        } catch {
+            _ = await coordinator.reconnectAll()
+        }
+        Self.clearRotationMarker()
+        await refresh()
+    }
+
+    private static func rotationMarkerURL() -> URL? {
+        (try? DiskCheckpointStore.defaultDirectory())?.appendingPathComponent("rotation.pending")
+    }
+    private static func writeRotationMarker() {
+        if let url = rotationMarkerURL() { try? Data().write(to: url) }
+    }
+    private static func clearRotationMarker() {
+        if let url = rotationMarkerURL() { try? FileManager.default.removeItem(at: url) }
+    }
+    static func rotationMarkerPresent() -> Bool {
+        guard let url = rotationMarkerURL() else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
     }
 
     /// Opens System Settings → Displays — the supported way to rotate on this macOS.

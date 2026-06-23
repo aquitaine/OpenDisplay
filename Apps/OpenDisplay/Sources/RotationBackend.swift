@@ -49,4 +49,45 @@ struct ReadOnlyRotationBackend: RotationBackend {
         throw RotationError.unsupported(Self.unavailableReason)
     }
 }
+
+#if !PUBLIC_API_ONLY
+/// EXPERIMENTAL rotation backend — opt-in only, never the default, compiled out of App Store builds.
+/// Runs the private rotation through the `opendisplay` helper's gated `_rotate-exp` command in a
+/// short-lived isolated process, so a WindowServer-client crash kills only the helper, not the app.
+/// The helper does its own angle/display validation, post-rotation verification, and rollback.
+struct ExperimentalRotationBackend: RotationBackend {
+    var capability: RotationCapability { .experimental }
+
+    func currentRotation(for displayID: CGDirectDisplayID) -> Int {
+        Int(CGDisplayRotation(displayID).rounded())
+    }
+
+    func setRotation(_ degrees: Int, for displayID: CGDirectDisplayID) async throws {
+        guard Self.validAngles.contains(degrees) else { throw RotationError.invalidAngle }
+        guard let helper = Self.helperURL else { throw RotationError.unsupported("rotation helper not found") }
+        let process = Process()
+        process.executableURL = helper
+        process.arguments = ["_rotate-exp", String(displayID), String(degrees)]
+        process.environment = ProcessInfo.processInfo.environment
+            .merging(["OPENDISPLAY_EXPERIMENTAL_ROTATION": "1"]) { _, new in new }
+        let pipe = Pipe(); process.standardError = pipe; process.standardOutput = pipe
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            let message = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw RotationError.verificationFailed
+        }
+    }
+
+    /// The `opendisplay` helper: built beside the app in dev, shipped under Contents/Helpers in a bundle.
+    private static var helperURL: URL? {
+        guard let dir = Bundle.main.executableURL?.deletingLastPathComponent() else { return nil }
+        let candidates = [
+            dir.appendingPathComponent("opendisplay"),
+            dir.deletingLastPathComponent().appendingPathComponent("Helpers/opendisplay"),
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+}
+#endif
 #endif

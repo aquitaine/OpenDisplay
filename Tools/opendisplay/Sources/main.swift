@@ -1,4 +1,5 @@
 import AutomationSchema
+import CoreGraphics
 import CoreGraphicsProvider
 import DisplayDomain
 import ExperimentalLifecycleProvider
@@ -452,6 +453,49 @@ func runDDC() async {
     }
 }
 
+// MARK: - Experimental rotation helper (short-lived, gated, isolated)
+
+/// EXPERIMENTAL rotation writer. Gated behind OPENDISPLAY_EXPERIMENTAL_ROTATION=1 so it never runs by
+/// accident. Validates the angle + display safety, calls the private SkyLight rotator, polls
+/// CGDisplayRotation to confirm, verifies no other display moved, and rolls back on any mismatch.
+/// Running this in its own process isolates the app from a client-side WindowServer crash.
+func runRotateExperimental() async {
+    guard ProcessInfo.processInfo.environment["OPENDISPLAY_EXPERIMENTAL_ROTATION"] == "1" else {
+        fail("experimental rotation disabled — set OPENDISPLAY_EXPERIMENTAL_ROTATION=1 to opt in", code: 3)
+    }
+    guard let sel = selectorArg, let raw = valueArg, let degrees = Int(raw) else {
+        fail("usage: OPENDISPLAY_EXPERIMENTAL_ROTATION=1 opendisplay _rotate-exp <selector> <0|90|180|270>")
+    }
+    guard [0, 90, 180, 270].contains(degrees) else { fail("angle must be 0, 90, 180 or 270") }
+    let pairs = await resolveCurrentDisplays()
+    let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
+    guard let cgID = target.observation.cgDisplayID else { fail("target has no Core Graphics id") }
+    let snapshot = await observer.currentSnapshot()
+    let active = snapshot.activeDisplays
+    guard target.observation.isActive else { fail("target display is not active") }
+    guard target.observation.mirrorSourceID == nil else { fail("refusing to rotate a mirrored display") }
+    guard active.count > 1 else { fail("refusing: target is the only active display") }
+
+    let before = Int(CGDisplayRotation(cgID).rounded())
+    let rotator = SkyLightDisplayRotator()
+    guard rotator.isAvailable else { fail("SLSSetDisplayRotation unavailable on this OS", code: 4) }
+
+    let rc = rotator.rotate(Int32(degrees), displayID: cgID)
+    var observed = before
+    for _ in 0..<12 { usleep(150_000); observed = Int(CGDisplayRotation(cgID).rounded()); if observed == degrees { break } }
+    // No other active display should have changed rotation.
+    let othersOK = active.allSatisfy { other in
+        guard let oid = other.cgDisplayID, oid != cgID else { return true }
+        return Int(CGDisplayRotation(oid).rounded()) == other.rotation.rawValue
+    }
+    if observed == degrees && othersOK {
+        print("rotated \(cgID) \(before)° → \(degrees)° (rc=\(rc))")
+    } else {
+        _ = rotator.rotate(Int32(before), displayID: cgID)
+        fail("verification failed (rc=\(rc), observed=\(observed)°, othersOK=\(othersOK)) — rolled back to \(before)°", code: 5)
+    }
+}
+
 // MARK: - Dispatch
 
 switch command {
@@ -465,6 +509,7 @@ case "reconnect": await runReconnect()
 case "scene": await runScene()
 case "brightness": await runBrightness()
 case "ddc": await runDDC()
+case "_rotate-exp": await runRotateExperimental()
 case "help", "--help", "-h":
     print("""
     opendisplay — OpenDisplay automation CLI
