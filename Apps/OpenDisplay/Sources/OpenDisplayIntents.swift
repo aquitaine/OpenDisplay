@@ -63,6 +63,34 @@ struct ReconnectAllIntent: AppIntent {
     }
 }
 
+/// Sets the built-in display's brightness from Shortcuts / Siri (via the same private DisplayServices
+/// path the menu uses). Excluded from the public-API-only build.
+struct SetBrightnessIntent: AppIntent {
+    static let title: LocalizedStringResource = "Set Display Brightness"
+    static let description = IntentDescription("Sets the built-in display's brightness (0–100%).")
+    static let openAppWhenRun = false
+
+    @Parameter(title: "Brightness", inclusiveRange: (0, 100))
+    var percent: Int
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let clamped = max(0, min(100, percent))
+        #if !PUBLIC_API_ONLY
+        let observer = CoreGraphicsProvider()
+        let snapshot = await observer.currentSnapshot()
+        guard let builtIn = snapshot.observations.first(where: { $0.displayClass == .builtIn }),
+              let cgID = builtIn.cgDisplayID else {
+            return .result(dialog: "No built-in display found.")
+        }
+        let ok = DisplayServicesBrightnessProvider().setBrightness(Float(clamped) / 100, for: cgID)
+        let message = ok ? "Set built-in brightness to \(clamped)%." : "Couldn't set the brightness."
+        return .result(dialog: IntentDialog(stringLiteral: message))
+        #else
+        return .result(dialog: "Brightness control isn't available in this build.")
+        #endif
+    }
+}
+
 struct OpenDisplayShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
@@ -73,6 +101,15 @@ struct OpenDisplayShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Reconnect All",
             systemImageName: "arrow.triangle.2.circlepath"
+        )
+        AppShortcut(
+            intent: SetBrightnessIntent(),
+            phrases: [
+                "Set \(.applicationName) brightness",
+                "\(.applicationName) set brightness"
+            ],
+            shortTitle: "Set Brightness",
+            systemImageName: "sun.max"
         )
     }
 }
