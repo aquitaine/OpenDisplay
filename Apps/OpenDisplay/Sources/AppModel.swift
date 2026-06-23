@@ -108,8 +108,9 @@ final class AppModel: ObservableObject {
         Self.standardInputs.first { $0.code == code }?.name ?? "Code \(code)"
     }
 
-    /// A display OpenDisplay turned off — remembered so it stays visible and re-enableable.
-    struct OfflineDisplay: Identifiable, Equatable {
+    /// A display OpenDisplay turned off — remembered (and persisted) so it stays visible and
+    /// re-enableable even across app restarts, and so the watchdog can always recover it.
+    struct OfflineDisplay: Identifiable, Equatable, Codable {
         let recordID: DisplayRecordID
         let cgID: CGDirectDisplayID
         let name: String
@@ -188,7 +189,9 @@ final class AppModel: ObservableObject {
         Task {
             await setUpRegistry()
             await setUpScenes()
+            await loadManagedOffline()
             await refresh()
+            await enforceActiveSurfaceInvariant()  // recover if we launched into a stranded (0-active) state
             await writeBaselineCheckpoint()
             if Self.rotationMarkerPresent() {
                 // A prior experimental rotation didn't confirm — restore a safe layout, then clear.
@@ -337,6 +340,28 @@ final class AppModel: ObservableObject {
         scenes = await library.all()
     }
 
+    private static func managedOfflineURL() -> URL? {
+        (try? DiskCheckpointStore.defaultDirectory())?.appendingPathComponent("managed-offline.json")
+    }
+
+    /// Persists the managed-offline list so a turned-off display survives an app restart as a
+    /// recoverable off-card (the in-memory-only list was lost on restart, stranding the display).
+    private func persistManagedOffline() {
+        guard let url = Self.managedOfflineURL() else { return }
+        try? JSONEncoder().encode(managedOffline).write(to: url, options: .atomic)
+    }
+
+    /// Loads persisted off-displays and reconciles them against the live topology: any that are back
+    /// online + active are dropped (they returned on their own); the rest remain as off-cards.
+    private func loadManagedOffline() async {
+        guard let url = Self.managedOfflineURL(), let data = try? Data(contentsOf: url),
+              let saved = try? JSONDecoder().decode([OfflineDisplay].self, from: data) else { return }
+        let snapshot = await observer.currentSnapshot()
+        let activeIDs = Set(snapshot.activeDisplays.map(\.recordID))
+        managedOffline = saved.filter { !activeIDs.contains($0.recordID) }
+        if managedOffline != saved { persistManagedOffline() }
+    }
+
     /// Captures the current arrangement as a named scene (upsert by name).
     func saveScene(named name: String) async {
         guard let sceneLibrary else { return }
@@ -459,9 +484,11 @@ final class AppModel: ObservableObject {
         }
         displays = snapshot.observations.sorted { $0.recordID.rawValue < $1.recordID.rawValue }
         // Drop any tracked off-display that has come back on its own (e.g. re-enabled elsewhere).
+        let priorOffline = managedOffline
         managedOffline.removeAll { offline in
             displays.contains { $0.recordID == offline.recordID && $0.isActive }
         }
+        if managedOffline != priorOffline { persistManagedOffline() }
         statusText = "\(snapshot.activeDisplays.count) active · \(snapshot.observations.count) total"
         phase = displays.isEmpty ? .empty : .ready
         await resolveRecords(snapshot)
@@ -471,6 +498,10 @@ final class AppModel: ObservableObject {
             let names = displays.map { "cgID=\($0.cgDisplayID ?? 0) → \"\(displayName(for: $0))\"" }
                 .joined(separator: ", ")
             FileHandle.standardError.write(Data("names: \(names)\n".utf8))
+            if !managedOffline.isEmpty {
+                let offline = managedOffline.map { "\($0.name)(cgid:\($0.cgID))" }.joined(separator: ", ")
+                FileHandle.standardError.write(Data("managedOffline: \(offline)\n".utf8))
+            }
         }
     }
 
@@ -793,6 +824,7 @@ final class AppModel: ObservableObject {
         if case .committed? = result {
             managedOffline.removeAll { $0.recordID == offline.recordID }
             managedOffline.append(offline)
+            persistManagedOffline()
         }
         await refresh()
     }
@@ -808,6 +840,7 @@ final class AppModel: ObservableObject {
             : offline.recordID
         try? await lifecycle.reconnect(reconnectID, deadline: Date().addingTimeInterval(10))
         managedOffline.removeAll { $0.recordID == offline.recordID }
+        persistManagedOffline()
         await refresh()
     }
 
