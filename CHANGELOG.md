@@ -5,9 +5,37 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
-## [Unreleased]
+## [0.1.0] — 2026-06-23
+
+First developer preview. The platform-independent safety core (domain models, state
+machines, scene planner, `SafetyEngine`, serialized `TopologyCoordinator` with
+checkpoint/rollback) is unit-tested (78 tests), and the macOS menu-bar app is functional
+and verified on Apple Silicon hardware.
 
 ### Added
+- Menu-bar app with a unified **brightness** slider (built-in via DisplayServices, external
+  via DDC/CI, software-gamma fallback), **hardware controls** (contrast / volume / input /
+  colour preset over DDC/CI), **mirroring**, **resolution / refresh / HiDPI** switching, a
+  drag-to-arrange canvas, **per-display ICC colour profiles** (public ColorSync), **Black
+  Out**, and **software dimming**.
+- **Safe logical disconnect / reconnect** with an always-one-display-active guarantee,
+  persisted managed-offline tracking, automatic fall-back to the built-in panel, and
+  independent recovery (menu, the global ⌃⌥⌘R hotkey, and a separate `OpenDisplayRescue` app).
+- **Scenes**: capture and re-apply display arrangements.
+- `opendisplay` **CLI** and **Shortcuts/Siri** intents that drive the same audited,
+  safety-checked command path as the UI.
+- **Labs:** opt-in experimental display rotation through an isolated helper process — off by
+  default and compiled out of the public-API / App Store build.
+
+### Performance
+- Apple-Silicon optimisation pass: private SPI (DisplayServices), DDC/CI controller
+  construction, ColorSync iteration, and EDID fingerprinting moved off the main thread;
+  batched registry persistence (one write per topology event instead of one per display);
+  cached display-mode enumeration in the detail pane; opt-in reconfiguration-callback
+  registration that also closes a callback/deinit race; pruned DDC handle caches across
+  reconnects. Removed a dead control-provider abstraction and other unused code.
+
+### Foundations
 - Project scaffolding: SPM monorepo with platform-independent domain packages
   (`DisplayDomain`, `ProviderInterfaces`, `SceneEngine`, `AutomationSchema`,
   `TopologyCore`) plus `SimulatorProvider`, and their unit tests.

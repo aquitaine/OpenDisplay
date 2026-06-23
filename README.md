@@ -24,6 +24,53 @@ the disconnected screen was the one showing the app.
 > project — no BetterDisplay name, assets, copy, UI cloning, or proprietary code. It is
 > not affiliated with or endorsed by BetterDisplay.
 
+## Features
+
+- **Unified brightness** for every display from one slider — built-in panels via the
+  system API, external monitors over **DDC/CI**, and a universal **software (gamma)**
+  fallback for displays that answer neither (including below the hardware minimum).
+- **Hardware controls** over DDC/CI: contrast, volume, input source, and colour preset.
+- **Per-display colour profiles** (ICC) via public ColorSync — applied with validation and
+  reversible to the factory profile, targeted by each display's persistent UUID.
+- **Resolution, refresh rate, and HiDPI (Retina)** switching, plus **mirroring** and a
+  drag-to-arrange layout canvas.
+- **Safe logical disconnect / reconnect** — remove a display from the desktop without
+  unplugging it, with an always-one-display-active guarantee, automatic fall-back to the
+  built-in panel, and independent recovery (menu, a global hotkey, and a separate rescue app).
+- **Scenes** — save a display arrangement and re-apply it later.
+- **Black Out** and **software dimming** on any display.
+- **Automation** — an `opendisplay` CLI and Shortcuts/Siri intents drive the same
+  safety-checked, audited path as the UI.
+- **Labs (opt-in):** experimental display **rotation** through a sandboxed helper — off by
+  default and compiled out of the public-API build entirely.
+
+Built for **Apple Silicon**: the slow I/O (DDC/CI, private SPI, ColorSync iteration) runs
+off the main thread, so the menu stays responsive while monitors are being driven.
+
+## Install
+
+**Requirements:** an Apple Silicon Mac running macOS 14 (Sonoma) or later. (Developed and
+verified on macOS 26 / Apple Silicon.) OpenDisplay runs as a menu-bar item — no Dock icon.
+
+### Option 1 — download the app
+
+1. Download `OpenDisplay.zip` from the [latest release](https://github.com/aquitaine/OpenDisplay/releases/latest).
+2. Unzip it and move **OpenDisplay.app** to `/Applications`.
+3. The build is **not yet notarized**, so Gatekeeper quarantines it on first launch. Clear
+   the quarantine flag once, then open it:
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/OpenDisplay.app
+   open /Applications/OpenDisplay.app
+   ```
+   (Or right-click the app → **Open** → **Open** to approve it the first time.)
+
+Then click the display glyph in the menu bar.
+
+### Option 2 — build from source
+
+The recommended path until signed/notarized releases ship — see
+[Building the macOS app](#building-the-macos-app-on-a-mac) below.
+
 ## Principles
 
 - **Safety before capability** — a feature that can make the desktop unreachable is
@@ -61,7 +108,7 @@ toolchain is installed (macOS Xcode 16+ or Linux).
 
 ```sh
 make bootstrap   # ensure a Swift 6 toolchain (installs it on Ubuntu; checks Xcode on macOS)
-make test        # swift build && swift test --parallel   (42 unit/state-machine tests)
+make test        # swift build && swift test --parallel   (78 unit/state-machine tests)
 make lint        # SwiftLint, if installed
 ```
 
@@ -83,9 +130,12 @@ xcodebuild -scheme OpenDisplay build
 xcodebuild -scheme OpenDisplay-PublicAPIOnly build   # public-API-only flavor (NFR-010)
 ```
 
-The app runs immediately against the in-memory `SimulatedDisplaySystem`; the real
-`CoreGraphicsProvider`/`ExperimentalLifecycleProvider` land in the M0 spike. All macOS targets
-depend on the cross-platform packages through the protocols in `ProviderInterfaces`.
+The app drives real hardware on Apple Silicon: live enumeration and a reversible mirroring
+fallback through `CoreGraphicsProvider`, true logical disconnect through the experimental
+`ExperimentalLifecycleProvider` (SkyLight), built-in brightness via DisplayServices, and
+external controls over DDC/CI. All macOS targets depend on the cross-platform packages
+through the protocols in `ProviderInterfaces`, so the safety core stays platform-independent
+and unit-tested.
 
 ## Documentation
 
