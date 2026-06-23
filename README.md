@@ -63,8 +63,7 @@ Then click the display glyph in the menu bar.
 
 ### Option 2 — build from source
 
-The recommended path until signed/notarized releases ship — see
-[Building the macOS app](#building-the-macos-app-on-a-mac) below.
+Prefer to build it yourself? See [Building the macOS app](#building-the-macos-app-on-a-mac) below.
 
 ## Principles
 
