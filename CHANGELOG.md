@@ -27,6 +27,11 @@ and verified on Apple Silicon hardware.
 - **Labs:** opt-in experimental display rotation through an isolated helper process — off by
   default and compiled out of the public-API / App Store build.
 
+### Distribution
+- Release builds are **Developer ID-signed, hardened-runtime, and notarized** by Apple, so
+  the download opens with no Gatekeeper workaround. Reproducible via `make release-signed`
+  (`scripts/release-signed.sh`).
+
 ### Performance
 - Apple-Silicon optimisation pass: private SPI (DisplayServices), DDC/CI controller
   construction, ColorSync iteration, and EDID fingerprinting moved off the main thread;

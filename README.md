@@ -56,13 +56,8 @@ verified on macOS 26 / Apple Silicon.) OpenDisplay runs as a menu-bar item — n
 
 1. Download `OpenDisplay.zip` from the [latest release](https://github.com/aquitaine/OpenDisplay/releases/latest).
 2. Unzip it and move **OpenDisplay.app** to `/Applications`.
-3. The build is **not yet notarized**, so Gatekeeper quarantines it on first launch. Clear
-   the quarantine flag once, then open it:
-   ```sh
-   xattr -dr com.apple.quarantine /Applications/OpenDisplay.app
-   open /Applications/OpenDisplay.app
-   ```
-   (Or right-click the app → **Open** → **Open** to approve it the first time.)
+3. Open it. The build is **signed with a Developer ID and notarized by Apple**, so it
+   launches with no Gatekeeper warning.
 
 Then click the display glyph in the menu bar.
 
