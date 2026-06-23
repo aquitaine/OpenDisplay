@@ -10,10 +10,15 @@ display from the active desktop without unplugging it, and always get it back, e
 the disconnected screen was the one showing the app.
 
 > **Status: pre-1.0, in active bring-up.** The product, architecture, and scope are
-> defined in the [PRD](Docs/PRD.md). This repository currently contains the
-> platform-independent core (domain models, state machines, scene planner, safety
-> engine, automation schema) with unit tests, plus scaffolding for the macOS app,
-> rescue utility, CLI, providers, and design system.
+> defined in the [PRD](Docs/PRD.md). The platform-independent core (domain models,
+> state machines, scene planner, safety engine, automation schema) ships with unit
+> tests, and the macOS app is functional and verified on Apple Silicon hardware:
+> a menu-bar UI with live **brightness** (built-in via DisplayServices, external via
+> DDC/CI), **hardware controls** (contrast/volume over DDC), **mirroring**, **display
+> modes** (resolution / refresh rate / HiDPI), **software dimming** (gamma, any
+> display), **scenes**, and **safe logical disconnect** with an always-one-display-active
+> guarantee and an automatic fall-back to the built-in panel. The rescue utility, the
+> `opendisplay` CLI, and Shortcuts/Siri intents drive the same safety-checked, audited path.
 
 > Functional reference only: BetterDisplay. OpenDisplay is an independent, clean-room
 > project — no BetterDisplay name, assets, copy, UI cloning, or proprietary code. It is
