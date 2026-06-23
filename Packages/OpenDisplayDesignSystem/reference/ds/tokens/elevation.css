@@ -1,0 +1,30 @@
+/* ============================================================
+   OpenDisplay — Elevation, blur & motion tokens
+   macOS uses soft, low-contrast shadows and material blur rather
+   than heavy drop shadows. Motion is quick and calm.
+   ============================================================ */
+
+:root {
+  /* ---- Shadows ---- */
+  --shadow-row: inset 0 -1px 0 var(--hairline);            /* divider as shadow */
+  --shadow-control: 0 0.5px 1px rgba(0, 0, 0, 0.12),
+    0 0 0 0.5px rgba(0, 0, 0, 0.04);                       /* resting button */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.08),
+    0 0 0 0.5px var(--hairline);                            /* inset list card */
+  --shadow-popover: 0 10px 30px rgba(0, 0, 0, 0.22),
+    0 0 0 0.5px rgba(0, 0, 0, 0.18);                        /* menu-bar / menu */
+  --shadow-window: 0 22px 60px rgba(0, 0, 0, 0.28),
+    0 0 0 0.5px rgba(0, 0, 0, 0.16);
+
+  /* ---- Material blur (vibrancy) ---- */
+  --blur-thin: saturate(180%) blur(20px);    /* @kind other */
+  --blur-regular: saturate(180%) blur(30px); /* @kind other */
+  --blur-thick: saturate(180%) blur(40px);   /* @kind other */
+
+  /* ---- Motion ---- */
+  --ease-standard: cubic-bezier(0.32, 0.72, 0, 1); /* @kind other */ /* macOS spring-like */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);            /* @kind other */
+  --dur-fast: 120ms;  /* @kind other */ /* hover / fill change */
+  --dur-base: 180ms;  /* @kind other */ /* toggle, segmented slide */
+  --dur-slow: 260ms;  /* @kind other */ /* popover / sheet present */
+}

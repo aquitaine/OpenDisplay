@@ -1,0 +1,80 @@
+name: Bug report
+description: Report a problem with OpenDisplay
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please redact identifying data (display serials, usernames).
+        If a display became unreachable, note which recovery action you used.
+  - type: input
+    id: app-version
+    attributes:
+      label: OpenDisplay version
+      placeholder: "e.g. 0.3.0 (build 123)"
+    validations:
+      required: true
+  - type: dropdown
+    id: build-flavor
+    attributes:
+      label: Build flavor
+      options: ["Full", "Public-API-only"]
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version / build
+      placeholder: "e.g. 15.5 (24F74)"
+    validations:
+      required: true
+  - type: input
+    id: mac-model
+    attributes:
+      label: Mac model & chip
+      placeholder: "e.g. MacBook Pro 14\" M3 Pro (Apple Silicon)"
+    validations:
+      required: true
+  - type: input
+    id: displays
+    attributes:
+      label: Display model(s)
+      placeholder: "e.g. LG UltraFine 4K + built-in Retina"
+    validations:
+      required: true
+  - type: dropdown
+    id: route
+    attributes:
+      label: Connection route
+      multiple: true
+      options: ["Direct USB-C/DP", "HDMI", "Thunderbolt dock", "USB-C hub", "KVM", "Adapter", "Wireless (Sidecar/AirPlay)"]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected vs actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: recovery
+    attributes:
+      label: Was a recovery action needed?
+      options: ["No", "Reconnect All", "Automatic rollback", "Rescue utility", "Safe mode", "Manual intervention"]
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / diagnostics bundle
+      description: Attach a redacted diagnostics bundle if available.

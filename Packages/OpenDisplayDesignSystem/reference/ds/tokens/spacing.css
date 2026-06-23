@@ -1,0 +1,42 @@
+/* ============================================================
+   OpenDisplay — Spacing, radius & sizing tokens
+   A tight 4px-based scale suited to dense menu-bar UI plus a
+   roomier settings window. Radii follow macOS control rounding.
+   ============================================================ */
+
+:root {
+  /* ---- Spacing scale (4px base) ---- */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 10px;
+  --space-6: 12px;
+  --space-7: 14px;
+  --space-8: 16px;
+  --space-10: 20px;
+  --space-12: 24px;
+  --space-16: 32px;
+
+  /* ---- Corner radii ---- */
+  --radius-xs: 4px;     /* badges, small fills */
+  --radius-sm: 6px;     /* buttons, fields, segmented */
+  --radius-md: 8px;     /* rows, inset list cards */
+  --radius-lg: 10px;    /* grouped panels */
+  --radius-xl: 12px;    /* menu-bar popover */
+  --radius-2xl: 16px;   /* settings window */
+  --radius-pill: 999px; /* switch track, capsule */
+
+  /* ---- Control sizing ---- */
+  --control-h-sm: 20px;
+  --control-h-md: 24px;   /* standard menu-bar control */
+  --control-h-lg: 28px;   /* settings-window control */
+  --row-h: 28px;          /* menu-bar list row */
+  --row-h-lg: 38px;       /* settings list row */
+  --touch-min: 28px;
+
+  /* ---- Layout widths ---- */
+  --menubar-w: 320px;     /* menu-bar popover width */
+  --sidebar-w: 200px;     /* settings sidebar */
+  --window-w: 720px;      /* settings window */
+}

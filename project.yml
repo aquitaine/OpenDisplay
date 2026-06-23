@@ -1,0 +1,255 @@
+# XcodeGen spec for the macOS build (app bundles, CLI tool, frameworks). Generate with
+# `make xcode` (runs `xcodegen generate`). The generated OpenDisplay.xcodeproj is NOT
+# committed — regenerate it locally.
+#
+# Shared core: the platform-independent modules in Packages/ are ALSO declared in Package.swift
+# (so `make test` builds + tests them on Linux/macOS — one source of truth for the CODE). Here we
+# compile those same source directories as native, *dynamic* macOS frameworks rather than consuming
+# them as SwiftPM products. That is deliberate:
+#
+#   The app links each core module into MANY Mach-O images — every provider framework
+#   (CoreGraphicsProvider, ExperimentalLifecycleProvider, …) AND the app/CLI/rescue. If a module is
+#   linked statically, its type metadata is copied into every image, so a public type like
+#   `ProviderInterfaces.ProviderFailure` exists as several distinct runtime types. `as?` / `catch as`
+#   across the framework boundary then compiles but silently fails at runtime (the coordinator's
+#   `catch let failure as ProviderFailure` falls through). One dynamic framework per module = exactly
+#   one copy of each type, so cross-boundary casts work.
+#
+#   SwiftPM `.dynamic` library products cannot express this in Xcode 16/26: a package target that is
+#   *also* an internal package dependency (DisplayDomain under ProviderInterfaces/TopologyCore/…) can't
+#   be built dynamically when a same-named product exists ("cannot be built dynamically because there
+#   is a package product with the same name"), and renaming the product makes Xcode emit empty/duplicate
+#   framework wrappers. Native framework targets are the reliable mechanism, so the core lives here.
+name: OpenDisplay
+
+options:
+  bundleIdPrefix: dev.opendisplay
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: YES
+
+targets:
+  # --- Shared core (dynamic frameworks compiled from the cross-platform SPM sources) ---
+  # Frameworks need a synthesized Info.plist; without it codesign rejects the bundle
+  # ("bundle format unrecognized"). The app/CLI targets set INFOPLIST_FILE explicitly instead.
+  DisplayDomain:
+    type: framework
+    platform: macOS
+    settings: &frameworkSettings
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+    sources: [Packages/DisplayDomain/Sources/DisplayDomain]
+
+  ProviderInterfaces:
+    type: framework
+    platform: macOS
+    settings: *frameworkSettings
+    sources: [Packages/ProviderInterfaces/Sources/ProviderInterfaces]
+    dependencies:
+      - target: DisplayDomain
+
+  SceneEngine:
+    type: framework
+    platform: macOS
+    settings: *frameworkSettings
+    sources: [Packages/SceneEngine/Sources/SceneEngine]
+    dependencies:
+      - target: DisplayDomain
+
+  AutomationSchema:
+    type: framework
+    platform: macOS
+    settings: *frameworkSettings
+    sources: [Packages/AutomationSchema/Sources/AutomationSchema]
+    dependencies:
+      - target: DisplayDomain
+
+  TopologyCore:
+    type: framework
+    platform: macOS
+    settings: *frameworkSettings
+    sources: [Packages/TopologyCore/Sources/TopologyCore]
+    dependencies:
+      - target: DisplayDomain
+      - target: ProviderInterfaces
+      - target: SceneEngine
+      - target: AutomationSchema
+
+  SimulatorProvider:
+    type: framework
+    platform: macOS
+    settings: *frameworkSettings
+    sources: [Packages/SimulatorProvider/Sources/SimulatorProvider]
+    dependencies:
+      - target: DisplayDomain
+      - target: ProviderInterfaces
+
+  # --- Design system (framework) ---
+  OpenDisplayDesignSystem:
+    type: framework
+    platform: macOS
+    settings: *frameworkSettings
+    sources: [Packages/OpenDisplayDesignSystem/Sources]
+    dependencies:
+      - target: DisplayDomain
+
+  # --- Providers (frameworks). Each imports DisplayDomain + ProviderInterfaces. ---
+  CoreGraphicsProvider:
+    type: framework
+    platform: macOS
+    settings: *frameworkSettings
+    sources: [Providers/CoreGraphicsProvider/Sources]
+    dependencies: &providerDeps
+      - target: DisplayDomain
+      - target: ProviderInterfaces
+
+  CaptureProvider:
+    type: framework
+    platform: macOS
+    settings: *frameworkSettings
+    sources: [Providers/CaptureProvider/Sources]
+    dependencies: *providerDeps
+
+  ExperimentalLifecycleProvider:
+    type: framework
+    platform: macOS
+    settings: *frameworkSettings
+    sources: [Providers/ExperimentalLifecycleProvider/Sources]
+    dependencies: *providerDeps
+
+  VirtualDisplayProvider:
+    type: framework
+    platform: macOS
+    settings: *frameworkSettings
+    sources: [Providers/VirtualDisplayProvider/Sources]
+    dependencies: *providerDeps
+
+  # --- Menu-bar + settings app (full: Core + experimental providers) ---
+  # Apps EMBED the full closure of dynamic frameworks (XcodeGen embeds framework deps of an app by
+  # default; the inter-framework deps above link without embedding). Every core + provider framework
+  # the app or its frameworks need is listed so the closure is embedded exactly once.
+  OpenDisplay:
+    type: application
+    platform: macOS
+    sources: [Apps/OpenDisplay/Sources]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.opendisplay.app
+        INFOPLIST_FILE: Apps/OpenDisplay/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Apps/OpenDisplay/Resources/OpenDisplay.entitlements
+    dependencies:
+      - target: OpenDisplayDesignSystem
+      - target: CoreGraphicsProvider
+      - target: CaptureProvider
+      - target: ExperimentalLifecycleProvider
+      - target: VirtualDisplayProvider
+      - target: DisplayDomain
+      - target: ProviderInterfaces
+      - target: TopologyCore
+      - target: SceneEngine
+      - target: AutomationSchema
+      - target: SimulatorProvider
+
+  # --- Public-API-only flavor: same sources, experimental/virtual providers excluded
+  #     (NFR-010 / D-008); defines PUBLIC_API_ONLY for conditional wiring. ---
+  OpenDisplay-PublicAPIOnly:
+    type: application
+    platform: macOS
+    sources: [Apps/OpenDisplay/Sources]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.opendisplay.app.publicapionly
+        INFOPLIST_FILE: Apps/OpenDisplay/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Apps/OpenDisplay/Resources/OpenDisplay.entitlements
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: PUBLIC_API_ONLY
+    dependencies:
+      - target: OpenDisplayDesignSystem
+      - target: CoreGraphicsProvider
+      - target: CaptureProvider
+      - target: DisplayDomain
+      - target: ProviderInterfaces
+      - target: TopologyCore
+      - target: SceneEngine
+      - target: AutomationSchema
+      - target: SimulatorProvider
+
+  # --- Independent rescue utility ---
+  OpenDisplayRescue:
+    type: application
+    platform: macOS
+    sources: [Apps/OpenDisplayRescue/Sources]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.opendisplay.rescue
+        INFOPLIST_FILE: Apps/OpenDisplayRescue/Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Apps/OpenDisplayRescue/Resources/OpenDisplayRescue.entitlements
+    dependencies:
+      - target: CoreGraphicsProvider
+      - target: ExperimentalLifecycleProvider
+      - target: DisplayDomain
+      - target: ProviderInterfaces
+      - target: SceneEngine
+      - target: TopologyCore
+
+  # --- Automation CLI ---
+  # A command-line tool is not a bundle, so it can't embed frameworks. We link the dynamic core
+  # frameworks (embed: false) and add @executable_path / @loader_path to the runtime search path so
+  # the tool resolves them from the build-products dir (where they sit beside the executable). The
+  # frameworks' install names are @rpath/<Name>.framework/Versions/A/<Name>.
+  opendisplay:
+    type: tool
+    platform: macOS
+    sources: [Tools/opendisplay/Sources]
+    settings:
+      base:
+        LD_RUNPATH_SEARCH_PATHS:
+          - "@executable_path"
+          - "@loader_path"
+          # Bundled at OpenDisplay.app/Contents/Helpers, the embedded frameworks are in ../Frameworks.
+          - "@executable_path/../Frameworks"
+    dependencies:
+      - target: DisplayDomain
+        embed: false
+      - target: ProviderInterfaces
+        embed: false
+      - target: SceneEngine
+        embed: false
+      - target: AutomationSchema
+        embed: false
+      - target: TopologyCore
+        embed: false
+      - target: CoreGraphicsProvider
+        embed: false
+      - target: ExperimentalLifecycleProvider
+        embed: false
+
+schemes:
+  OpenDisplay:
+    build:
+      targets: { OpenDisplay: all }
+    run:
+      config: Debug
+  OpenDisplay-PublicAPIOnly:
+    build:
+      targets: { OpenDisplay-PublicAPIOnly: all }
+    run:
+      config: Debug
+  OpenDisplayRescue:
+    build:
+      targets: { OpenDisplayRescue: all }
+    run:
+      config: Debug
+  opendisplay:
+    build:
+      targets: { opendisplay: all }
+    run:
+      config: Debug
