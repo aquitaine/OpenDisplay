@@ -1401,8 +1401,19 @@ final class AppModel: ObservableObject {
     /// delegate's `applicationShouldTerminate` defers termination until this completes so the
     /// reconnect actually lands before the process exits.
     func teardownForQuit() async {
+        // Reconnect each off-card the way `reconnectOffline(_:)` does — by raw display id, since a
+        // disabled display drops off the online list. `coordinator.reconnectAll()` only sees the
+        // observer snapshot's offline list, which doesn't include this persisted `managedOffline`
+        // set, so it would no-op here and leave the display off.
+        for offline in managedOffline {
+            let reconnectID = offline.cgID != 0
+                ? DisplayRecordID(rawValue: "cgid:\(offline.cgID)")
+                : offline.recordID
+            try? await lifecycle.reconnect(reconnectID, deadline: Date().addingTimeInterval(10))
+        }
         if !managedOffline.isEmpty {
-            _ = await coordinator.reconnectAll()
+            managedOffline.removeAll()
+            persistManagedOffline()
         }
         CoreGraphicsProvider.restoreGamma()
         softwareDim.removeAll()
