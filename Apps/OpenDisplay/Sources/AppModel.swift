@@ -471,9 +471,9 @@ final class AppModel: ObservableObject {
     /// Reversible (public Core Graphics mirroring).
     func setMirrored(_ on: Bool, for observation: DisplayObservation) async {
         guard let cgID = observation.cgDisplayID else { return }
-        await applyWithRevert(on ? "Mirroring turned on" : "Mirroring turned off") {
-            _ = await self.observer.setMirroring(of: cgID, enabled: on)
-        }
+        // Reversible and never unreadable, so (like set-main) it applies directly without the revert gate.
+        _ = await observer.setMirroring(of: cgID, enabled: on)
+        await refresh()
     }
 
     /// Sets a display's software (gamma) dim, 0.15...1 where 1 = no dim. Works on any display.
@@ -1063,33 +1063,35 @@ final class AppModel: ObservableObject {
 
     /// Makes a display the main display by re-anchoring every origin so this one sits at (0,0) —
     /// Core Graphics treats the display at the origin as main.
+    /// Applies immediately and sticks — no timed auto-revert. Changing the main display never leaves a
+    /// display unreadable (both stay usable), so the revert gate (which is for bad resolutions) would
+    /// only undo the user's intended change and bounce the menu bar back. Issue 6's gate is therefore
+    /// resolution-only.
     func setMain(for observation: DisplayObservation) async {
         guard !observation.isMain else { return }
-        await applyWithRevert("Main display changed to \(displayName(for: observation))") {
-            let snapshot = await self.observer.currentSnapshot()
-            let dx = -observation.origin.x
-            let dy = -observation.origin.y
-            let targets = snapshot.observations.compactMap { obs -> CoreGraphicsProvider.ArrangementTarget? in
-                guard let cgID = obs.cgDisplayID else { return nil }
-                return .init(displayID: cgID,
-                             origin: DisplayOrigin(x: obs.origin.x + dx, y: obs.origin.y + dy),
-                             mode: nil)
-            }
-            _ = self.observer.applyArrangement(targets)
+        let snapshot = await observer.currentSnapshot()
+        let dx = -observation.origin.x
+        let dy = -observation.origin.y
+        let targets = snapshot.observations.compactMap { obs -> CoreGraphicsProvider.ArrangementTarget? in
+            guard let cgID = obs.cgDisplayID else { return nil }
+            return .init(displayID: cgID,
+                         origin: DisplayOrigin(x: obs.origin.x + dx, y: obs.origin.y + dy),
+                         mode: nil)
         }
+        _ = observer.applyArrangement(targets)
+        await refresh()
     }
 
     // MARK: - Timed auto-revert safety gate (Issue 6)
 
-    /// Countdown length for an arrangement revert window. Reuses the existing confirmation-countdown
-    /// setting (clamped to a sane minimum) so resolution/mirror/set-main share one tunable.
+    /// Countdown length for the resolution revert window (clamped to a sane minimum).
     private var arrangementRevertSeconds: Int { max(3, settings.arrangementAutoRevertSeconds) }
 
-    /// Applies an arrangement-altering change (resolution / mirror / set-main) behind a macOS-style
-    /// timed auto-revert: snapshot the prior arrangement, apply, then start a "Keep these settings?"
-    /// countdown that restores the snapshot unless the user confirms. The auto-revert needs no user
-    /// input, so recovery is guaranteed even if the changed display became unreadable; the prompt is
-    /// surfaced on the menu-bar display (and the global Reconnect-All hotkey stays available too).
+    /// Applies a **resolution** change behind a macOS-style timed auto-revert: snapshot the prior mode,
+    /// apply, then start a "Keep these settings?" countdown that restores it unless the user confirms.
+    /// Used for resolution only — a bad/blank mode can strand a display, whereas set-main and mirror
+    /// never leave a display unreadable, so those apply directly (reverting them just fights the user).
+    /// The auto-revert needs no input, so recovery is guaranteed even if the display became unreadable.
     private func applyWithRevert(_ message: String, _ apply: () async -> Void) async {
         // A change made while a window is still open keeps the prior one, then opens a fresh window.
         if revertGate?.isPending == true { confirmArrangementChange() }
@@ -1107,8 +1109,8 @@ final class AppModel: ObservableObject {
         // lets the next launch restore the prior arrangement if the app dies mid-window.
         Self.writeRevertMarker(before)
         pendingRevert = PendingRevert(message: message, secondsRemaining: seconds)
-        // The confirmation renders in-context (menu-bar pop-out and the Settings window) wherever the
-        // user made the change — both observe `pendingRevert`.
+        // The confirmation renders in-context (menu-bar pop-out and the Settings window), both of which
+        // observe `pendingRevert`. The AppKit status item ensures the pop-out is on the right screen.
         revertTask?.cancel()
         revertTask = Task { [weak self] in await self?.driveRevertCountdown() }
     }

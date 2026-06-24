@@ -11,7 +11,6 @@ import SwiftUI
 /// popover stays lean. See `Docs/InterfaceRedesign.md`.
 struct MenuBarView: View {
     @EnvironmentObject private var model: AppModel
-    @Environment(\.openSettings) private var openSettingsAction
     @State private var expandedID: DisplayRecordID?
 
     var body: some View {
@@ -37,8 +36,8 @@ struct MenuBarView: View {
     }
 
     /// "Keep these settings?" countdown for an arrangement-altering change (Issue 6), shown right below
-    /// the menu-bar icon in the pop-out — on whichever screen the user opened the menu from, so it's
-    /// where their cursor already is. The change also auto-reverts on its own if nothing is clicked.
+    /// the icon inside this pop-out — which (via the AppKit status item) now opens on the screen the
+    /// user clicked. The change also auto-reverts on its own if nothing is clicked.
     @ViewBuilder
     private var revertBanner: some View {
         if let pending = model.pendingRevert {
@@ -137,7 +136,12 @@ struct MenuBarView: View {
     /// "Displays have separate Spaces" the SwiftUI Settings window opens on the main display's
     /// Space, so clicking the menu bar on an extended display otherwise appears to do nothing.
     private func showSettings() {
-        openSettingsAction()
+        // The pop-out is hosted in an AppKit NSPopover, so SwiftUI's openSettings environment action
+        // isn't wired; open the Settings scene through the responder chain instead (macOS 14 selector,
+        // with the older name as a fallback).
+        if !NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
             guard let window = NSApp.windows.first(where: {
                 $0.styleMask.contains(.titled) && $0.canBecomeMain
