@@ -209,3 +209,12 @@ off → never", and text/name resolution; plus the `SettingsStore` toggle round-
   - Scope: pure drift logic + persistable config this issue (wiring drift→confirm→auto-restore via the
     existing `ScenePlanner`/`restoreArrangement` is a follow-up). No hardware needed.
   - `make test` green (175). Fully covered by unit tests (pure snapshot logic).
+- **Issue 4 — Expanded keyboard shortcuts** ✅ logic+wiring (commit on `batch2`); live firing deferred
+  - Pure `KeyboardShortcutRegistry` + `HotkeyAction` + `KeyBinding` in **TopologyCore** (defaults,
+    set/clear, reverse lookup, conflict detection, merge-over-defaults, tolerant action-keyed Codable).
+    7 tests + 1 `SettingsStore` test. `OpenDisplaySettings.hotkeyShortcuts` (default `.defaults`).
+  - `GlobalHotKey` generalized to register any `(keyCode, modifiers, id)`; `AppModel.registerHotkeys`
+    registers every bound action (reconnect-all + cycle-main + brightness ±). Reconnect-All unchanged.
+  - `make test` green (183); both app flavors build.
+  - `[deferred: attended verification]` chords actually firing (esp. newly-bound actions); a settings UI
+    to *rebind* shortcuts is a follow-up (registry + defaults + wiring are in place).

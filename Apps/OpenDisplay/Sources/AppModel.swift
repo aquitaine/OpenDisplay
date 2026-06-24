@@ -192,7 +192,7 @@ final class AppModel: ObservableObject {
     private var colorPresetTarget: [DisplayRecordID: Int] = [:]
     private var colorPresetWriter: [DisplayRecordID: Task<Void, Never>] = [:]
     #endif
-    private var hotKey: GlobalHotKey?
+    private var hotKeys: [GlobalHotKey] = []
     private var registry: DisplayRegistry?
     private var sceneLibrary: SceneLibrary?
     /// Persisted user settings. Mutated only through the dedicated setters (which also persist and
@@ -246,22 +246,12 @@ final class AppModel: ObservableObject {
         let favoritesStore = (try? SettingsStore.defaultDirectory()).map(FavoritesStore.init(directory:))
         self.favoritesStore = favoritesStore
         self.favorites = favoritesStore?.load() ?? FavoriteResolutions()
-        // Always-available global Reconnect-All (recovery hierarchy step 3): reachable even when the
-        // menu bar isn't. Skipped if disabled in settings; falls back to the menu-bar item if the
-        // chord can't be registered.
-        if settings.reconnectAllHotkeyEnabled {
-            self.hotKey = GlobalHotKey.reconnectAll { [weak self] in
-                #if DEBUG
-                AppModel.debugMarkHotKeyFired()
-                #endif
-                Task { await self?.reconnectAll() }
-            }
-        }
+        // Register the configurable global hotkeys (Batch-2 #4). Reconnect-All is always-available
+        // (recovery hierarchy step 3) and reachable even when the menu bar isn't; the rest are unbound
+        // by default. A chord that can't be claimed is simply skipped (menu-bar item remains).
+        registerHotkeys()
         #if DEBUG
-        let hotkeyState = settings.reconnectAllHotkeyEnabled
-            ? (hotKey != nil ? "registered" : "FAILED")
-            : "disabled in settings"
-        FileHandle.standardError.write(Data("Global Reconnect-All hotkey (Ctrl-Opt-Cmd-R) \(hotkeyState)\n".utf8))
+        FileHandle.standardError.write(Data("Global hotkeys registered: \(hotKeys.count)\n".utf8))
         #endif
         Task {
             await setUpRegistry()
@@ -1369,6 +1359,58 @@ final class AppModel: ObservableObject {
         defer { busy = false }
         _ = await coordinator.reconnectAll()
         await refresh()
+    }
+
+    // MARK: - Global keyboard shortcuts (Batch-2 #4)
+
+    /// Registers a Carbon global hotkey for every bound action in the (defaults-merged) shortcut
+    /// registry, mapping each to its handler. Reconnect-All honours the existing enable toggle.
+    private func registerHotkeys() {
+        hotKeys.removeAll()
+        let registry = settings.hotkeyShortcuts.mergedWithDefaults()
+        var nextID: UInt32 = 1
+        for action in HotkeyAction.allCases {
+            guard let binding = registry.binding(for: action) else { continue }
+            if action == .reconnectAll && !settings.reconnectAllHotkeyEnabled { continue }
+            if let hotkey = GlobalHotKey(keyCode: binding.keyCode, modifiers: binding.modifiers,
+                                         id: nextID, action: hotkeyHandler(for: action)) {
+                hotKeys.append(hotkey)
+            }
+            nextID += 1
+        }
+    }
+
+    private func hotkeyHandler(for action: HotkeyAction) -> () -> Void {
+        switch action {
+        case .reconnectAll:
+            return { [weak self] in
+                #if DEBUG
+                AppModel.debugMarkHotKeyFired()
+                #endif
+                Task { await self?.reconnectAll() }
+            }
+        case .cycleMainDisplay:
+            return { [weak self] in Task { await self?.cycleMainDisplay() } }
+        case .brightnessUp:
+            return { [weak self] in Task { await self?.adjustMainBrightness(by: 0.1) } }
+        case .brightnessDown:
+            return { [weak self] in Task { await self?.adjustMainBrightness(by: -0.1) } }
+        }
+    }
+
+    /// Makes the next active display the main display (wraps around).
+    func cycleMainDisplay() async {
+        let actives = displays.filter(\.isActive)
+        guard actives.count > 1 else { return }
+        let idx = actives.firstIndex(where: { $0.isMain }) ?? 0
+        await setMain(for: actives[(idx + 1) % actives.count])
+    }
+
+    /// Nudges the main display's brightness by `delta`, clamped to 0...1.
+    func adjustMainBrightness(by delta: Float) async {
+        guard let main = displays.first(where: { $0.isMain }) else { return }
+        let current = brightness[main.recordID] ?? 0.5
+        setBrightness(max(0, min(1, current + delta)), for: main)
     }
 
     #if DEBUG

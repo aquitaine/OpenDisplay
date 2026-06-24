@@ -21,6 +21,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// Seconds the "Keep these display settings?" prompt waits before auto-reverting a
     /// resolution/mirror/set-main change (Issue 6). Floored at 3 by the app.
     public var arrangementAutoRevertSeconds: Int
+    /// Configurable global keyboard shortcuts (Batch-2 #4). Defaults to the shipped bindings.
+    public var hotkeyShortcuts: KeyboardShortcutRegistry
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
@@ -28,7 +30,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         reconnectAllHotkeyEnabled: Bool = true,
         preventDisplaySleepWithExternal: Bool = false,
         autoDisconnectBuiltInOnExternal: Bool = false,
-        arrangementAutoRevertSeconds: Int = 10
+        arrangementAutoRevertSeconds: Int = 10,
+        hotkeyShortcuts: KeyboardShortcutRegistry = .defaults
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
@@ -36,6 +39,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.preventDisplaySleepWithExternal = preventDisplaySleepWithExternal
         self.autoDisconnectBuiltInOnExternal = autoDisconnectBuiltInOnExternal
         self.arrangementAutoRevertSeconds = arrangementAutoRevertSeconds
+        self.hotkeyShortcuts = hotkeyShortcuts
     }
 
     public static let `default` = OpenDisplaySettings()
@@ -45,6 +49,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case preventDisplaySleepWithExternal
         case autoDisconnectBuiltInOnExternal
         case arrangementAutoRevertSeconds
+        case hotkeyShortcuts
     }
 
     /// Tolerant decoder: every missing key falls back to its default and unknown keys are ignored,
@@ -67,6 +72,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         arrangementAutoRevertSeconds = try container
             .decodeIfPresent(Int.self, forKey: .arrangementAutoRevertSeconds)
             ?? defaults.arrangementAutoRevertSeconds
+        hotkeyShortcuts = try container
+            .decodeIfPresent(KeyboardShortcutRegistry.self, forKey: .hotkeyShortcuts)
+            ?? defaults.hotkeyShortcuts
     }
 }
 

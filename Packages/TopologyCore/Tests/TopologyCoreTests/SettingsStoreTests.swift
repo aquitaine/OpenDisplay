@@ -62,6 +62,19 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertFalse(SettingsStore(directory: directory).load().preventDisplaySleepWithExternal)
     }
 
+    func testHotkeyShortcutsDefaultAndRoundTrip() throws {
+        XCTAssertEqual(OpenDisplaySettings.default.hotkeyShortcuts, .defaults)
+        let store = SettingsStore(directory: directory)
+        var reg = KeyboardShortcutRegistry()
+        reg.setBinding(KeyBinding(keyCode: 0x7E, modifiers: KeyBinding.controlOptionCommand), for: .brightnessUp)
+        try store.save(OpenDisplaySettings(hotkeyShortcuts: reg))
+        XCTAssertEqual(store.load().hotkeyShortcuts, reg)
+        // Older file without the key → defaults.
+        try Data(#"{"persistencePolicy":"reconnectOnQuit"}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        XCTAssertEqual(SettingsStore(directory: directory).load().hotkeyShortcuts, .defaults)
+    }
+
     func testArrangementAutoRevertDefaultsTo10AndRoundTrips() throws {
         XCTAssertEqual(OpenDisplaySettings.default.arrangementAutoRevertSeconds, 10)
         let store = SettingsStore(directory: directory)
