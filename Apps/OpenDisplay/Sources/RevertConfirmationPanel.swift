@@ -1,36 +1,37 @@
 #if os(macOS)
 import AppKit
-import CoreGraphics
 import SwiftUI
 
 /// Floating "Keep these display settings?" confirmation for the timed auto-revert gate (Issue 6).
 ///
-/// Replaces the earlier menu-bar-popover banner, which only appeared while the popover happened to be
-/// open and on whatever display hosted it — so a resolution change made from the Settings window (the
-/// gate's primary case) showed no prompt at all, and a set-main showed it on whichever display the
-/// menu was opened from rather than anywhere deliberate.
-///
-/// This panel floats above everything, appears no matter where the change was triggered, and is placed
-/// on the display being changed (the one the user is acting on). The auto-revert still covers the case
-/// where that display is unreadable — it needs no interaction at all, so an unseen prompt just lapses
-/// and the prior arrangement is restored.
+/// Replaces the earlier menu-bar-popover banner, which only appeared while that popover happened to be
+/// open. This pop-out appears wherever the change was triggered: it's placed on the screen the user is
+/// acting on (the one under the cursor — i.e. the screen whose menu-bar icon they just used, or whose
+/// Settings slider they dragged) and anchored at the top, just below the menu bar near the cursor. The
+/// mouse is already where it needs to be, with no jump to another display. The auto-revert still covers
+/// an unreadable display, since it needs no interaction at all.
 @MainActor
 final class RevertConfirmationPresenter {
     private var panel: NSPanel?
 
-    /// Show (or reposition) the confirmation for `model.pendingRevert`, anchored to the top-right of
-    /// the changed display — just under the menu bar, next to the OpenDisplay status item, so it's
-    /// where the user's attention already is and isn't lost in the middle of a busy screen. The hosted
-    /// SwiftUI view observes `model`, so the countdown updates itself.
-    func show(model: AppModel, changedDisplayID: CGDirectDisplayID?) {
-        guard let screen = Self.screen(for: changedDisplayID) else { return }
+    /// Show (or reposition) the confirmation for `model.pendingRevert`. The hosted SwiftUI view
+    /// observes `model`, so the countdown updates itself.
+    func show(model: AppModel) {
         let panel = self.panel ?? makePanel(model: model)
         self.panel = panel
-        let size = panel.contentView?.fittingSize ?? NSSize(width: 320, height: 150)
+        guard let screen = Self.cursorScreen() else { return }
+
+        panel.contentView?.layoutSubtreeIfNeeded()
+        let size = panel.contentView?.fittingSize ?? NSSize(width: 300, height: 150)
         let visible = screen.visibleFrame  // excludes the menu bar and Dock
-        let margin: CGFloat = 12
-        let origin = NSPoint(x: visible.maxX - size.width - margin, y: visible.maxY - size.height - margin)
-        panel.setFrame(NSRect(origin: origin, size: size), display: true)
+        let topGap: CGFloat = 6
+        let edge: CGFloat = 8
+        // Horizontally centered under the cursor (≈ beneath the menu-bar icon / where the user clicked),
+        // clamped fully on-screen; vertically just under the menu bar.
+        let cursorX = NSEvent.mouseLocation.x
+        let x = min(max(cursorX - size.width / 2, visible.minX + edge), visible.maxX - size.width - edge)
+        let y = visible.maxY - size.height - topGap
+        panel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
         panel.orderFrontRegardless()
     }
 
@@ -41,45 +42,44 @@ final class RevertConfirmationPresenter {
 
     private func makePanel(model: AppModel) -> NSPanel {
         let hosting = NSHostingView(rootView: RevertPromptView().environmentObject(model))
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 150),
-            styleMask: [.titled, .nonactivatingPanel, .utilityWindow],
-            backing: .buffered, defer: false
+        let panel = KeyabledPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 300, height: 150),
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false
         )
-        panel.title = "OpenDisplay"
         panel.isFloatingPanel = true
         panel.level = .floating
+        panel.isOpaque = false
+        panel.backgroundColor = .clear          // let the SwiftUI rounded card show through
+        panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
-        // Show on whatever Space is active on the target display, and stay above full-screen apps.
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.contentView = hosting
         return panel
     }
 
-    /// The `NSScreen` for `displayID`, or the main/first screen as a fallback.
-    private static func screen(for displayID: CGDirectDisplayID?) -> NSScreen? {
-        let screens = NSScreen.screens
-        if let id = displayID, let match = screens.first(where: { screenNumber($0) == id }) {
-            return match
-        }
-        return NSScreen.main ?? screens.first
-    }
-
-    private static func screenNumber(_ screen: NSScreen) -> CGDirectDisplayID? {
-        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    /// The screen currently under the cursor (where the user is acting), or main/first as a fallback.
+    private static func cursorScreen() -> NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
+            ?? NSScreen.main ?? NSScreen.screens.first
     }
 }
 
-/// Contents of the floating revert confirmation. Bound to `AppModel.pendingRevert` so the countdown
-/// ticks live; the buttons drive the same `confirmArrangementChange()` / `revertArrangementChange()`
-/// the gate already exposes.
+/// A borderless panel that can still become key, so the Return-to-Keep shortcut works once clicked.
+private final class KeyabledPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
+/// Contents of the floating revert confirmation — a compact rounded card. Bound to
+/// `AppModel.pendingRevert` so the countdown ticks live; the buttons drive the same
+/// `confirmArrangementChange()` / `revertArrangementChange()` the gate already exposes.
 private struct RevertPromptView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
         let pending = model.pendingRevert
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             Label("Keep these display settings?", systemImage: "clock.arrow.circlepath")
                 .font(.headline)
             if let pending {
@@ -89,15 +89,20 @@ private struct RevertPromptView: View {
                 Text("Reverting in \(pending.secondsRemaining) second\(pending.secondsRemaining == 1 ? "" : "s")…")
                     .font(.callout).monospacedDigit().foregroundStyle(.secondary)
             }
-            HStack {
+            HStack(spacing: 8) {
                 Button("Revert Now") { Task { await model.revertArrangementChange() } }
-                Spacer()
                 Button("Keep") { model.confirmArrangementChange() }
                     .keyboardShortcut(.defaultAction)
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .padding(20)
-        .frame(width: 320)
+        .padding(16)
+        .frame(width: 300)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08))
+        )
     }
 }
 #endif

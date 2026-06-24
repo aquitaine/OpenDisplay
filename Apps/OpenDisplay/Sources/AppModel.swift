@@ -473,7 +473,7 @@ final class AppModel: ObservableObject {
     /// Reversible (public Core Graphics mirroring).
     func setMirrored(_ on: Bool, for observation: DisplayObservation) async {
         guard let cgID = observation.cgDisplayID else { return }
-        await applyWithRevert(on ? "Mirroring turned on" : "Mirroring turned off", changedDisplayID: cgID) {
+        await applyWithRevert(on ? "Mirroring turned on" : "Mirroring turned off") {
             _ = await self.observer.setMirroring(of: cgID, enabled: on)
         }
     }
@@ -1024,7 +1024,7 @@ final class AppModel: ObservableObject {
     /// and reverts itself unless confirmed within the window.
     func setMode(_ mode: DisplayMode, for observation: DisplayObservation) async {
         guard let cgID = observation.cgDisplayID else { return }
-        await applyWithRevert("Resolution changed on \(displayName(for: observation))", changedDisplayID: cgID) {
+        await applyWithRevert("Resolution changed on \(displayName(for: observation))") {
             _ = self.observer.applyArrangement([.init(displayID: cgID, origin: nil, mode: mode)])
         }
     }
@@ -1067,8 +1067,7 @@ final class AppModel: ObservableObject {
     /// Core Graphics treats the display at the origin as main.
     func setMain(for observation: DisplayObservation) async {
         guard !observation.isMain else { return }
-        await applyWithRevert("Main display changed to \(displayName(for: observation))",
-                              changedDisplayID: observation.cgDisplayID) {
+        await applyWithRevert("Main display changed to \(displayName(for: observation))") {
             let snapshot = await self.observer.currentSnapshot()
             let dx = -observation.origin.x
             let dy = -observation.origin.y
@@ -1093,20 +1092,16 @@ final class AppModel: ObservableObject {
     /// countdown that restores the snapshot unless the user confirms. The auto-revert needs no user
     /// input, so recovery is guaranteed even if the changed display became unreadable; the prompt is
     /// surfaced on the menu-bar display (and the global Reconnect-All hotkey stays available too).
-    private func applyWithRevert(
-        _ message: String, changedDisplayID: CGDirectDisplayID?, _ apply: () async -> Void
-    ) async {
+    private func applyWithRevert(_ message: String, _ apply: () async -> Void) async {
         // A change made while a window is still open keeps the prior one, then opens a fresh window.
         if revertGate?.isPending == true { confirmArrangementChange() }
         let before = await observer.currentSnapshot().observations
         await apply()
         await refresh()
-        beginRevertWindow(before: before, message: message, changedDisplayID: changedDisplayID)
+        beginRevertWindow(before: before, message: message)
     }
 
-    private func beginRevertWindow(
-        before: [DisplayObservation], message: String, changedDisplayID: CGDirectDisplayID?
-    ) {
+    private func beginRevertWindow(before: [DisplayObservation], message: String) {
         let seconds = arrangementRevertSeconds
         revertGate = TimedRevertGate(before: before, deadline: Date().addingTimeInterval(Double(seconds)))
         revertMessage = message
@@ -1114,9 +1109,9 @@ final class AppModel: ObservableObject {
         // lets the next launch restore the prior arrangement if the app dies mid-window.
         Self.writeRevertMarker(before)
         pendingRevert = PendingRevert(message: message, secondsRemaining: seconds)
-        // Surface the confirmation as a floating panel on the changed display (reliable regardless of
-        // whether the change came from the menu or the Settings window).
-        revertPresenter.show(model: self, changedDisplayID: changedDisplayID)
+        // Surface the confirmation as a floating pop-out on the screen the user is acting on (reliable
+        // regardless of whether the change came from the menu or the Settings window).
+        revertPresenter.show(model: self)
         revertTask?.cancel()
         revertTask = Task { [weak self] in await self?.driveRevertCountdown() }
     }
