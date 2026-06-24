@@ -1388,6 +1388,27 @@ final class AppModel: ObservableObject {
         await refresh()
     }
 
+    // MARK: - Quit-time revert
+
+    /// True when the app has put the system into a non-default state whose reversal needs async work
+    /// before the process exits — currently, a display it logically turned off. Gamma dim and the
+    /// keep-awake assertion are restored synchronously by the `willTerminate` backstop, so they don't
+    /// gate termination on their own.
+    var needsQuitReversion: Bool { !managedOffline.isEmpty }
+
+    /// Reverts every app-made system change so quitting returns the Mac to a clean default: reconnect
+    /// any display we turned off, lift any software dim/blackout, and drop keep-awake assertions. The
+    /// delegate's `applicationShouldTerminate` defers termination until this completes so the
+    /// reconnect actually lands before the process exits.
+    func teardownForQuit() async {
+        if !managedOffline.isEmpty {
+            _ = await coordinator.reconnectAll()
+        }
+        CoreGraphicsProvider.restoreGamma()
+        softwareDim.removeAll()
+        sleepGuard.releaseAll()
+    }
+
     // MARK: - Global keyboard shortcuts (Batch-2 #4)
 
     /// Registers a Carbon global hotkey for every bound action in the (defaults-merged) shortcut

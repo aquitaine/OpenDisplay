@@ -70,6 +70,12 @@ struct MenuBarView: View {
             }
             .buttonStyle(.plain).foregroundStyle(.secondary)
             .accessibilityLabel("Open Settings")
+            Button { NSApp.terminate(nil) } label: {
+                Image(systemName: "power").font(.system(size: 15))
+            }
+            .buttonStyle(.plain).foregroundStyle(.secondary)
+            .accessibilityLabel("Quit OpenDisplay")
+            .help("Quit OpenDisplay — reconnects any displays it turned off")
             Menu {
                 Toggle("Keep displays awake while external connected", isOn: Binding(
                     get: { model.settings.preventDisplaySleepWithExternal },
@@ -132,32 +138,11 @@ struct MenuBarView: View {
         }
     }
 
-    /// Opens Settings and brings the window to the display the user is actually looking at. With
-    /// "Displays have separate Spaces" the SwiftUI Settings window opens on the main display's
-    /// Space, so clicking the menu bar on an extended display otherwise appears to do nothing.
+    /// Asks the app delegate to open Settings. The delegate owns that window (AppKit, not SwiftUI's
+    /// `Settings` scene) and places it on the screen the user is looking at — opening it through the
+    /// responder chain from this `NSPopover` was unreliable and often appeared to do nothing.
     private func showSettings() {
-        // The pop-out is hosted in an AppKit NSPopover, so SwiftUI's openSettings environment action
-        // isn't wired; open the Settings scene through the responder chain instead (macOS 14 selector,
-        // with the older name as a fallback).
-        if !NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
-            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            guard let window = NSApp.windows.first(where: {
-                $0.styleMask.contains(.titled) && $0.canBecomeMain
-            }) else { return }
-            window.collectionBehavior.insert(.moveToActiveSpace)
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-            if let screen = NSScreen.screens.first(where: {
-                NSMouseInRect(NSEvent.mouseLocation, $0.frame, false)
-            }) {
-                let visible = screen.visibleFrame
-                let size = window.frame.size
-                window.setFrameOrigin(NSPoint(x: visible.midX - size.width / 2,
-                                              y: visible.midY - size.height / 2))
-            }
-        }
+        NotificationCenter.default.post(name: .openDisplayShowSettings, object: nil)
     }
 }
 
