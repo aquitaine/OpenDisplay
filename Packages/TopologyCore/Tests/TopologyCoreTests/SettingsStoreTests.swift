@@ -47,6 +47,21 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(loaded.confirmationCountdownSeconds, OpenDisplaySettings.default.confirmationCountdownSeconds)
     }
 
+    func testPreventDisplaySleepDefaultsOffAndRoundTrips() throws {
+        XCTAssertFalse(OpenDisplaySettings.default.preventDisplaySleepWithExternal)
+        let store = SettingsStore(directory: directory)
+        let settings = OpenDisplaySettings(preventDisplaySleepWithExternal: true)
+        try store.save(settings)
+        XCTAssertTrue(store.load().preventDisplaySleepWithExternal)
+    }
+
+    func testMissingPreventDisplaySleepKeyDefaultsOff() throws {
+        // A settings file written before this key existed must still load, defaulting the key off.
+        let json = #"{"persistencePolicy":"reconnectOnQuit","confirmationCountdownSeconds":5}"#
+        try Data(json.utf8).write(to: directory.appendingPathComponent("settings.json"))
+        XCTAssertFalse(SettingsStore(directory: directory).load().preventDisplaySleepWithExternal)
+    }
+
     func testSettingsFileIsIndependentlyReadable() throws {
         let store = SettingsStore(directory: directory)
         try store.save(OpenDisplaySettings(persistencePolicy: .reconnectOnWake))

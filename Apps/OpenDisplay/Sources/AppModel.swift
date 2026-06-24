@@ -191,7 +191,14 @@ final class AppModel: ObservableObject {
     private var hotKey: GlobalHotKey?
     private var registry: DisplayRegistry?
     private var sceneLibrary: SceneLibrary?
-    let settings: OpenDisplaySettings
+    /// Persisted user settings. Mutated only through the dedicated setters (which also persist and
+    /// reconcile side effects), so the on-disk store and any derived state stay in lockstep.
+    @Published private(set) var settings: OpenDisplaySettings
+    /// On-disk settings store (Application Support); nil only if that directory can't be resolved.
+    private let settingsStore: SettingsStore?
+    /// Holds the "prevent display idle-sleep" power assertion while the toggle is on and an external
+    /// display is present (Issue 3). Decision logic is the platform-independent `DisplaySleepGuard`.
+    private let sleepGuard: DisplaySleepGuard
 
     init() {
         let observer = CoreGraphicsProvider()
@@ -209,7 +216,10 @@ final class AppModel: ObservableObject {
             // `.blocked` cases — chiefly "this would leave no active display" — are NOT bypassable here.
             confirm: { _, _ in true }
         )
-        self.settings = AppModel.loadSettings()
+        let settingsStore = (try? SettingsStore.defaultDirectory()).map(SettingsStore.init(directory:))
+        self.settingsStore = settingsStore
+        self.settings = settingsStore?.load() ?? .default
+        self.sleepGuard = DisplaySleepGuard(backend: IOKitPowerAssertions())
         // Always-available global Reconnect-All (recovery hierarchy step 3): reachable even when the
         // menu bar isn't. Skipped if disabled in settings; falls back to the menu-bar item if the
         // chord can't be registered.
@@ -233,6 +243,7 @@ final class AppModel: ObservableObject {
             await loadManagedOffline()
             await refresh()
             await enforceActiveSurfaceInvariant()  // recover if we launched into a stranded (0-active) state
+            reconcileDisplaySleepGuard()  // hold/release the keep-awake assertion for the launch topology
             await writeBaselineCheckpoint()
             if let marker = Self.readRotationMarker() {
                 // A prior experimental rotation didn't confirm — restore that display's safe angle and
@@ -250,9 +261,12 @@ final class AppModel: ObservableObject {
         }
         Task { await observeTopologyChanges() }
         // A software gamma dim persists until logout; restore on quit so it never outlives the app.
+        // The keep-awake assertion is process-bound, but release it explicitly so it's gone the instant
+        // we quit rather than at process teardown.
         NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             CoreGraphicsProvider.restoreGamma()
+            MainActor.assumeIsolated { self?.sleepGuard.releaseAll() }
         }
     }
 
@@ -264,11 +278,6 @@ final class AppModel: ObservableObject {
         #else
         return RoutedLifecycleProvider(primary: ExperimentalLifecycleProvider(), fallback: publicProvider)
         #endif
-    }
-
-    /// Loads persisted user settings, or defaults if the store can't be resolved/read.
-    private static func loadSettings() -> OpenDisplaySettings {
-        (try? SettingsStore.defaultDirectory()).map(SettingsStore.init(directory:))?.load() ?? .default
     }
 
     /// Persistent, rescue-readable checkpoints in Application Support, falling back to in-memory
@@ -1073,7 +1082,35 @@ final class AppModel: ObservableObject {
         for await _ in stream {
             await refresh()
             await enforceActiveSurfaceInvariant()
+            reconcileDisplaySleepGuard()  // external arrived/left → acquire or release the keep-awake assertion
         }
+    }
+
+    /// True when at least one external (non-built-in) display is currently present.
+    var hasExternalDisplay: Bool { displays.contains { $0.displayClass != .builtIn } }
+
+    /// Toggle for "prevent display sleep while an external is connected" (Issue 3). Persists the
+    /// setting and immediately reconciles the power assertion against the current topology.
+    func setPreventDisplaySleepWithExternal(_ enabled: Bool) {
+        guard settings.preventDisplaySleepWithExternal != enabled else { return }
+        settings.preventDisplaySleepWithExternal = enabled
+        persistSettings()
+        reconcileDisplaySleepGuard()
+    }
+
+    /// Acquire or release the keep-awake assertion for the current (toggle, external-presence) state.
+    /// Idempotent — safe to call on every topology change and every settings change.
+    private func reconcileDisplaySleepGuard() {
+        sleepGuard.update(
+            enabled: settings.preventDisplaySleepWithExternal,
+            externalPresent: hasExternalDisplay
+        )
+    }
+
+    /// Persists `settings` to the on-disk store (best-effort; a write failure leaves the in-memory
+    /// value authoritative for this session).
+    private func persistSettings() {
+        try? settingsStore?.save(settings)
     }
 
     /// The "one display is always active" safety net. If a topology change leaves nothing active —

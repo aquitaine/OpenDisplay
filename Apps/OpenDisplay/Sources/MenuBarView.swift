@@ -49,6 +49,11 @@ struct MenuBarView: View {
             .buttonStyle(.plain).foregroundStyle(.secondary)
             .accessibilityLabel("Open Settings")
             Menu {
+                Toggle("Keep displays awake while external connected", isOn: Binding(
+                    get: { model.settings.preventDisplaySleepWithExternal },
+                    set: { model.setPreventDisplaySleepWithExternal($0) }
+                ))
+                Divider()
                 Button("About OpenDisplay") {
                     NSApp.activate(ignoringOtherApps: true)
                     NSApp.orderFrontStandardAboutPanel(nil)

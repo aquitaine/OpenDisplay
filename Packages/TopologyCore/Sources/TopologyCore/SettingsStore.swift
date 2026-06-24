@@ -11,21 +11,27 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     public var confirmationCountdownSeconds: Int
     /// Whether the global Reconnect-All hotkey is registered.
     public var reconnectAllHotkeyEnabled: Bool
+    /// When on, hold a "prevent display idle-sleep" power assertion while ≥1 external display is
+    /// present, so the Mac doesn't dim/sleep its screens during a presentation or always-on setup.
+    public var preventDisplaySleepWithExternal: Bool
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
         confirmationCountdownSeconds: Int = 5,
-        reconnectAllHotkeyEnabled: Bool = true
+        reconnectAllHotkeyEnabled: Bool = true,
+        preventDisplaySleepWithExternal: Bool = false
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
         self.reconnectAllHotkeyEnabled = reconnectAllHotkeyEnabled
+        self.preventDisplaySleepWithExternal = preventDisplaySleepWithExternal
     }
 
     public static let `default` = OpenDisplaySettings()
 
     private enum CodingKeys: String, CodingKey {
         case persistencePolicy, confirmationCountdownSeconds, reconnectAllHotkeyEnabled
+        case preventDisplaySleepWithExternal
     }
 
     /// Tolerant decoder: every missing key falls back to its default and unknown keys are ignored,
@@ -39,6 +45,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
             ?? defaults.confirmationCountdownSeconds
         reconnectAllHotkeyEnabled = try container.decodeIfPresent(Bool.self, forKey: .reconnectAllHotkeyEnabled)
             ?? defaults.reconnectAllHotkeyEnabled
+        preventDisplaySleepWithExternal = try container
+            .decodeIfPresent(Bool.self, forKey: .preventDisplaySleepWithExternal)
+            ?? defaults.preventDisplaySleepWithExternal
     }
 }
 

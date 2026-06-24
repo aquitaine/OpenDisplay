@@ -209,6 +209,23 @@ private struct HealthSection: View {
                 }
                 .disabled(model.busy)
 
+                Divider()
+
+                Text("Behavior").font(.title3)
+                Toggle(isOn: Binding(
+                    get: { model.settings.preventDisplaySleepWithExternal },
+                    set: { model.setPreventDisplaySleepWithExternal($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Keep displays awake while an external is connected")
+                        Text("Holds a system \u{201C}prevent display sleep\u{201D} assertion whenever at least one "
+                             + "external display is present, so the screens don\u{2019}t idle-dim during a "
+                             + "presentation or always-on setup. Released automatically when the last external "
+                             + "is disconnected.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
                 #if !PUBLIC_API_ONLY
                 Divider()
 
