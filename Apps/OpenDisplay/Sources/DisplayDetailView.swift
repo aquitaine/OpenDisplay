@@ -1,4 +1,5 @@
 #if os(macOS)
+import AutomationSchema
 import DisplayDomain
 import OpenDisplayDesignSystem
 import SwiftUI
@@ -205,6 +206,15 @@ private struct ControlsCard: View {
                 Menu(model.inputSource[display.recordID].map { model.inputName($0) } ?? "—") {
                     ForEach(AppModel.standardInputs, id: \.code) { input in
                         Button(input.name) { model.setInputSource(input.code, for: display) }
+                    }
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+            }
+            ODDivider()
+            ODRow("Power", secondary: "Some displays can't wake over DDC once off") {
+                Menu("Set…") {
+                    ForEach(DDCPowerMode.allCases, id: \.self) { mode in
+                        Button(mode.label) { model.setPowerMode(mode, for: display) }
                     }
                 }
                 .menuStyle(.borderlessButton).fixedSize()

@@ -1,5 +1,6 @@
 #if os(macOS)
 import AppKit
+import AutomationSchema
 import CoreGraphicsProvider
 import DisplayDomain
 import Foundation
@@ -834,6 +835,21 @@ final class AppModel: ObservableObject {
         inputSourceWriter[id] = nil
     }
     #endif
+
+    /// Sends a DDC power-mode command (VCP 0xD6) to an external display (Issue 1). Best-effort and
+    /// fire-and-forget: the panel may NAK or ignore the write, and many displays cannot be woken back
+    /// On over DDC once powered Off — none of that is treated as an error. No-op on the built-in and in
+    /// the public-API-only build (DDC uses private SPI). The audit/safety path is untouched because a
+    /// power command doesn't alter the logical arrangement.
+    func setPowerMode(_ mode: DDCPowerMode, for observation: DisplayObservation) {
+        #if !PUBLIC_API_ONLY
+        guard observation.displayClass != .builtIn else { return }
+        Task { [weak self] in
+            guard let controller = await self?.ddcController(for: observation) else { return }
+            await controller.write(.power, mode.vcpValue)
+        }
+        #endif
+    }
 
     /// Refreshes a display's cached ICC state — controllability, current profile name, and (once) the
     /// installed-profile list — all OFF the main actor, since ColorSync iterates and parses profiles

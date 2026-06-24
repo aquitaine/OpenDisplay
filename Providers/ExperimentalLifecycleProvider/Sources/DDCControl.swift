@@ -17,6 +17,8 @@ public actor ExternalDisplayDDC {
         case volume = 0x62
         case inputSource = 0x60
         case colorPreset = 0x14
+        /// Power mode (DPM). Values: 0x01 On, 0x04 Off (DPMS, usually wakeable), 0x05 Off (hard).
+        case power = 0xD6
     }
 
     private typealias CreateFn = @convention(c) (CFAllocator?, io_service_t) -> Unmanaged<AnyObject>?

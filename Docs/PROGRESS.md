@@ -22,6 +22,16 @@ Do NOT exercise real display mutations in this session.
   - `make test` green (89 tests, exit 0); both `OpenDisplay` and `OpenDisplay-PublicAPIOnly` xcodebuild
     targets BUILD SUCCEEDED.
 
+- **Issue 1 — DDC power control (VCP 0xD6)** ✅ (commit on `batch1-auto`)
+  - `ExternalDisplayDDC.Feature.power = 0xD6` added (reuses the existing write path).
+  - Shared, testable `DDCPowerMode` value type in **AutomationSchema**: `on/standby/off` →
+    VCP 0x01/0x04/0x05, tolerant `init?(parsing:)` (case/space-insensitive, sleep/dpms aliases).
+  - `AppModel.setPowerMode(_:for:)` — best-effort, fire-and-forget, no-op on built-in / public build.
+  - UI: Power row (On/Standby/Off menu) in `DisplayDetailView` ControlsCard, near the input-source row.
+  - CLI: `opendisplay ddc <selector> power <on|standby|off>` mirroring `ddc … input`.
+  - Tests: 7 `DDCPowerModeTests` (VCP values, parsing, aliases, rejection, labels).
+  - `make test` green (96 tests); `OpenDisplay`, `OpenDisplay-PublicAPIOnly`, and `opendisplay` build.
+
 ## In progress
 - (none)
 
@@ -32,6 +42,9 @@ Do NOT exercise real display mutations in this session.
 - Issue 3: final `pmset -g assertions` confirmation with a real external attached `[deferred: attended
   verification]` — the create/hold/release lifecycle is fully unit-tested via the injected backend;
   only the live OS-assertion read needs hardware.
+- Issue 1: confirming a real panel actually powers down on Standby/Off and the wake-once-off behavior
+  `[deferred: attended verification]` — VCP value mapping + token parsing are unit-tested; the I2C
+  round-trip to a physical monitor needs hardware (and is intentionally not exercised in this session).
 
 ## Final summary
 - (fill in when stopping)

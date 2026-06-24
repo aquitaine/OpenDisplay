@@ -430,10 +430,11 @@ func runDDC() async {
         "colour": .colorPreset, "color": .colorPreset, "preset": .colorPreset,
     ]
     guard let sel = selectorArg, let featureArg = valueArg else {
-        fail("usage: opendisplay ddc <selector> <brightness|contrast|volume|input|colour> [value]")
+        fail("usage: opendisplay ddc <selector> <brightness|contrast|volume|input|colour|power> [value]")
     }
-    guard let feature = featureNames[featureArg.lowercased()] else {
-        fail("unknown feature '\(featureArg)' (brightness|contrast|volume|input|colour)")
+    let featureKey = featureArg.lowercased()
+    guard featureKey == "power" || featureNames[featureKey] != nil else {
+        fail("unknown feature '\(featureArg)' (brightness|contrast|volume|input|colour|power)")
     }
     let pairs = await resolveCurrentDisplays()
     let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
@@ -441,6 +442,22 @@ func runDDC() async {
         fail("no DDC for this display (external displays only)")
     }
     let setValue = positional.count > 3 ? positional[3] : nil
+    // Power is a one-shot DPM command whose value is a word (on|standby|off), not a numeric level.
+    // Best-effort: a NAK/ignore just reports a failed write, never crashes.
+    if featureKey == "power" {
+        guard let raw = setValue else {
+            fail("usage: opendisplay ddc <selector> power <\(DDCPowerMode.acceptedTokens)>")
+        }
+        guard let mode = DDCPowerMode(parsing: raw) else {
+            fail("unknown power mode '\(raw)' (\(DDCPowerMode.acceptedTokens))")
+        }
+        let ok = await ddc.write(.power, mode.vcpValue)
+        print(ok ? "power = \(mode.label)" : "DDC write failed")
+        return
+    }
+    guard let feature = featureNames[featureKey] else {
+        fail("unknown feature '\(featureArg)' (brightness|contrast|volume|input|colour|power)")
+    }
     if let raw = setValue {
         guard let value = Int(raw) else { fail("value must be an integer") }
         let ok = await ddc.write(feature, value)
