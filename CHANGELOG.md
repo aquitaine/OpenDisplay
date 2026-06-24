@@ -5,6 +5,51 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.2.0] — 2026-06-24
+
+Second developer preview. Two batches of display-management features land on top of the
+0.1.0 safety core, plus a fix for Set-as-Main and a set of menu-bar UX fixes. The
+platform-independent logic is unit-tested (192 tests, up from 78); hardware paths were
+attended-verified on Apple Silicon.
+
+### Added
+- **Keep displays awake while an external is connected** — opt-in IOKit power assertion so
+  the Mac/displays don't sleep while docked.
+- **DDC power control** (VCP `0xD6`): put an external monitor into standby / wake it from
+  the menu and CLI.
+- **`opendisplay://` URL-scheme automation** — drive the same audited, safety-checked command
+  path from URLs (confirmation-gated for destructive verbs).
+- **Resolution slider** replacing the dropdown — scrub through the panel's modes by scale.
+- **Timed auto-revert safety gate** for arrangement changes: a "Keep these display settings?"
+  countdown that reverts on its own if you don't confirm.
+- **Auto-disconnect the built-in** when an external connects (opt-in).
+- **DDC capability detection** (VCP `0xF3`): controls are gated to what the panel actually
+  reports it supports.
+- **EDID retrieval / export** — parsed identity (manufacturer, product, serial descriptors,
+  checksum, stable fingerprint) with a CLI `edid` export.
+- **Favorite resolutions** — star the modes you use so they're one click away.
+- **Display-config drift detection** — notice when a protected arrangement has been changed
+  out from under you.
+- **Configurable global hotkeys** — an expanded shortcut registry (cycle main display,
+  brightness ±, reconnect-all) with a tolerant, forward-compatible settings format.
+- **Connect / disconnect notifications** — optional banners when a display comes or goes.
+- **One-click quit** — a power button in the menu header next to the gear.
+
+### Fixed
+- **Set-as-Main** targeted the wrong display: it computed the arrangement shift from a stale
+  observation. It now re-resolves the target against a fresh snapshot before applying.
+- **Menu pop-out mis-anchored** across multiple displays (SwiftUI `MenuBarExtra` opened on
+  the wrong screen). Replaced with an AppKit `NSStatusItem` + `NSPopover` that anchors to the
+  clicked screen and stays put when set-main relocates the primary display.
+- **Settings wouldn't open** from the menu after the AppKit switch — the window is now owned
+  directly by the app and reliably opens, activated and centered on the screen you're using.
+
+### Changed
+- **Quit now returns the Mac to a clean default**: reconnects any display the app turned off,
+  lifts software dim/blackout, and drops the keep-awake assertion before the app exits
+  (termination is deferred until the reconnect lands), rather than relying on the OS's
+  process-exit auto-revert.
+
 ## [0.1.0] — 2026-06-23
 
 First developer preview. The platform-independent safety core (domain models, state
