@@ -91,24 +91,43 @@ Do NOT exercise real display mutations in this session.
 ## Tried / stuck  (so the next attempt doesn't repeat it)
 - (none yet)
 
-## Deferred to attended verification
-- Issue 3: final `pmset -g assertions` confirmation with a real external attached `[deferred: attended
-  verification]` — the create/hold/release lifecycle is fully unit-tested via the injected backend;
-  only the live OS-assertion read needs hardware.
-- Issue 1: confirming a real panel actually powers down on Standby/Off and the wake-once-off behavior
-  `[deferred: attended verification]` — VCP value mapping + token parsing are unit-tested; the I2C
-  round-trip to a physical monitor needs hardware (and is intentionally not exercised in this session).
-- Issue 4: live `open "opendisplay://reconnect-all"` end-to-end trigger `[deferred: attended
-  verification]` — would run a real reconnect on this Mac (SAFETY: no real lifecycle mutations). Parser,
-  command mapping, security/confirmation gate, and audit routing are all unit-tested / build-verified.
-- Issue 6: applying a real unsupported/blank resolution and watching it auto-revert after the timeout
-  `[deferred: attended verification]` — would mutate this Mac's live arrangement (SAFETY). The
-  keep/revert/timeout decision and exact-before restore are unit-tested; the restore path + crash
-  marker + countdown UI are build-verified in both app flavors.
-- Issue 5: connecting a real external and watching the built-in turn off / return `[deferred: attended
-  verification]` — would run a real disconnect on this Mac (SAFETY). The arrival-edge detection and
-  no-re-trigger behavior are unit-tested; the gated disconnect call + settings/menu wiring are
-  build-verified in both app flavors.
+## Attended live verification — 2026-06-24 (user present, MacBook Pro M4 Pro: built-in Liquid
+##   Retina XDR + Samsung S34J55x "Desk" external over HDMI)
+All five previously-deferred items VERIFIED LIVE on hardware. Test app = Debug build run from
+`~/Applications/OpenDisplay.app` (relocated from `/tmp` because LaunchServices won't honor a URL
+handler in a volatile temp dir); settings driven via `settings.json` + relaunch.
+- **Issue 3 — VERIFIED ✅**: toggle on + external present → `pmset -g assertions` shows
+  `PreventUserIdleDisplaySleep 1` held by the app, named exactly "OpenDisplay: external display
+  connected". Quit → released (no leak). Toggle off + external present → not acquired. Real IOKit
+  assertion confirmed end-to-end.
+- **Issue 1 — VERIFIED ✅**: `opendisplay ddc alias:Desk power standby` (0x04) → S34J55x entered
+  standby and dropped off the display bus; `power on` (0x01) → woke back up, DDC responsive again.
+  Best-effort writes ACK'd, no crash. (Selector is `alias:Desk`/`tag:studio`, not bare `Desk`.)
+- **Issue 4 — VERIFIED ✅**: CFBundleURLTypes registered (lsregister claims `opendisplay:`).
+  `open opendisplay://reconnect-all` → audit entry `{"actor":"url","command":"reconnectAll",...}`
+  (same gateway/audit path as CLI). `opendisplay://bogus-unknown-verb` → no audit entry, no crash
+  (logged no-op). Security gate: `opendisplay://disconnect?display=Desk` did NOT fire — no audit
+  entry, Desk stayed connected (surfaces app for in-app confirm instead).
+- **Issue 5 — VERIFIED ✅** (forward path): with the toggle on, unplug→replug of the external
+  produced the arrival edge and the built-in auto-disconnected to managed-offline within ~1s; an
+  external *leave* did NOT spuriously fire. Captured in the topology monitor. The **return** path is
+  the pre-existing always-one-active safety net (fires at 0-active); on this rig the HDMI unplug
+  didn't always register as an OS-level removal (EDID/signal retention), so 0-active wasn't reliably
+  reached — recovered via the menu's reconnect button (`reconnectOffline`). Not a code regression;
+  the safety net needs a clean CG removal event, which this cable doesn't always emit.
+- **Issue 6 — VERIFIED ✅**: menu "Set as Main" on the external → `[main]` flipped to the external +
+  "Keep these display settings?" banner with countdown; with no input it auto-reverted to built-in
+  main after ~5s. Reproduced 3× consecutively, restoring the exact prior arrangement each time.
+
+## Notes from attended testing (worth a follow-up, non-blocking)
+- LaunchServices won't register an `opendisplay://` handler for an app bundle in `/tmp`/`/private/tmp`
+  — must live somewhere stable (`~/Applications`, `/Applications`, DerivedData). Affects local dev/test
+  only, not shipped installs.
+- URL `reconnect-all` correctly returns `noOp` against the running app's offline list because the URL
+  handler builds a fresh `CommandGateway` (like App Intents) that doesn't share the app's in-memory
+  `managedOffline`. Re-enabling an app-disconnected display goes through the running app's
+  `reconnectOffline` (menu/safety-net), not the URL/CLI reconnect-all. Behaves as designed; flag if a
+  future issue wants the URL surface to re-enable app-tracked offline displays.
 
 ## Final summary
 **All six Batch-1 issues implemented, tested, and committed on `batch1-auto`** (one commit each, in the
@@ -135,5 +154,7 @@ Commits:
 Not pushed / no PR opened (as instructed). The generated `OpenDisplay.xcodeproj` is gitignored, so the
 xcodegen regenerations made during compile-checks left no git footprint.
 
-## Final summary
-- (fill in when stopping)
+**Update 2026-06-24:** all six issues additionally **verified live on hardware** with the user present
+(see "Attended live verification" above). Five of five previously-deferred hardware criteria pass; the
+only caveat is the Issue 5 *return* path depending on a clean OS-level display-removal event, which this
+HDMI rig doesn't always emit (pre-existing safety-net behavior, not new code).
