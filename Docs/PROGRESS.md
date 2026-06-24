@@ -72,6 +72,19 @@ Do NOT exercise real display mutations in this session.
   - Tests: 10 `TimedRevertGateTests` (keep/revert/timeout, idempotency, exact-before restore, countdown).
   - `make test` green (122 tests); both app flavors build (no new source warnings).
 
+- **Issue 5 — Auto-disconnect built-in when an external connects** ✅ (commit on `batch1-auto`)
+  - Pure, tested `AutoDisconnectBuiltInPolicy` in **TopologyCore**: edge-triggered, fires only on the
+    external **rising edge** (none → some); a second external (some → more) does not re-trigger.
+    `seed(externalPresent:)` stops a pre-attached external at launch from counting as an arrival.
+  - `OpenDisplaySettings.autoDisconnectBuiltInOnExternal` (default **off**), tolerant decode.
+  - `AppModel.applyAutoDisconnectBuiltInIfNeeded` (in `observeTopologyChanges`) turns the active
+    built-in off via the **existing gated** `setDisplayActive(false)` → `coordinator.disconnect`
+    (SafetyEngine-checked, audited) on arrival. The built-in returns via the existing always-one-active
+    safety net (`enforceActiveSurfaceInvariant`) — verified, not duplicated.
+  - UI: menu item (menu-bar ⋯ menu) + Settings → Behavior toggle.
+  - Tests: 8 `AutoDisconnectBuiltInPolicyTests` + 1 `SettingsStoreTests`. `make test` green (131 tests);
+    both app flavors build.
+
 ## In progress
 - (none)
 
@@ -92,6 +105,35 @@ Do NOT exercise real display mutations in this session.
   `[deferred: attended verification]` — would mutate this Mac's live arrangement (SAFETY). The
   keep/revert/timeout decision and exact-before restore are unit-tested; the restore path + crash
   marker + countdown UI are build-verified in both app flavors.
+- Issue 5: connecting a real external and watching the built-in turn off / return `[deferred: attended
+  verification]` — would run a real disconnect on this Mac (SAFETY). The arrival-edge detection and
+  no-re-trigger behavior are unit-tested; the gated disconnect call + settings/menu wiring are
+  build-verified in both app flavors.
+
+## Final summary
+**All six Batch-1 issues implemented, tested, and committed on `batch1-auto`** (one commit each, in the
+order 3 → 1 → 4 → 2 → 6 → 5). `make test` is green at **131 tests** (started at 78; +53 new), exit 0.
+Both `OpenDisplay` and `OpenDisplay-PublicAPIOnly` xcodebuild targets (plus the `opendisplay` CLI)
+BUILD SUCCEEDED with no new source warnings. `make lint` is a no-op locally (swiftlint/swift-format not
+installed) — code follows `.swiftlint.yml` by hand.
+
+Approach: each issue's **decision logic** was extracted into the cross-platform SPM packages
+(TopologyCore / AutomationSchema / DisplayDomain) where `make test` exercises it with injected fakes;
+the macOS-framework side effects (IOKit power assertions, DDC I2C, SwiftUI, onOpenURL, live
+disconnect) were wired in the app/providers/CLI and verified to **compile** via `xcodebuild` (no real
+display mutations were run, per the SAFETY rules). Every acceptance criterion that needs real hardware
+is listed above as `[deferred: attended verification]` with its logic already unit-tested.
+
+Commits:
+- `Issue 3` prevent display sleep — `DisplaySleepGuard` + IOKit assertion (89 tests)
+- `Issue 1` DDC power 0xD6 — `DDCPowerMode` + CLI/menu (96 tests)
+- `Issue 4` `opendisplay://` URL scheme — `URLCommand` + gateway routing (104 tests)
+- `Issue 2` resolution slider — `ResolutionStops` + Slider (112 tests)
+- `Issue 6` timed auto-revert gate — `TimedRevertGate` + restore (122 tests)
+- `Issue 5` auto-disconnect built-in — `AutoDisconnectBuiltInPolicy` (131 tests)
+
+Not pushed / no PR opened (as instructed). The generated `OpenDisplay.xcodeproj` is gitignored, so the
+xcodegen regenerations made during compile-checks left no git footprint.
 
 ## Final summary
 - (fill in when stopping)

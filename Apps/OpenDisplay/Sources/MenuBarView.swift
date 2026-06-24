@@ -76,6 +76,10 @@ struct MenuBarView: View {
                     get: { model.settings.preventDisplaySleepWithExternal },
                     set: { model.setPreventDisplaySleepWithExternal($0) }
                 ))
+                Toggle("Turn built-in off when an external connects", isOn: Binding(
+                    get: { model.settings.autoDisconnectBuiltInOnExternal },
+                    set: { model.setAutoDisconnectBuiltInOnExternal($0) }
+                ))
                 Divider()
                 Button("About OpenDisplay") {
                     NSApp.activate(ignoringOtherApps: true)

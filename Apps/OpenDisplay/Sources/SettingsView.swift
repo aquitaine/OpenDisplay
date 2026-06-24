@@ -225,6 +225,19 @@ private struct HealthSection: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                Toggle(isOn: Binding(
+                    get: { model.settings.autoDisconnectBuiltInOnExternal },
+                    set: { model.setAutoDisconnectBuiltInOnExternal($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Turn the built-in display off when an external connects")
+                        Text("When an external display arrives, the built-in panel is turned off automatically "
+                             + "(through the same safety-checked path as a manual disconnect). It comes back on "
+                             + "its own when the last external is unplugged. A second external doesn\u{2019}t change "
+                             + "anything.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
 
                 #if !PUBLIC_API_ONLY
                 Divider()

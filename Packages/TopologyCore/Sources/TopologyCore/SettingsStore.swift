@@ -14,17 +14,23 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// When on, hold a "prevent display idle-sleep" power assertion while ≥1 external display is
     /// present, so the Mac doesn't dim/sleep its screens during a presentation or always-on setup.
     public var preventDisplaySleepWithExternal: Bool
+    /// When on, turn the built-in panel off automatically the moment an external display arrives
+    /// (Issue 5 — the clamshell-style original use case). The built-in returns when the last external
+    /// leaves (via the always-one-active safety net).
+    public var autoDisconnectBuiltInOnExternal: Bool
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
         confirmationCountdownSeconds: Int = 5,
         reconnectAllHotkeyEnabled: Bool = true,
-        preventDisplaySleepWithExternal: Bool = false
+        preventDisplaySleepWithExternal: Bool = false,
+        autoDisconnectBuiltInOnExternal: Bool = false
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
         self.reconnectAllHotkeyEnabled = reconnectAllHotkeyEnabled
         self.preventDisplaySleepWithExternal = preventDisplaySleepWithExternal
+        self.autoDisconnectBuiltInOnExternal = autoDisconnectBuiltInOnExternal
     }
 
     public static let `default` = OpenDisplaySettings()
@@ -32,6 +38,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     private enum CodingKeys: String, CodingKey {
         case persistencePolicy, confirmationCountdownSeconds, reconnectAllHotkeyEnabled
         case preventDisplaySleepWithExternal
+        case autoDisconnectBuiltInOnExternal
     }
 
     /// Tolerant decoder: every missing key falls back to its default and unknown keys are ignored,
@@ -48,6 +55,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         preventDisplaySleepWithExternal = try container
             .decodeIfPresent(Bool.self, forKey: .preventDisplaySleepWithExternal)
             ?? defaults.preventDisplaySleepWithExternal
+        autoDisconnectBuiltInOnExternal = try container
+            .decodeIfPresent(Bool.self, forKey: .autoDisconnectBuiltInOnExternal)
+            ?? defaults.autoDisconnectBuiltInOnExternal
     }
 }
 

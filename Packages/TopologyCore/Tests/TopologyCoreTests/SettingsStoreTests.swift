@@ -62,6 +62,17 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertFalse(SettingsStore(directory: directory).load().preventDisplaySleepWithExternal)
     }
 
+    func testAutoDisconnectBuiltInDefaultsOffAndRoundTrips() throws {
+        XCTAssertFalse(OpenDisplaySettings.default.autoDisconnectBuiltInOnExternal)
+        let store = SettingsStore(directory: directory)
+        try store.save(OpenDisplaySettings(autoDisconnectBuiltInOnExternal: true))
+        XCTAssertTrue(store.load().autoDisconnectBuiltInOnExternal)
+        // Missing key in an older file defaults off.
+        try Data(#"{"persistencePolicy":"reconnectOnQuit"}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        XCTAssertFalse(SettingsStore(directory: directory).load().autoDisconnectBuiltInOnExternal)
+    }
+
     func testSettingsFileIsIndependentlyReadable() throws {
         let store = SettingsStore(directory: directory)
         try store.save(OpenDisplaySettings(persistencePolicy: .reconnectOnWake))

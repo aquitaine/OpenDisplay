@@ -212,6 +212,10 @@ final class AppModel: ObservableObject {
     private var revertMessage = ""
     private var revertTask: Task<Void, Never>?
 
+    /// Edge detector for "auto-disconnect the built-in when an external connects" (Issue 5). Seeded to
+    /// the launch topology so a pre-attached external isn't treated as a fresh arrival.
+    private var autoDisconnectPolicy = AutoDisconnectBuiltInPolicy()
+
     init() {
         let observer = CoreGraphicsProvider()
         self.observer = observer
@@ -256,6 +260,7 @@ final class AppModel: ObservableObject {
             await refresh()
             await enforceActiveSurfaceInvariant()  // recover if we launched into a stranded (0-active) state
             reconcileDisplaySleepGuard()  // hold/release the keep-awake assertion for the launch topology
+            autoDisconnectPolicy.seed(externalPresent: hasExternalDisplay)  // don't treat a pre-attached external as an arrival
             await writeBaselineCheckpoint()
             if let marker = Self.readRotationMarker() {
                 // A prior experimental rotation didn't confirm — restore that display's safe angle and
@@ -1226,11 +1231,34 @@ final class AppModel: ObservableObject {
             await refresh()
             await enforceActiveSurfaceInvariant()
             reconcileDisplaySleepGuard()  // external arrived/left → acquire or release the keep-awake assertion
+            await applyAutoDisconnectBuiltInIfNeeded()  // external just arrived → turn the built-in off (if enabled)
         }
     }
 
     /// True when at least one external (non-built-in) display is currently present.
     var hasExternalDisplay: Bool { displays.contains { $0.displayClass != .builtIn } }
+
+    /// On an external-arrival edge (and only then), turn the built-in panel off through the gated
+    /// coordinator path (Issue 5). The built-in returns when the last external leaves — that's the
+    /// existing always-one-active safety net (`enforceActiveSurfaceInvariant`), not duplicated here.
+    private func applyAutoDisconnectBuiltInIfNeeded() async {
+        let fire = autoDisconnectPolicy.onTopologyChange(
+            enabled: settings.autoDisconnectBuiltInOnExternal,
+            externalPresent: hasExternalDisplay
+        )
+        guard fire, !busy,
+              let builtIn = displays.first(where: { $0.displayClass == .builtIn && $0.isActive })
+        else { return }
+        await setDisplayActive(false, for: builtIn)
+    }
+
+    /// Toggle for "auto-disconnect the built-in when an external connects" (Issue 5). Persists the
+    /// setting; takes effect on the next external arrival (it never disconnects retroactively).
+    func setAutoDisconnectBuiltInOnExternal(_ enabled: Bool) {
+        guard settings.autoDisconnectBuiltInOnExternal != enabled else { return }
+        settings.autoDisconnectBuiltInOnExternal = enabled
+        persistSettings()
+    }
 
     /// Toggle for "prevent display sleep while an external is connected" (Issue 3). Persists the
     /// setting and immediately reconciles the power assertion against the current topology.
