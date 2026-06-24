@@ -62,6 +62,16 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertFalse(SettingsStore(directory: directory).load().preventDisplaySleepWithExternal)
     }
 
+    func testDisplayNotificationsDefaultsOffAndRoundTrips() throws {
+        XCTAssertFalse(OpenDisplaySettings.default.displayNotificationsEnabled)
+        let store = SettingsStore(directory: directory)
+        try store.save(OpenDisplaySettings(displayNotificationsEnabled: true))
+        XCTAssertTrue(store.load().displayNotificationsEnabled)
+        try Data(#"{"persistencePolicy":"reconnectOnQuit"}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        XCTAssertFalse(SettingsStore(directory: directory).load().displayNotificationsEnabled)
+    }
+
     func testHotkeyShortcutsDefaultAndRoundTrip() throws {
         XCTAssertEqual(OpenDisplaySettings.default.hotkeyShortcuts, .defaults)
         let store = SettingsStore(directory: directory)

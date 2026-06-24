@@ -218,3 +218,23 @@ off → never", and text/name resolution; plus the `SettingsStore` toggle round-
   - `make test` green (183); both app flavors build.
   - `[deferred: attended verification]` chords actually firing (esp. newly-bound actions); a settings UI
     to *rebind* shortcuts is a follow-up (registry + defaults + wiring are in place).
+- **Issue 5 — Display notifications** ✅ logic+wiring (commit on `batch2`); live banners deferred
+  - Pure `NotificationPolicy.notifications(prior:current:names:…)` in **TopologyCore**: diffs the
+    snapshots → connect/disconnect (external) + built-in-auto-disconnected, with name resolution and
+    natural dedup (no change → nothing). 8 tests. `OpenDisplaySettings.displayNotificationsEnabled`
+    (default off, 1 test).
+  - `NotificationDelivery` (UNUserNotificationCenter). `AppModel.observeTopologyChanges` feeds the
+    policy and posts; `setDisplayNotificationsEnabled` persists + requests auth on enable. Settings →
+    Behavior toggle added.
+  - `make test` green (192); both app flavors build.
+  - `[deferred: attended verification]` the actual notification banners + the one-time auth prompt.
+
+## Batch 2 — final summary
+**All 6 issues implemented + committed on `batch2`** (off `batch1-auto`). `make test` 132 → **192**
+(+60 new tests). Both `OpenDisplay` + `OpenDisplay-PublicAPIOnly` (and the `opendisplay` CLI for the
+issues that touch it) build clean. New pure logic, each unit-tested: `DDCCapabilities` (AutomationSchema),
+`EDID`/`FavoriteResolutions`/`ResolutionStops` (DisplayDomain), `FavoritesStore`/`DisplayConfigDrifter`/
+`KeyboardShortcutRegistry`/`NotificationPolicy` (TopologyCore). **#1, #2, #3 verified LIVE** on the
+S34J55x (DDC caps read, EDID read+export, favourites CLI). **#4 (hotkey firing)** and **#5 (notification
+banners + auth prompt)** have their logic+wiring done and build-checked, with the interactive runtime
+parts `[deferred: attended verification]`. Not pushed.

@@ -23,6 +23,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     public var arrangementAutoRevertSeconds: Int
     /// Configurable global keyboard shortcuts (Batch-2 #4). Defaults to the shipped bindings.
     public var hotkeyShortcuts: KeyboardShortcutRegistry
+    /// When on, post a user notification on display connect/disconnect and related events (Batch-2 #5).
+    public var displayNotificationsEnabled: Bool
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
@@ -31,7 +33,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         preventDisplaySleepWithExternal: Bool = false,
         autoDisconnectBuiltInOnExternal: Bool = false,
         arrangementAutoRevertSeconds: Int = 10,
-        hotkeyShortcuts: KeyboardShortcutRegistry = .defaults
+        hotkeyShortcuts: KeyboardShortcutRegistry = .defaults,
+        displayNotificationsEnabled: Bool = false
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
@@ -40,6 +43,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.autoDisconnectBuiltInOnExternal = autoDisconnectBuiltInOnExternal
         self.arrangementAutoRevertSeconds = arrangementAutoRevertSeconds
         self.hotkeyShortcuts = hotkeyShortcuts
+        self.displayNotificationsEnabled = displayNotificationsEnabled
     }
 
     public static let `default` = OpenDisplaySettings()
@@ -50,6 +54,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case autoDisconnectBuiltInOnExternal
         case arrangementAutoRevertSeconds
         case hotkeyShortcuts
+        case displayNotificationsEnabled
     }
 
     /// Tolerant decoder: every missing key falls back to its default and unknown keys are ignored,
@@ -75,6 +80,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         hotkeyShortcuts = try container
             .decodeIfPresent(KeyboardShortcutRegistry.self, forKey: .hotkeyShortcuts)
             ?? defaults.hotkeyShortcuts
+        displayNotificationsEnabled = try container
+            .decodeIfPresent(Bool.self, forKey: .displayNotificationsEnabled)
+            ?? defaults.displayNotificationsEnabled
     }
 }
 

@@ -238,6 +238,18 @@ private struct HealthSection: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                Toggle(isOn: Binding(
+                    get: { model.settings.displayNotificationsEnabled },
+                    set: { model.setDisplayNotificationsEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Notify on display connect / disconnect")
+                        Text("Posts a system notification when an external display is connected or "
+                             + "disconnected, and when the built-in is auto-disconnected. Asks for notification "
+                             + "permission the first time you turn this on.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
 
                 #if !PUBLIC_API_ONLY
                 Divider()

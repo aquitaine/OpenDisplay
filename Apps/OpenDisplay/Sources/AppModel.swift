@@ -250,6 +250,7 @@ final class AppModel: ObservableObject {
         // (recovery hierarchy step 3) and reachable even when the menu bar isn't; the rest are unbound
         // by default. A chord that can't be claimed is simply skipped (menu-bar item remains).
         registerHotkeys()
+        if settings.displayNotificationsEnabled { NotificationDelivery.requestAuthorization() }  // Batch-2 #5
         #if DEBUG
         FileHandle.standardError.write(Data("Global hotkeys registered: \(hotKeys.count)\n".utf8))
         #endif
@@ -1283,11 +1284,35 @@ final class AppModel: ObservableObject {
     private func observeTopologyChanges() async {
         let stream = await observer.changes()
         for await _ in stream {
+            let prior = displays
             await refresh()
             await enforceActiveSurfaceInvariant()
             reconcileDisplaySleepGuard()  // external arrived/left → acquire or release the keep-awake assertion
-            await applyAutoDisconnectBuiltInIfNeeded()  // external just arrived → turn the built-in off (if enabled)
+            let autoDisconnected = await applyAutoDisconnectBuiltInIfNeeded()  // external arrived → built-in off
+            postDisplayNotifications(prior: prior, builtInAutoDisconnected: autoDisconnected)  // Batch-2 #5
         }
+    }
+
+    /// Posts user notifications for a topology transition, per the pure `NotificationPolicy` (Batch-2 #5).
+    private func postDisplayNotifications(prior: [DisplayObservation], builtInAutoDisconnected: Bool) {
+        let names = Dictionary(
+            (prior + displays).map { ($0.recordID, displayName(for: $0)) }, uniquingKeysWith: { _, b in b }
+        )
+        let notes = NotificationPolicy.notifications(
+            prior: prior, current: displays, names: names,
+            builtInAutoDisconnected: builtInAutoDisconnected,
+            enabled: settings.displayNotificationsEnabled
+        )
+        for note in notes { NotificationDelivery.post(note) }
+    }
+
+    /// Toggle for display notifications (Batch-2 #5). Persists and, when turned on, requests
+    /// notification authorization (the one-time system prompt).
+    func setDisplayNotificationsEnabled(_ enabled: Bool) {
+        guard settings.displayNotificationsEnabled != enabled else { return }
+        settings.displayNotificationsEnabled = enabled
+        persistSettings()
+        if enabled { NotificationDelivery.requestAuthorization() }
     }
 
     /// True when at least one external (non-built-in) display is currently present.
@@ -1296,15 +1321,17 @@ final class AppModel: ObservableObject {
     /// On an external-arrival edge (and only then), turn the built-in panel off through the gated
     /// coordinator path (Issue 5). The built-in returns when the last external leaves — that's the
     /// existing always-one-active safety net (`enforceActiveSurfaceInvariant`), not duplicated here.
-    private func applyAutoDisconnectBuiltInIfNeeded() async {
+    @discardableResult
+    private func applyAutoDisconnectBuiltInIfNeeded() async -> Bool {
         let fire = autoDisconnectPolicy.onTopologyChange(
             enabled: settings.autoDisconnectBuiltInOnExternal,
             externalPresent: hasExternalDisplay
         )
         guard fire, !busy,
               let builtIn = displays.first(where: { $0.displayClass == .builtIn && $0.isActive })
-        else { return }
+        else { return false }
         await setDisplayActive(false, for: builtIn)
+        return true
     }
 
     /// Toggle for "auto-disconnect the built-in when an external connects" (Issue 5). Persists the
