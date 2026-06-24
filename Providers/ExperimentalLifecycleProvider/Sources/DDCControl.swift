@@ -80,6 +80,40 @@ public actor ExternalDisplayDDC {
         return ok
     }
 
+    /// Reads the display's DDC/CI capabilities string (the response to VCP `0xF3`, MCCS spec) by
+    /// requesting it in chunks and concatenating the replies until the display returns an empty chunk.
+    /// Returns nil if the display doesn't answer. Best-effort: a NAK or a malformed reply just ends the
+    /// read with whatever was gathered so far. Parse the result with `DDCCapabilities.parse`.
+    public func readCapabilitiesString() async -> String? {
+        var bytes: [UInt8] = []
+        var offset: UInt16 = 0
+        // Safety cap: 96 chunks × ~32 bytes ≈ 3 KB, far beyond any real capabilities string.
+        for _ in 0..<96 {
+            let high = UInt8(offset >> 8)
+            let low = UInt8(offset & 0xff)
+            // Capabilities Request: length 0x83 (3 data bytes), opcode 0xF3, 16-bit offset.
+            let checksum = UInt8(0x6e ^ Int(Self.i2cSource) ^ 0x83 ^ 0xf3) ^ high ^ low
+            var request: [UInt8] = [0x83, 0xf3, high, low, checksum]
+            guard writeFn(service, Self.i2cChip, Self.i2cSource, &request, 5) == 0 else { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            var buffer = [UInt8](repeating: 0, count: 64)
+            guard readFn(service, Self.i2cChip, Self.i2cSource, &buffer, 64) == 0,
+                  buffer[0] == 0x6e, buffer[2] == 0xe3 else { break }  // 0xE3 = Capabilities Reply
+            let length = Int(buffer[1] & 0x7f)
+            // length covers opcode (0xE3) + 2 offset bytes + the data; fewer means a malformed reply.
+            guard length >= 3 else { break }
+            let replyOffset = UInt16(buffer[3]) << 8 | UInt16(buffer[4])
+            guard replyOffset == offset else { break }  // out of sync — stop
+            let dataLen = length - 3
+            if dataLen == 0 { break }  // empty chunk = end of string
+            let end = min(5 + dataLen, buffer.count)
+            bytes.append(contentsOf: buffer[5..<end])
+            offset += UInt16(end - 5)
+        }
+        guard !bytes.isEmpty else { return nil }
+        return String(bytes: bytes, encoding: .ascii) ?? String(bytes: bytes, encoding: .utf8)
+    }
+
     /// Maps a `CGDirectDisplayID` to its external `IOAVService`. Exact for a single external; with
     /// several it matches by order among external displays (EDID matching is a later refinement).
     private static func avService(for displayID: CGDirectDisplayID) -> io_service_t? {

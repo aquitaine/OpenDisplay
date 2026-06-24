@@ -174,4 +174,12 @@ off → never", and text/name resolution; plus the `SettingsStore` toggle round-
 
 ## Progress
 
-- (none yet — implementing in the order above; `make test` + both app flavors build is the gate per issue)
+- **Issue 1 — DDC capabilities / auto-config** ✅ (commit on `batch2`)
+  - Pure `DDCCapabilities` + `parse(_:)` in **AutomationSchema** (vcp-block parser, tolerant/total).
+    11 `DDCCapabilitiesTests` (valid/nested/realistic/case/malformed/unbalanced/dup/whitespace).
+  - `ExternalDisplayDDC.readCapabilitiesString()` — VCP 0xF3 chunked read + assemble.
+  - `AppModel`: `ddcCapabilities` cache, `refreshCapabilities`, `ddcSupports` (fail-open),
+    `refreshHardwareControls` now gates by capabilities. CLI: `opendisplay ddc <sel> caps`.
+  - `make test` green (143); `OpenDisplay`, `OpenDisplay-PublicAPIOnly`, `opendisplay` all build.
+  - **VERIFIED LIVE** on the S34J55x (read-only): real caps string parsed; 0x62/volume correctly
+    absent (no speakers) → volume control would be hidden. The 0xF3 read works on real hardware.

@@ -105,6 +105,9 @@ final class AppModel: ObservableObject {
     }
     /// Cached DDC hardware-control levels (0...1) keyed by display then VCP code (contrast/volume).
     @Published private(set) var ddcControlLevel: [DisplayRecordID: [UInt8: Float]] = [:]
+    /// Cached DDC capabilities (VCP 0xF3) per external display (Batch-2 #1): what the panel advertises,
+    /// so the UI/CLI only offer supported controls. Absent = not yet read → fall back to offering all.
+    @Published private(set) var ddcCapabilities: [DisplayRecordID: DDCCapabilities] = [:]
     /// Per-display software (gamma) dim level, 1 = no dim. Applies on top of hardware brightness and
     /// works on any display, including DDC-less externals and below the hardware minimum.
     @Published private(set) var softwareDim: [DisplayRecordID: Float] = [:]
@@ -782,14 +785,37 @@ final class AppModel: ObservableObject {
         ddcControlLevel[observation.recordID]?[control.vcp]
     }
 
-    /// Reads every hardware (DDC) control for an external display into the cache. Skips the built-in
-    /// and any feature the panel reports as unsupported. No-op in the public-API-only build.
+    /// Whether the display advertises a VCP feature in its DDC capabilities (Batch-2 #1). **Fail-open:**
+    /// if capabilities haven't been read (or the panel didn't return any), returns true so nothing is
+    /// hidden just because discovery hasn't happened — capabilities only ever *remove* dead controls.
+    func ddcSupports(_ vcp: UInt8, for observation: DisplayObservation) -> Bool {
+        guard let caps = ddcCapabilities[observation.recordID] else { return true }
+        return caps.supports(vcp)
+    }
+
+    /// Reads + caches the display's DDC capabilities string (VCP 0xF3) once per external display, so the
+    /// UI/CLI can hide controls the panel doesn't support. No-op on the built-in / public-API build.
+    func refreshCapabilities(for observation: DisplayObservation) async {
+        #if !PUBLIC_API_ONLY
+        guard observation.displayClass != .builtIn, ddcCapabilities[observation.recordID] == nil,
+              let controller = await ddcController(for: observation),
+              let raw = await controller.readCapabilitiesString(),
+              let caps = DDCCapabilities.parse(raw) else { return }
+        ddcCapabilities[observation.recordID] = caps
+        #endif
+    }
+
+    /// Reads every hardware (DDC) control for an external display into the cache. Skips the built-in,
+    /// anything the capabilities string says is unsupported, and any feature the panel doesn't read
+    /// back. Reads capabilities first (once). No-op in the public-API-only build.
     func refreshHardwareControls(for observation: DisplayObservation) async {
         #if !PUBLIC_API_ONLY
         guard observation.displayClass != .builtIn, let controller = await ddcController(for: observation) else { return }
+        await refreshCapabilities(for: observation)
         let id = observation.recordID
         for control in HardwareControl.allCases {
-            guard let feature = ExternalDisplayDDC.Feature(rawValue: control.vcp),
+            guard ddcSupports(control.vcp, for: observation),
+                  let feature = ExternalDisplayDDC.Feature(rawValue: control.vcp),
                   let reading = await controller.read(feature), reading.max > 0 else { continue }
             ddcControlLevel[id, default: [:]][control.vcp] = Float(reading.current) / Float(reading.max)
             ddcControlMax[DDCControlKey(id: id, vcp: control.vcp)] = reading.max

@@ -430,16 +430,30 @@ func runDDC() async {
         "colour": .colorPreset, "color": .colorPreset, "preset": .colorPreset,
     ]
     guard let sel = selectorArg, let featureArg = valueArg else {
-        fail("usage: opendisplay ddc <selector> <brightness|contrast|volume|input|colour|power> [value]")
+        fail("usage: opendisplay ddc <selector> <brightness|contrast|volume|input|colour|power|caps> [value]")
     }
     let featureKey = featureArg.lowercased()
-    guard featureKey == "power" || featureNames[featureKey] != nil else {
-        fail("unknown feature '\(featureArg)' (brightness|contrast|volume|input|colour|power)")
+    let isCaps = featureKey == "caps" || featureKey == "capabilities"
+    guard isCaps || featureKey == "power" || featureNames[featureKey] != nil else {
+        fail("unknown feature '\(featureArg)' (brightness|contrast|volume|input|colour|power|caps)")
     }
     let pairs = await resolveCurrentDisplays()
     let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
     guard let cgID = target.observation.cgDisplayID, let ddc = ExternalDisplayDDC(displayID: cgID) else {
         fail("no DDC for this display (external displays only)")
+    }
+    // Capabilities (VCP 0xF3): read the display's advertised feature set, read-only.
+    if isCaps {
+        if let raw = await ddc.readCapabilitiesString() {
+            print("capabilities: \(raw)")
+            if let caps = DDCCapabilities.parse(raw) {
+                let codes = caps.supportedVCPCodes.sorted().map { String(format: "0x%02X", $0) }.joined(separator: " ")
+                print("supported VCP codes: \(codes)")
+            }
+        } else {
+            print("capabilities: unavailable")
+        }
+        return
     }
     let setValue = positional.count > 3 ? positional[3] : nil
     // Power is a one-shot DPM command whose value is a word (on|standby|off), not a numeric level.
