@@ -18,19 +18,24 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// (Issue 5 — the clamshell-style original use case). The built-in returns when the last external
     /// leaves (via the always-one-active safety net).
     public var autoDisconnectBuiltInOnExternal: Bool
+    /// Seconds the "Keep these display settings?" prompt waits before auto-reverting a
+    /// resolution/mirror/set-main change (Issue 6). Floored at 3 by the app.
+    public var arrangementAutoRevertSeconds: Int
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
         confirmationCountdownSeconds: Int = 5,
         reconnectAllHotkeyEnabled: Bool = true,
         preventDisplaySleepWithExternal: Bool = false,
-        autoDisconnectBuiltInOnExternal: Bool = false
+        autoDisconnectBuiltInOnExternal: Bool = false,
+        arrangementAutoRevertSeconds: Int = 10
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
         self.reconnectAllHotkeyEnabled = reconnectAllHotkeyEnabled
         self.preventDisplaySleepWithExternal = preventDisplaySleepWithExternal
         self.autoDisconnectBuiltInOnExternal = autoDisconnectBuiltInOnExternal
+        self.arrangementAutoRevertSeconds = arrangementAutoRevertSeconds
     }
 
     public static let `default` = OpenDisplaySettings()
@@ -39,6 +44,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case persistencePolicy, confirmationCountdownSeconds, reconnectAllHotkeyEnabled
         case preventDisplaySleepWithExternal
         case autoDisconnectBuiltInOnExternal
+        case arrangementAutoRevertSeconds
     }
 
     /// Tolerant decoder: every missing key falls back to its default and unknown keys are ignored,
@@ -58,6 +64,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         autoDisconnectBuiltInOnExternal = try container
             .decodeIfPresent(Bool.self, forKey: .autoDisconnectBuiltInOnExternal)
             ?? defaults.autoDisconnectBuiltInOnExternal
+        arrangementAutoRevertSeconds = try container
+            .decodeIfPresent(Int.self, forKey: .arrangementAutoRevertSeconds)
+            ?? defaults.arrangementAutoRevertSeconds
     }
 }
 

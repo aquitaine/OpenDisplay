@@ -1086,7 +1086,7 @@ final class AppModel: ObservableObject {
 
     /// Countdown length for an arrangement revert window. Reuses the existing confirmation-countdown
     /// setting (clamped to a sane minimum) so resolution/mirror/set-main share one tunable.
-    private var arrangementRevertSeconds: Int { max(3, settings.confirmationCountdownSeconds) }
+    private var arrangementRevertSeconds: Int { max(3, settings.arrangementAutoRevertSeconds) }
 
     /// Applies an arrangement-altering change (resolution / mirror / set-main) behind a macOS-style
     /// timed auto-revert: snapshot the prior arrangement, apply, then start a "Keep these settings?"

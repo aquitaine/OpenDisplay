@@ -62,6 +62,17 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertFalse(SettingsStore(directory: directory).load().preventDisplaySleepWithExternal)
     }
 
+    func testArrangementAutoRevertDefaultsTo10AndRoundTrips() throws {
+        XCTAssertEqual(OpenDisplaySettings.default.arrangementAutoRevertSeconds, 10)
+        let store = SettingsStore(directory: directory)
+        try store.save(OpenDisplaySettings(arrangementAutoRevertSeconds: 15))
+        XCTAssertEqual(store.load().arrangementAutoRevertSeconds, 15)
+        // A file from before this key existed defaults to 10.
+        try Data(#"{"persistencePolicy":"reconnectOnQuit","confirmationCountdownSeconds":5}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        XCTAssertEqual(SettingsStore(directory: directory).load().arrangementAutoRevertSeconds, 10)
+    }
+
     func testAutoDisconnectBuiltInDefaultsOffAndRoundTrips() throws {
         XCTAssertFalse(OpenDisplaySettings.default.autoDisconnectBuiltInOnExternal)
         let store = SettingsStore(directory: directory)

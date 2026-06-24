@@ -18,15 +18,18 @@ import SwiftUI
 final class RevertConfirmationPresenter {
     private var panel: NSPanel?
 
-    /// Show (or reposition) the confirmation for `model.pendingRevert`, centered on the changed
-    /// display. The hosted SwiftUI view observes `model`, so the countdown updates itself.
+    /// Show (or reposition) the confirmation for `model.pendingRevert`, anchored to the top-right of
+    /// the changed display — just under the menu bar, next to the OpenDisplay status item, so it's
+    /// where the user's attention already is and isn't lost in the middle of a busy screen. The hosted
+    /// SwiftUI view observes `model`, so the countdown updates itself.
     func show(model: AppModel, changedDisplayID: CGDirectDisplayID?) {
         guard let screen = Self.screen(for: changedDisplayID) else { return }
         let panel = self.panel ?? makePanel(model: model)
         self.panel = panel
         let size = panel.contentView?.fittingSize ?? NSSize(width: 320, height: 150)
-        let visible = screen.visibleFrame
-        let origin = NSPoint(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2)
+        let visible = screen.visibleFrame  // excludes the menu bar and Dock
+        let margin: CGFloat = 12
+        let origin = NSPoint(x: visible.maxX - size.width - margin, y: visible.maxY - size.height - margin)
         panel.setFrame(NSRect(origin: origin, size: size), display: true)
         panel.orderFrontRegardless()
     }
