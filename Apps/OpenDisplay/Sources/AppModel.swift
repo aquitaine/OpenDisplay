@@ -211,6 +211,8 @@ final class AppModel: ObservableObject {
     private var revertGate: TimedRevertGate<[DisplayObservation]>?
     private var revertMessage = ""
     private var revertTask: Task<Void, Never>?
+    /// Presents the floating "Keep these settings?" confirmation on the changed display (Issue 6).
+    private let revertPresenter = RevertConfirmationPresenter()
 
     /// Edge detector for "auto-disconnect the built-in when an external connects" (Issue 5). Seeded to
     /// the launch topology so a pre-attached external isn't treated as a fresh arrival.
@@ -471,7 +473,7 @@ final class AppModel: ObservableObject {
     /// Reversible (public Core Graphics mirroring).
     func setMirrored(_ on: Bool, for observation: DisplayObservation) async {
         guard let cgID = observation.cgDisplayID else { return }
-        await applyWithRevert(on ? "Mirroring turned on" : "Mirroring turned off") {
+        await applyWithRevert(on ? "Mirroring turned on" : "Mirroring turned off", changedDisplayID: cgID) {
             _ = await self.observer.setMirroring(of: cgID, enabled: on)
         }
     }
@@ -1022,7 +1024,7 @@ final class AppModel: ObservableObject {
     /// and reverts itself unless confirmed within the window.
     func setMode(_ mode: DisplayMode, for observation: DisplayObservation) async {
         guard let cgID = observation.cgDisplayID else { return }
-        await applyWithRevert("Resolution changed on \(displayName(for: observation))") {
+        await applyWithRevert("Resolution changed on \(displayName(for: observation))", changedDisplayID: cgID) {
             _ = self.observer.applyArrangement([.init(displayID: cgID, origin: nil, mode: mode)])
         }
     }
@@ -1065,7 +1067,8 @@ final class AppModel: ObservableObject {
     /// Core Graphics treats the display at the origin as main.
     func setMain(for observation: DisplayObservation) async {
         guard !observation.isMain else { return }
-        await applyWithRevert("Main display changed to \(displayName(for: observation))") {
+        await applyWithRevert("Main display changed to \(displayName(for: observation))",
+                              changedDisplayID: observation.cgDisplayID) {
             let snapshot = await self.observer.currentSnapshot()
             let dx = -observation.origin.x
             let dy = -observation.origin.y
@@ -1090,16 +1093,20 @@ final class AppModel: ObservableObject {
     /// countdown that restores the snapshot unless the user confirms. The auto-revert needs no user
     /// input, so recovery is guaranteed even if the changed display became unreadable; the prompt is
     /// surfaced on the menu-bar display (and the global Reconnect-All hotkey stays available too).
-    private func applyWithRevert(_ message: String, _ apply: () async -> Void) async {
+    private func applyWithRevert(
+        _ message: String, changedDisplayID: CGDirectDisplayID?, _ apply: () async -> Void
+    ) async {
         // A change made while a window is still open keeps the prior one, then opens a fresh window.
         if revertGate?.isPending == true { confirmArrangementChange() }
         let before = await observer.currentSnapshot().observations
         await apply()
         await refresh()
-        beginRevertWindow(before: before, message: message)
+        beginRevertWindow(before: before, message: message, changedDisplayID: changedDisplayID)
     }
 
-    private func beginRevertWindow(before: [DisplayObservation], message: String) {
+    private func beginRevertWindow(
+        before: [DisplayObservation], message: String, changedDisplayID: CGDirectDisplayID?
+    ) {
         let seconds = arrangementRevertSeconds
         revertGate = TimedRevertGate(before: before, deadline: Date().addingTimeInterval(Double(seconds)))
         revertMessage = message
@@ -1107,6 +1114,9 @@ final class AppModel: ObservableObject {
         // lets the next launch restore the prior arrangement if the app dies mid-window.
         Self.writeRevertMarker(before)
         pendingRevert = PendingRevert(message: message, secondsRemaining: seconds)
+        // Surface the confirmation as a floating panel on the changed display (reliable regardless of
+        // whether the change came from the menu or the Settings window).
+        revertPresenter.show(model: self, changedDisplayID: changedDisplayID)
         revertTask?.cancel()
         revertTask = Task { [weak self] in await self?.driveRevertCountdown() }
     }
@@ -1149,6 +1159,7 @@ final class AppModel: ObservableObject {
         revertTask = nil
         revertGate = nil
         pendingRevert = nil
+        revertPresenter.hide()
         Self.clearRevertMarker()
     }
 
