@@ -183,3 +183,13 @@ off → never", and text/name resolution; plus the `SettingsStore` toggle round-
   - `make test` green (143); `OpenDisplay`, `OpenDisplay-PublicAPIOnly`, `opendisplay` all build.
   - **VERIFIED LIVE** on the S34J55x (read-only): real caps string parsed; 0x62/volume correctly
     absent (no speakers) → volume control would be hidden. The 0xF3 read works on real hardware.
+- **Issue 2 — EDID retrieval / export** ✅ (commit on `batch2`)
+  - Pure `EDID` + `parse(_:)` in **DisplayDomain**: 128-byte base block (manufacturer/product/serial/
+    week/year/version/size/gamma), the 4 descriptors (monitor name 0xFC, serial 0xFF, range, detailed
+    timing), checksum + extension count, and a deterministic `stableHash` (FNV-1a). Tolerant: bad
+    header/short → nil; bad checksum still parses but flags. 9 `EDIDTests`.
+  - `EDIDReader` (CoreGraphicsProvider, public IOKit): walks the IORegistry service plane for the raw
+    `EDID` blob, matched to the display by product code. CLI: `opendisplay edid <sel> [--out <path.bin>]`.
+  - `make test` green (152); both app flavors + CLI build.
+  - **VERIFIED LIVE** on the S34J55x (read-only): parsed model "S34J55x", serial "H4ZN401101",
+    week 17/2020, 3440×1440, 80×33cm, valid checksum, 1 extension; `--out` wrote the correct 256-byte blob.

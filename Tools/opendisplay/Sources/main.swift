@@ -483,6 +483,44 @@ func runDDC() async {
     }
 }
 
+func runEDID() async {
+    guard let sel = selectorArg else { fail("usage: opendisplay edid <selector> [--out <path.bin>]") }
+    let pairs = await resolveCurrentDisplays()
+    let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
+    guard let cgID = target.observation.cgDisplayID else { fail("no display for selector '\(sel)'") }
+    guard let bytes = EDIDReader.rawEDID(for: cgID) else {
+        print("edid: unavailable for this display")
+        return
+    }
+    if let edid = EDID.parse(bytes) {
+        print("manufacturer:     \(edid.manufacturerID)")
+        print("product code:     \(edid.productCode)")
+        if let n = edid.monitorName { print("model:            \(n)") }
+        if let s = edid.serialText { print("serial (text):    \(s)") }
+        if edid.serialNumber != 0 { print("serial (numeric): \(edid.serialNumber)") }
+        print("edid version:     \(edid.edidVersion).\(edid.edidRevision)")
+        if let y = edid.manufactureYear {
+            print("manufactured:     week \(edid.manufactureWeek.map(String.init) ?? "?") / \(y)")
+        }
+        if let r = edid.preferredResolution { print("preferred:        \(r.width)x\(r.height)") }
+        if let w = edid.widthCm, let h = edid.heightCm { print("size:             \(w)x\(h) cm") }
+        print("checksum:         \(edid.checksumValid ? "valid" : "INVALID")")
+        print("extensions:       \(edid.extensionCount)")
+        print("hash:             \(EDID.stableHash(bytes))")
+    } else {
+        print("edid: \(bytes.count) bytes read, but the base block failed to parse")
+    }
+    if let i = rawArgs.firstIndex(of: "--out"), i + 1 < rawArgs.count {
+        let path = rawArgs[i + 1]
+        do {
+            try Data(bytes).write(to: URL(fileURLWithPath: path))
+            print("wrote \(bytes.count) bytes → \(path)")
+        } catch {
+            print("write failed: \(error)")
+        }
+    }
+}
+
 // MARK: - Experimental rotation helper (short-lived, gated, isolated)
 
 /// EXPERIMENTAL rotation writer. Gated behind OPENDISPLAY_EXPERIMENTAL_ROTATION=1 so it never runs by
@@ -539,6 +577,7 @@ case "reconnect": await runReconnect()
 case "scene": await runScene()
 case "brightness": await runBrightness()
 case "ddc": await runDDC()
+case "edid": await runEDID()
 case "_rotate-exp": await runRotateExperimental()
 case "help", "--help", "-h":
     print("""
@@ -554,7 +593,8 @@ case "help", "--help", "-h":
       opendisplay recover [--json]
       opendisplay scene <list|save|show|plan|apply|delete> [name] [--json]
       opendisplay brightness <selector> [0..1]
-      opendisplay ddc <selector> <brightness|contrast|volume|input> [value]
+      opendisplay ddc <selector> <brightness|contrast|volume|input|power|caps> [value]
+      opendisplay edid <selector> [--out <path.bin>]
 
     SELECTORS: id:<recordID> · alias:<name> · tag:<tag> · main · builtin · state:<active|managedOffline> · <cgDisplayID>
     """)
