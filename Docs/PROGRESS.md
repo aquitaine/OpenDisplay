@@ -57,6 +57,21 @@ Do NOT exercise real display mutations in this session.
   - Tests: 8 `ResolutionStopsTests` (dedup, area-sort, index discipline, monotonicity, empty/single).
   - `make test` green (112 tests); both app flavors build. (Commit-on-release pairs with Issue 6.)
 
+- **Issue 6 — Safety gate for arrangement changes (timed auto-revert)** ✅ (commit on `batch1-auto`)
+  - Pure, tested `TimedRevertGate<State>` in **TopologyCore**: captures `before` + `deadline`; the
+    keep-vs-revert decision resolves **exactly once** (confirm-after-timeout can't un-revert, timeout-
+    after-confirm can't double-restore), and `tick`/`revert` hand back the exact `before` to restore.
+  - `AppModel.applyWithRevert` now wraps resolution (`setMode`, hence refresh/HiDPI), mirror
+    (`setMirrored`), and set-main (`setMain`): snapshot → apply → countdown → restore unless confirmed.
+    `restoreArrangement` reapplies each display's prior mode + origin (origin restores main) + mirror.
+  - Crash safety: a `revert.pending` marker (same dir as checkpoints/rotation marker) restores the
+    prior arrangement on next launch if the app dies mid-window — reuses the rotation marker pattern.
+  - Reachable when the changed display is unreadable: prompt is on the **menu-bar display** with
+    Keep / Revert-now, and the auto-revert needs no input (global Reconnect-All hotkey stays too).
+  - Pairs with Issue 2's commit-on-release slider.
+  - Tests: 10 `TimedRevertGateTests` (keep/revert/timeout, idempotency, exact-before restore, countdown).
+  - `make test` green (122 tests); both app flavors build (no new source warnings).
+
 ## In progress
 - (none)
 
@@ -73,6 +88,10 @@ Do NOT exercise real display mutations in this session.
 - Issue 4: live `open "opendisplay://reconnect-all"` end-to-end trigger `[deferred: attended
   verification]` — would run a real reconnect on this Mac (SAFETY: no real lifecycle mutations). Parser,
   command mapping, security/confirmation gate, and audit routing are all unit-tested / build-verified.
+- Issue 6: applying a real unsupported/blank resolution and watching it auto-revert after the timeout
+  `[deferred: attended verification]` — would mutate this Mac's live arrangement (SAFETY). The
+  keep/revert/timeout decision and exact-before restore are unit-tested; the restore path + crash
+  marker + countdown UI are build-verified in both app flavors.
 
 ## Final summary
 - (fill in when stopping)

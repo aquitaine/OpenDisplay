@@ -201,6 +201,17 @@ final class AppModel: ObservableObject {
     /// display is present (Issue 3). Decision logic is the platform-independent `DisplaySleepGuard`.
     private let sleepGuard: DisplaySleepGuard
 
+    /// Live "Keep these settings?" prompt for an arrangement-altering change (Issue 6), or nil when no
+    /// revert window is open. Drives the countdown banner; the UI calls `confirmArrangementChange()` /
+    /// `revertArrangementChange()`.
+    @Published private(set) var pendingRevert: PendingRevert?
+    /// UI state for the timed auto-revert banner.
+    struct PendingRevert: Equatable { var message: String; var secondsRemaining: Int }
+    /// Decision core for the open revert window; `before` is the arrangement to restore on timeout.
+    private var revertGate: TimedRevertGate<[DisplayObservation]>?
+    private var revertMessage = ""
+    private var revertTask: Task<Void, Never>?
+
     init() {
         let observer = CoreGraphicsProvider()
         self.observer = observer
@@ -253,6 +264,12 @@ final class AppModel: ObservableObject {
                 _ = await coordinator.reconnectAll()
                 Self.clearRotationMarker()
                 await refresh()
+            }
+            if let priorArrangement = Self.readRevertMarker() {
+                // An arrangement-revert window was open when the app last died — restore the prior
+                // mode/origin/mirror/main so a bad resolution or mirror can't survive a crash/quit.
+                await restoreArrangement(priorArrangement)
+                Self.clearRevertMarker()
             }
             #if DEBUG
             if let token = ProcessInfo.processInfo.environment["OPENDISPLAY_DISCONNECT"] {
@@ -449,8 +466,9 @@ final class AppModel: ObservableObject {
     /// Reversible (public Core Graphics mirroring).
     func setMirrored(_ on: Bool, for observation: DisplayObservation) async {
         guard let cgID = observation.cgDisplayID else { return }
-        _ = await observer.setMirroring(of: cgID, enabled: on)
-        await refresh()
+        await applyWithRevert(on ? "Mirroring turned on" : "Mirroring turned off") {
+            _ = await self.observer.setMirroring(of: cgID, enabled: on)
+        }
     }
 
     /// Sets a display's software (gamma) dim, 0.15...1 where 1 = no dim. Works on any display.
@@ -994,11 +1012,14 @@ final class AppModel: ObservableObject {
     }
     #endif
 
-    /// Applies a chosen resolution/mode, then re-reads the topology.
+    /// Applies a chosen resolution/mode behind the timed auto-revert gate (Issue 6), then re-reads the
+    /// topology. A bad/blank resolution can leave a display unreadable, so the change is checkpointed
+    /// and reverts itself unless confirmed within the window.
     func setMode(_ mode: DisplayMode, for observation: DisplayObservation) async {
         guard let cgID = observation.cgDisplayID else { return }
-        _ = observer.applyArrangement([.init(displayID: cgID, origin: nil, mode: mode)])
-        await refresh()
+        await applyWithRevert("Resolution changed on \(displayName(for: observation))") {
+            _ = self.observer.applyArrangement([.init(displayID: cgID, origin: nil, mode: mode)])
+        }
     }
 
     /// Refresh rates available at the display's current resolution (same point size + HiDPI), descending.
@@ -1039,17 +1060,123 @@ final class AppModel: ObservableObject {
     /// Core Graphics treats the display at the origin as main.
     func setMain(for observation: DisplayObservation) async {
         guard !observation.isMain else { return }
-        let snapshot = await observer.currentSnapshot()
-        let dx = -observation.origin.x
-        let dy = -observation.origin.y
-        let targets = snapshot.observations.compactMap { obs -> CoreGraphicsProvider.ArrangementTarget? in
-            guard let cgID = obs.cgDisplayID else { return nil }
-            return .init(displayID: cgID,
-                         origin: DisplayOrigin(x: obs.origin.x + dx, y: obs.origin.y + dy),
-                         mode: nil)
+        await applyWithRevert("Main display changed to \(displayName(for: observation))") {
+            let snapshot = await self.observer.currentSnapshot()
+            let dx = -observation.origin.x
+            let dy = -observation.origin.y
+            let targets = snapshot.observations.compactMap { obs -> CoreGraphicsProvider.ArrangementTarget? in
+                guard let cgID = obs.cgDisplayID else { return nil }
+                return .init(displayID: cgID,
+                             origin: DisplayOrigin(x: obs.origin.x + dx, y: obs.origin.y + dy),
+                             mode: nil)
+            }
+            _ = self.observer.applyArrangement(targets)
         }
-        _ = observer.applyArrangement(targets)
+    }
+
+    // MARK: - Timed auto-revert safety gate (Issue 6)
+
+    /// Countdown length for an arrangement revert window. Reuses the existing confirmation-countdown
+    /// setting (clamped to a sane minimum) so resolution/mirror/set-main share one tunable.
+    private var arrangementRevertSeconds: Int { max(3, settings.confirmationCountdownSeconds) }
+
+    /// Applies an arrangement-altering change (resolution / mirror / set-main) behind a macOS-style
+    /// timed auto-revert: snapshot the prior arrangement, apply, then start a "Keep these settings?"
+    /// countdown that restores the snapshot unless the user confirms. The auto-revert needs no user
+    /// input, so recovery is guaranteed even if the changed display became unreadable; the prompt is
+    /// surfaced on the menu-bar display (and the global Reconnect-All hotkey stays available too).
+    private func applyWithRevert(_ message: String, _ apply: () async -> Void) async {
+        // A change made while a window is still open keeps the prior one, then opens a fresh window.
+        if revertGate?.isPending == true { confirmArrangementChange() }
+        let before = await observer.currentSnapshot().observations
+        await apply()
         await refresh()
+        beginRevertWindow(before: before, message: message)
+    }
+
+    private func beginRevertWindow(before: [DisplayObservation], message: String) {
+        let seconds = arrangementRevertSeconds
+        revertGate = TimedRevertGate(before: before, deadline: Date().addingTimeInterval(Double(seconds)))
+        revertMessage = message
+        // Crash recovery: a marker (same Application Support dir the checkpoints/rotation marker use)
+        // lets the next launch restore the prior arrangement if the app dies mid-window.
+        Self.writeRevertMarker(before)
+        pendingRevert = PendingRevert(message: message, secondsRemaining: seconds)
+        revertTask?.cancel()
+        revertTask = Task { [weak self] in await self?.driveRevertCountdown() }
+    }
+
+    /// Ticks the open window ~5×/second: updates the countdown label and, at the deadline, restores
+    /// the prior arrangement. Self-cancels once the gate resolves (keep or revert).
+    private func driveRevertCountdown() async {
+        while !Task.isCancelled {
+            guard var gate = revertGate, gate.isPending else { return }
+            let now = Date()
+            if let before = gate.tick(now: now) {
+                revertGate = gate
+                await restoreArrangement(before)
+                clearRevertWindow()
+                return
+            }
+            revertGate = gate
+            pendingRevert = PendingRevert(message: revertMessage, secondsRemaining: gate.secondsRemaining(now: now))
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+    }
+
+    /// User accepted the change — keep it and close the window.
+    func confirmArrangementChange() {
+        guard var gate = revertGate, gate.confirm() else { return }
+        revertGate = gate
+        clearRevertWindow()
+    }
+
+    /// User asked to revert now — restore the prior arrangement and close the window.
+    func revertArrangementChange() async {
+        guard var gate = revertGate, let before = gate.revert() else { return }
+        revertGate = gate
+        await restoreArrangement(before)
+        clearRevertWindow()
+    }
+
+    private func clearRevertWindow() {
+        revertTask?.cancel()
+        revertTask = nil
+        revertGate = nil
+        pendingRevert = nil
+        Self.clearRevertMarker()
+    }
+
+    /// Restores each display's exact prior mode + origin (origins also restore which display is main,
+    /// since Core Graphics treats the display at (0,0) as main), then its prior mirror state.
+    private func restoreArrangement(_ observations: [DisplayObservation]) async {
+        let targets = observations.compactMap { obs -> CoreGraphicsProvider.ArrangementTarget? in
+            guard let cgID = obs.cgDisplayID else { return nil }
+            return .init(displayID: cgID, origin: obs.origin, mode: obs.mode)
+        }
+        if !targets.isEmpty { _ = observer.applyArrangement(targets) }
+        for obs in observations {
+            guard let cgID = obs.cgDisplayID else { continue }
+            _ = await observer.setMirroring(of: cgID, enabled: obs.isMirrored)
+        }
+        await refresh()
+    }
+
+    /// Pending-revert marker (mirrors the rotation marker): the prior arrangement, persisted so a
+    /// crash/quit during the window doesn't strand a bad layout — the next launch restores it.
+    private static func revertMarkerURL() -> URL? {
+        (try? DiskCheckpointStore.defaultDirectory())?.appendingPathComponent("revert.pending")
+    }
+    private static func writeRevertMarker(_ observations: [DisplayObservation]) {
+        guard let url = revertMarkerURL(), let data = try? JSONEncoder().encode(observations) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+    private static func readRevertMarker() -> [DisplayObservation]? {
+        guard let url = revertMarkerURL(), let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode([DisplayObservation].self, from: data)
+    }
+    private static func clearRevertMarker() {
+        if let url = revertMarkerURL() { try? FileManager.default.removeItem(at: url) }
     }
 
     /// Turns a live display off (flagship). Routes through the coordinator, which preflights and
