@@ -17,6 +17,7 @@ struct MenuBarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             header
+            revertBanner
             ODSectionLabel("Displays")
             content
             if model.isDegraded {
@@ -32,6 +33,28 @@ struct MenuBarView: View {
         .frame(width: 320)
         .onChange(of: model.displays.count, initial: true) { _, _ in
             if expandedID == nil { expandedID = model.displays.first(where: { $0.isMain })?.recordID }
+        }
+    }
+
+    /// "Keep these settings?" countdown for an arrangement-altering change (Issue 6), shown right below
+    /// the menu-bar icon in the pop-out — on whichever screen the user opened the menu from, so it's
+    /// where their cursor already is. The change also auto-reverts on its own if nothing is clicked.
+    @ViewBuilder
+    private var revertBanner: some View {
+        if let pending = model.pendingRevert {
+            VStack(alignment: .leading, spacing: 6) {
+                ODInlineBanner(tone: .orange, systemImage: "clock.arrow.circlepath",
+                               title: "Keep these display settings?",
+                               message: "\(pending.message). Reverting in \(pending.secondsRemaining)s…")
+                HStack(spacing: 8) {
+                    Button("Keep") { model.confirmArrangementChange() }
+                        .keyboardShortcut(.defaultAction)
+                    Button("Revert now") { Task { await model.revertArrangementChange() } }
+                    Spacer()
+                }
+                .padding(.horizontal, 2)
+            }
+            .padding(.bottom, 4)
         }
     }
 

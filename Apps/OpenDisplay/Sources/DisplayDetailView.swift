@@ -15,6 +15,20 @@ struct DisplayDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                if let pending = model.pendingRevert {
+                    // Timed auto-revert prompt for a change made here in Settings (Issue 6).
+                    VStack(alignment: .leading, spacing: 6) {
+                        ODInlineBanner(tone: .orange, systemImage: "clock.arrow.circlepath",
+                                       title: "Keep these display settings?",
+                                       message: "\(pending.message). Reverting in \(pending.secondsRemaining)s…")
+                        HStack(spacing: 8) {
+                            Button("Keep") { model.confirmArrangementChange() }
+                                .keyboardShortcut(.defaultAction)
+                            Button("Revert now") { Task { await model.revertArrangementChange() } }
+                            Spacer()
+                        }
+                    }
+                }
                 ResolutionCard(display: display)
                 AppearanceCard(display: display)
                 if display.displayClass != .builtIn { ControlsCard(display: display) }

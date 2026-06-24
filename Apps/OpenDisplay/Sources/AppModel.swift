@@ -211,8 +211,6 @@ final class AppModel: ObservableObject {
     private var revertGate: TimedRevertGate<[DisplayObservation]>?
     private var revertMessage = ""
     private var revertTask: Task<Void, Never>?
-    /// Presents the floating "Keep these settings?" confirmation on the changed display (Issue 6).
-    private let revertPresenter = RevertConfirmationPresenter()
 
     /// Edge detector for "auto-disconnect the built-in when an external connects" (Issue 5). Seeded to
     /// the launch topology so a pre-attached external isn't treated as a fresh arrival.
@@ -1109,9 +1107,8 @@ final class AppModel: ObservableObject {
         // lets the next launch restore the prior arrangement if the app dies mid-window.
         Self.writeRevertMarker(before)
         pendingRevert = PendingRevert(message: message, secondsRemaining: seconds)
-        // Surface the confirmation as a floating pop-out on the screen the user is acting on (reliable
-        // regardless of whether the change came from the menu or the Settings window).
-        revertPresenter.show(model: self)
+        // The confirmation renders in-context (menu-bar pop-out and the Settings window) wherever the
+        // user made the change — both observe `pendingRevert`.
         revertTask?.cancel()
         revertTask = Task { [weak self] in await self?.driveRevertCountdown() }
     }
@@ -1154,7 +1151,6 @@ final class AppModel: ObservableObject {
         revertTask = nil
         revertGate = nil
         pendingRevert = nil
-        revertPresenter.hide()
         Self.clearRevertMarker()
     }
 
