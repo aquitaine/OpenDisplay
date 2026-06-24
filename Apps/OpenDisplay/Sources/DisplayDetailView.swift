@@ -119,6 +119,31 @@ private struct ResolutionCard: View {
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
+            if resolutions.count > 1, let mode = display.mode {
+                // Favourite resolutions (Batch-2 #3): star the current mode + quick-recall the rest.
+                ODDivider()
+                ODRow("Favorites") {
+                    HStack(spacing: 6) {
+                        Button {
+                            model.toggleFavoriteResolution(mode, for: display)
+                        } label: {
+                            let on = model.isFavoriteResolution(mode, for: display)
+                            Image(systemName: on ? "star.fill" : "star")
+                                .foregroundStyle(on ? AnyShapeStyle(.yellow) : AnyShapeStyle(.secondary))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Pin the current resolution as a favourite")
+                        ForEach(model.favoriteResolutions(among: resolutions, for: display), id: \.self) { fav in
+                            if fav != mode {
+                                Button("\(fav.pointWidth)×\(fav.pointHeight)") {
+                                    Task { await model.setMode(fav, for: display) }
+                                }
+                                .buttonStyle(.bordered).controlSize(.small)
+                            }
+                        }
+                    }
+                }
+            }
             if rates.count > 1, let mode = display.mode {
                 ODDivider()
                 ODRow("Refresh rate") {

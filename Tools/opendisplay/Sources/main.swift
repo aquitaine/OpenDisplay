@@ -521,6 +521,43 @@ func runEDID() async {
     }
 }
 
+/// Parses a mode argument like `1920x1080`, `1920x1080@60`, or `1512x982@60@2x` into a `DisplayMode`
+/// (pixel size mirrors point size; only point-size/refresh/HiDPI matter for the favourite key).
+func parseModeArg(_ s: String) -> DisplayMode? {
+    let hiDPI = s.contains("@2x")
+    let parts = s.replacingOccurrences(of: "@2x", with: "").split(separator: "@")
+    let dims = parts[0].lowercased().split(separator: "x")
+    guard dims.count == 2, let w = Int(dims[0]), let h = Int(dims[1]) else { return nil }
+    let hz = parts.count > 1 ? (Double(parts[1]) ?? 60) : 60
+    return DisplayMode(pixelWidth: w, pixelHeight: h, pointWidth: w, pointHeight: h, refreshHz: hz, isHiDPI: hiDPI)
+}
+
+func runFavorite() async {
+    guard let sub = selectorArg, let sel = valueArg else {
+        fail("usage: opendisplay favorite <list|set|unset> <selector> [WxH[@Hz][@2x]]")
+    }
+    let store = (try? SettingsStore.defaultDirectory()).map(FavoritesStore.init(directory:))
+    var favorites = store?.load() ?? FavoriteResolutions()
+    let pairs = await resolveCurrentDisplays()
+    let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
+    let recordID = target.record.id
+    switch sub.lowercased() {
+    case "list":
+        let keys = favorites.favoriteKeys(for: recordID)
+        print(keys.isEmpty ? "(no favourites)" : keys.joined(separator: "\n"))
+    case "set", "unset":
+        guard positional.count > 3, let mode = parseModeArg(positional[3]) else {
+            fail("mode must look like 1920x1080[@60][@2x]")
+        }
+        if sub.lowercased() == "set" { favorites.add(mode, for: recordID) }
+        else { favorites.remove(mode, for: recordID) }
+        try? store?.save(favorites)
+        print("\(sub.lowercased()) \(FavoriteResolutions.key(for: mode)) for \(name(for: target))")
+    default:
+        fail("unknown favorite subcommand '\(sub)' (list|set|unset)")
+    }
+}
+
 // MARK: - Experimental rotation helper (short-lived, gated, isolated)
 
 /// EXPERIMENTAL rotation writer. Gated behind OPENDISPLAY_EXPERIMENTAL_ROTATION=1 so it never runs by
@@ -578,6 +615,7 @@ case "scene": await runScene()
 case "brightness": await runBrightness()
 case "ddc": await runDDC()
 case "edid": await runEDID()
+case "favorite", "favourite": await runFavorite()
 case "_rotate-exp": await runRotateExperimental()
 case "help", "--help", "-h":
     print("""
@@ -595,6 +633,7 @@ case "help", "--help", "-h":
       opendisplay brightness <selector> [0..1]
       opendisplay ddc <selector> <brightness|contrast|volume|input|power|caps> [value]
       opendisplay edid <selector> [--out <path.bin>]
+      opendisplay favorite <list|set|unset> <selector> [WxH[@Hz][@2x]]
 
     SELECTORS: id:<recordID> · alias:<name> · tag:<tag> · main · builtin · state:<active|managedOffline> · <cgDisplayID>
     """)

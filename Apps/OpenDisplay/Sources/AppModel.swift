@@ -204,6 +204,10 @@ final class AppModel: ObservableObject {
     /// display is present (Issue 3). Decision logic is the platform-independent `DisplaySleepGuard`.
     private let sleepGuard: DisplaySleepGuard
 
+    /// Pinned favourite resolutions per display (Batch-2 #3), persisted to favorites.json.
+    @Published private(set) var favorites = FavoriteResolutions()
+    private let favoritesStore: FavoritesStore?
+
     /// Live "Keep these settings?" prompt for an arrangement-altering change (Issue 6), or nil when no
     /// revert window is open. Drives the countdown banner; the UI calls `confirmArrangementChange()` /
     /// `revertArrangementChange()`.
@@ -239,6 +243,9 @@ final class AppModel: ObservableObject {
         self.settingsStore = settingsStore
         self.settings = settingsStore?.load() ?? .default
         self.sleepGuard = DisplaySleepGuard(backend: IOKitPowerAssertions())
+        let favoritesStore = (try? SettingsStore.defaultDirectory()).map(FavoritesStore.init(directory:))
+        self.favoritesStore = favoritesStore
+        self.favorites = favoritesStore?.load() ?? FavoriteResolutions()
         // Always-available global Reconnect-All (recovery hierarchy step 3): reachable even when the
         // menu bar isn't. Skipped if disabled in settings; falls back to the menu-bar item if the
         // chord can't be registered.
@@ -1051,6 +1058,24 @@ final class AppModel: ObservableObject {
         await applyWithRevert("Resolution changed on \(displayName(for: observation))") {
             _ = self.observer.applyArrangement([.init(displayID: cgID, origin: nil, mode: mode)])
         }
+    }
+
+    /// Whether `mode` is a pinned favourite for this display (Batch-2 #3).
+    func isFavoriteResolution(_ mode: DisplayMode, for observation: DisplayObservation) -> Bool {
+        favorites.isFavorite(mode, for: observation.recordID)
+    }
+
+    /// Pins/unpins `mode` as a favourite for this display and persists.
+    func toggleFavoriteResolution(_ mode: DisplayMode, for observation: DisplayObservation) {
+        favorites.toggle(mode, for: observation.recordID)
+        try? favoritesStore?.save(favorites)
+    }
+
+    /// The display's favourite modes (newest first), resolved against `stops` — stale ones drop out.
+    func favoriteResolutions(among stops: [DisplayMode], for observation: DisplayObservation) -> [DisplayMode] {
+        let merged = favorites.merged(stops: stops, for: observation.recordID)
+        let count = favorites.favoriteKeys(for: observation.recordID).count
+        return Array(merged.prefix(min(count, merged.count))).filter { isFavoriteResolution($0, for: observation) }
     }
 
     /// Refresh rates available at the display's current resolution (same point size + HiDPI), descending.

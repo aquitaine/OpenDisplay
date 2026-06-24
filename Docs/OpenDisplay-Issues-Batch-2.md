@@ -193,3 +193,12 @@ off → never", and text/name resolution; plus the `SettingsStore` toggle round-
   - `make test` green (152); both app flavors + CLI build.
   - **VERIFIED LIVE** on the S34J55x (read-only): parsed model "S34J55x", serial "H4ZN401101",
     week 17/2020, 3440×1440, 80×33cm, valid checksum, 1 extension; `--out` wrote the correct 256-byte blob.
+- **Issue 3 — Favorite resolutions** ✅ (commit on `batch2`)
+  - Pure `FavoriteResolutions` in **DisplayDomain** (toggle/add/remove/isFavorite, newest-first,
+    `merged(stops:)` = favourites first then area-sorted stops, deduped, stale ones dropped). 9 tests.
+  - `FavoritesStore` in **TopologyCore** (favorites.json, keyed by `DisplayRecordID`; missing/corrupt →
+    empty). 3 tests. AppModel loads/persists; star toggle + quick-recall chips in `DisplayDetailView`.
+  - CLI: `opendisplay favorite <list|set|unset> <selector> [WxH[@Hz][@2x]]`.
+  - `make test` green (164); both app flavors + CLI build.
+  - **VERIFIED LIVE** via CLI: set/list (newest-first)/unset round-trips, persisted to favorites.json
+    keyed by the external's record id (shared with the app).
