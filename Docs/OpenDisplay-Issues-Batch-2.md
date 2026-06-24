@@ -202,3 +202,10 @@ off → never", and text/name resolution; plus the `SettingsStore` toggle round-
   - `make test` green (164); both app flavors + CLI build.
   - **VERIFIED LIVE** via CLI: set/list (newest-first)/unset round-trips, persisted to favorites.json
     keyed by the external's record id (shared with the app).
+- **Issue 6 — Display-config protection (drift detect)** ✅ (commit on `batch2`)
+  - Pure `DisplayConfigDrifter.detectDrift(protected:current:)` in **TopologyCore**: compares two
+    `TopologySnapshot`s record-by-record → ordered `Change` list (origin/mode/rotation/mirror/active/
+    main/disconnected/appeared). `ProtectedConfig` (Codable). 11 `DisplayConfigDrifterTests`.
+  - Scope: pure drift logic + persistable config this issue (wiring drift→confirm→auto-restore via the
+    existing `ScenePlanner`/`restoreArrangement` is a follow-up). No hardware needed.
+  - `make test` green (175). Fully covered by unit tests (pure snapshot logic).
