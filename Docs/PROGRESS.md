@@ -46,6 +46,17 @@ Do NOT exercise real display mutations in this session.
   - Tests: 8 `URLCommandTests` (verb/scheme parsing, query selectors, security-gate, rejection).
   - `make test` green (104 tests); both app flavors build. Scope: URL scheme only (HTTP listener later).
 
+- **Issue 2 — Resolution slider (replace dropdown)** ✅ (commit on `batch1-auto`)
+  - Pure, tested `ResolutionStops` helper in **DisplayDomain**: `areaSorted(from:)` = one stop per
+    point-size (HiDPI/refresh-preferred), area-ascending with deterministic tie-breakers so stops stay
+    monotonic; `index(of:in:)` maps the current mode back to its stop by point-size.
+  - `DisplayDetailView` resolution `Menu` → `Slider` bound to the stop index. Commit-on-release (drag
+    doesn't slam through every mode), live label tracks the thumb, position re-syncs to the current
+    mode via `.onChange(of: display.mode)`. Single-mode displays show static text (no dead control).
+  - Provider untouched (pure UI/binding change).
+  - Tests: 8 `ResolutionStopsTests` (dedup, area-sort, index discipline, monotonicity, empty/single).
+  - `make test` green (112 tests); both app flavors build. (Commit-on-release pairs with Issue 6.)
+
 ## In progress
 - (none)
 

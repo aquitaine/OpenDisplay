@@ -48,20 +48,19 @@ private struct ResolutionCard: View {
     /// enumerations on every body evaluation. Filters use the *current* display.mode, so they stay
     /// correct across resolution switches without re-enumerating.
     @State private var allModes: [DisplayMode] = []
+    /// Live slider position (index into `resolutions`). Applied on release (commit-on-release, per the
+    /// safety note on Issue 2/#6) and re-synced to the current mode whenever the user isn't dragging.
+    @State private var resolutionIndex: Double = 0
+    @State private var draggingResolution = false
 
-    /// One entry per point-size (HiDPI preferred, then highest refresh), area-sorted.
-    private var resolutions: [DisplayMode] {
-        var best: [String: DisplayMode] = [:]
-        for mode in allModes {
-            let key = "\(mode.pointWidth)x\(mode.pointHeight)"
-            let rank = (mode.isHiDPI ? 1 : 0, mode.refreshHz)
-            if let existing = best[key] {
-                if rank > (existing.isHiDPI ? 1 : 0, existing.refreshHz) { best[key] = mode }
-            } else {
-                best[key] = mode
-            }
-        }
-        return best.values.sorted { $0.pointWidth * $0.pointHeight < $1.pointWidth * $1.pointHeight }
+    /// One area-sorted stop per point-size (HiDPI preferred, then highest refresh). Shared, tested
+    /// logic so the slider's index discipline stays monotonic (`ResolutionStops`).
+    private var resolutions: [DisplayMode] { ResolutionStops.areaSorted(from: allModes) }
+
+    /// The resolution stop the slider currently points at (the active stop).
+    private var selectedResolution: DisplayMode? {
+        let idx = Int(resolutionIndex.rounded())
+        return resolutions.indices.contains(idx) ? resolutions[idx] : nil
     }
 
     /// Refresh rates at the current resolution (same point-size + HiDPI), descending.
@@ -84,16 +83,24 @@ private struct ResolutionCard: View {
         ODCard(title: "Resolution",
                footnote: "Scaled resolutions use HiDPI (Retina) rendering for crisper text.") {
             ODRow("Resolution") {
-                if resolutions.count > 1, let mode = display.mode {
-                    Menu("\(mode.pointWidth) × \(mode.pointHeight)") {
-                        ForEach(resolutions, id: \.self) { m in
-                            Button("\(m.pointWidth) × \(m.pointHeight)") {
-                                Task { await model.setMode(m, for: display) }
+                if resolutions.count > 1 {
+                    HStack(spacing: 8) {
+                        Slider(
+                            value: $resolutionIndex,
+                            in: 0...Double(resolutions.count - 1),
+                            step: 1,
+                            onEditingChanged: { editing in
+                                draggingResolution = editing
+                                if !editing { applySelectedResolution() }
                             }
-                        }
+                        )
+                        .frame(width: 150)
+                        Text(resolutionLabel)
+                            .font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary)
+                            .frame(width: 96, alignment: .trailing)
                     }
-                    .menuStyle(.borderlessButton).fixedSize()
                 } else {
+                    // Single-mode display: no dead control, just the current resolution.
                     Text(display.mode.map { "\($0.pointWidth) × \($0.pointHeight)" } ?? "—")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
@@ -118,7 +125,38 @@ private struct ResolutionCard: View {
                 }
             }
         }
-        .task(id: display.recordID) { allModes = model.allModes(for: display) }
+        .task(id: display.recordID) {
+            allModes = model.allModes(for: display)
+            syncResolutionIndex()
+        }
+        .onChange(of: display.mode) { _, _ in syncResolutionIndex() }
+    }
+
+    /// Label for the slider's active stop — the resolution it points at, with a HiDPI hint when that
+    /// stop is a Retina mode.
+    private var resolutionLabel: String {
+        guard let mode = selectedResolution ?? display.mode else { return "—" }
+        return "\(mode.pointWidth) × \(mode.pointHeight)"
+    }
+
+    /// Applies the resolution under the slider thumb (called on drag-release, not continuously, so a
+    /// drag doesn't slam the panel through every intermediate mode). No-op if it's already current.
+    private func applySelectedResolution() {
+        let idx = Int(resolutionIndex.rounded())
+        guard resolutions.indices.contains(idx) else { return }
+        let target = resolutions[idx]
+        if let current = display.mode,
+           current.pointWidth == target.pointWidth, current.pointHeight == target.pointHeight {
+            return
+        }
+        Task { await model.setMode(target, for: display) }
+    }
+
+    /// Re-aligns the slider position to the display's current mode, unless the user is mid-drag.
+    private func syncResolutionIndex() {
+        guard !draggingResolution, let mode = display.mode,
+              let idx = ResolutionStops.index(of: mode, in: resolutions) else { return }
+        resolutionIndex = Double(idx)
     }
 }
 
