@@ -38,6 +38,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.sizingOptions = [.preferredContentSize]
         popover.contentViewController = controller
 
+        // Close the pop-out when an action that re-lays-out the displays is picked (e.g. Set as Main):
+        // otherwise the open pop-out, anchored to the status item, gets displaced to a random spot when
+        // set-main relocates the menu bar to the new main display.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(dismissPopover), name: .openDisplayDismissMenu, object: nil)
+
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.image = NSImage(systemSymbolName: "display", accessibilityDescription: "OpenDisplay")
         item.button?.action = #selector(togglePopover(_:))
@@ -55,10 +61,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func dismissPopover() {
+        if popover.isShown { popover.performClose(nil) }
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
             Task { await OpenDisplayAutomation.handleURL(url) }
         }
     }
+}
+
+extension Notification.Name {
+    /// Posted by a menu action that re-lays-out the displays (e.g. Set as Main) so the app delegate
+    /// closes the pop-out before the menu bar relocates and displaces it.
+    static let openDisplayDismissMenu = Notification.Name("OpenDisplayDismissMenu")
 }
 #endif

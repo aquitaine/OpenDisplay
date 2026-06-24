@@ -292,6 +292,8 @@ private struct DisplayCard: View {
         HStack(spacing: 6) {
             if !display.isMain {
                 ODQuickAction("Set as Main", systemImage: "star", enabled: !model.busy) {
+                    // Close the pop-out first so set-main relocating the menu bar can't displace it.
+                    NotificationCenter.default.post(name: .openDisplayDismissMenu, object: nil)
                     Task { await model.setMain(for: display) }
                 }
             }

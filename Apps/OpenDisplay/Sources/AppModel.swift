@@ -1063,18 +1063,28 @@ final class AppModel: ObservableObject {
 
     /// Makes a display the main display by re-anchoring every origin so this one sits at (0,0) —
     /// Core Graphics treats the display at the origin as main.
+    /// Makes a display the main display by re-anchoring every origin so this one sits at (0,0) — Core
+    /// Graphics treats the display at the origin as main, and accepts the negative origins this gives
+    /// the other displays, so the physical arrangement is preserved.
+    ///
     /// Applies immediately and sticks — no timed auto-revert. Changing the main display never leaves a
     /// display unreadable (both stay usable), so the revert gate (which is for bad resolutions) would
-    /// only undo the user's intended change and bounce the menu bar back. Issue 6's gate is therefore
-    /// resolution-only.
+    /// only undo the user's intended change and bounce the menu bar back.
+    ///
+    /// The shift is computed from a **fresh** snapshot, re-resolving the target by display id: the
+    /// observation handed in by the menu can carry a stale origin (cached from before the last
+    /// arrangement change), which would compute a zero/wrong shift and silently no-op — exactly the
+    /// "set-main does nothing / the other screen stays main" symptom.
     func setMain(for observation: DisplayObservation) async {
-        guard !observation.isMain else { return }
+        guard let cgID = observation.cgDisplayID else { return }
         let snapshot = await observer.currentSnapshot()
-        let dx = -observation.origin.x
-        let dy = -observation.origin.y
+        guard let target = snapshot.observations.first(where: { $0.cgDisplayID == cgID }),
+              !target.isMain else { return }
+        let dx = -target.origin.x
+        let dy = -target.origin.y
         let targets = snapshot.observations.compactMap { obs -> CoreGraphicsProvider.ArrangementTarget? in
-            guard let cgID = obs.cgDisplayID else { return nil }
-            return .init(displayID: cgID,
+            guard let id = obs.cgDisplayID else { return nil }
+            return .init(displayID: id,
                          origin: DisplayOrigin(x: obs.origin.x + dx, y: obs.origin.y + dy),
                          mode: nil)
         }
