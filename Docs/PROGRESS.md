@@ -32,6 +32,20 @@ Do NOT exercise real display mutations in this session.
   - Tests: 7 `DDCPowerModeTests` (VCP values, parsing, aliases, rejection, labels).
   - `make test` green (96 tests); `OpenDisplay`, `OpenDisplay-PublicAPIOnly`, and `opendisplay` build.
 
+- **Issue 4 — `opendisplay://` URL-scheme automation** ✅ (commit on `batch1-auto`)
+  - Shared, testable `URLCommand` + `URLCommandParser` in **AutomationSchema** (pure, total: unknown/
+    malformed URLs → nil). `reconnect-all` (+ aliases) → `.reconnectAll`; `disconnect?display=<sel>` →
+    `.disconnect(selector:)` flagged `requiresConfirmation`.
+  - New `Actor.url` case so the audit trail attributes URL-triggered commands.
+  - `OpenDisplayAutomation.handleURL` routes through the **same** `makeGateway()` the App Intents use
+    (→ same safety/verify/audit path, DiskAuditLog entry appears). Safe recovery commands auto-run;
+    arrangement-altering ones are never fired silently — they bring the app forward for in-app confirm.
+  - `AppDelegate.application(_:open:)` (via `@NSApplicationDelegateAdaptor`) receives the URLs
+    (LSUIElement app has no always-alive window for SwiftUI `.onOpenURL`).
+  - `CFBundleURLTypes` for `opendisplay://` registered in Info.plist (plutil-lint clean).
+  - Tests: 8 `URLCommandTests` (verb/scheme parsing, query selectors, security-gate, rejection).
+  - `make test` green (104 tests); both app flavors build. Scope: URL scheme only (HTTP listener later).
+
 ## In progress
 - (none)
 
@@ -45,6 +59,9 @@ Do NOT exercise real display mutations in this session.
 - Issue 1: confirming a real panel actually powers down on Standby/Off and the wake-once-off behavior
   `[deferred: attended verification]` — VCP value mapping + token parsing are unit-tested; the I2C
   round-trip to a physical monitor needs hardware (and is intentionally not exercised in this session).
+- Issue 4: live `open "opendisplay://reconnect-all"` end-to-end trigger `[deferred: attended
+  verification]` — would run a real reconnect on this Mac (SAFETY: no real lifecycle mutations). Parser,
+  command mapping, security/confirmation gate, and audit routing are all unit-tested / build-verified.
 
 ## Final summary
 - (fill in when stopping)

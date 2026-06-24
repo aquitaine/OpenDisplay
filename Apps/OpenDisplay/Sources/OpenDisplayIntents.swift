@@ -1,5 +1,7 @@
 #if os(macOS)
 import AppIntents
+import AppKit
+import AutomationSchema
 import CoreGraphicsProvider
 import DisplayDomain
 import Foundation
@@ -38,6 +40,39 @@ enum OpenDisplayAutomation {
         let audit = (try? DiskAuditLog.defaultDirectory()).map(DiskAuditLog.init(directory:))
         return CommandGateway(observer: observer, lifecycleProvider: lifecycle,
                               checkpoints: checkpoints, auditLog: audit)
+    }
+
+    /// Routes an `opendisplay://` URL onto the shared `CommandGateway` (Issue 4) — the third automation
+    /// front door beside the CLI and App Intents, inheriting the same safety/verification/audit path.
+    ///
+    /// Safe recovery commands run immediately and are audited like every other surface. Arrangement-
+    /// altering commands are NEVER fired silently from a URL (any app or web link can trigger one):
+    /// they bring the app forward for explicit in-app confirmation instead. Malformed or unknown URLs
+    /// are a logged no-op, never a crash. Returns the parsed command (nil when unrecognized).
+    @discardableResult
+    static func handleURL(_ url: URL) async -> URLCommand? {
+        guard let command = URLCommandParser.parse(url) else {
+            log("ignored malformed/unknown URL: \(url.absoluteString)")
+            return nil
+        }
+        guard !command.requiresConfirmation else {
+            log("URL command \(command.name) is arrangement-altering — requires in-app confirmation, not auto-run")
+            await MainActor.run { NSApp.activate(ignoringOtherApps: true) }
+            return command
+        }
+        let gateway = await makeGateway()
+        switch command {
+        case .reconnectAll:
+            _ = await gateway.reconnectAll(actor: .url)
+        case .disconnect:
+            break  // unreachable: disconnect requiresConfirmation and returned above
+        }
+        log("routed URL command \(command.name)")
+        return command
+    }
+
+    private static func log(_ message: String) {
+        FileHandle.standardError.write(Data("OpenDisplay URL: \(message)\n".utf8))
     }
 }
 

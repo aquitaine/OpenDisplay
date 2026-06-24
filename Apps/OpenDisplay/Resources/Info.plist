@@ -19,5 +19,21 @@
 	<!-- Menu-bar agent: no Dock icon (PRD UX-001). -->
 	<key>LSUIElement</key>
 	<true/>
+	<!-- opendisplay:// URL-scheme automation (Issue 4). Routes onto the same safety-checked,
+	     audited CommandGateway as the CLI and App Intents; only non-destructive recovery
+	     commands auto-run, arrangement-altering ones require in-app confirmation. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>opendisplay</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
