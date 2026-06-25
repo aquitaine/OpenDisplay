@@ -107,6 +107,38 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertFalse(SettingsStore(directory: directory).load().autoDisconnectBuiltInOnExternal)
     }
 
+    func testMediaKeyAndOSDDefaultsAndRoundTrip() throws {
+        // Batch-3 defaults: media keys off, OSD on, native style, bottom-center, broadcast off.
+        let defaults = OpenDisplaySettings.default
+        XCTAssertFalse(defaults.mediaKeyInterceptionEnabled)
+        XCTAssertEqual(defaults.mediaKeyTargetMode, .underCursor)
+        XCTAssertTrue(defaults.osdEnabled)
+        XCTAssertEqual(defaults.osdStyle, .native)
+        XCTAssertEqual(defaults.osdPosition, .bottomCenter)
+        XCTAssertFalse(defaults.publishOSDEventsEnabled)
+
+        let store = SettingsStore(directory: directory)
+        let settings = OpenDisplaySettings(
+            mediaKeyInterceptionEnabled: true,
+            mediaKeyTargetMode: .mainDisplay,
+            osdEnabled: false,
+            osdStyle: .minimal,
+            osdPosition: .topCenter,
+            publishOSDEventsEnabled: true
+        )
+        try store.save(settings)
+        XCTAssertEqual(store.load(), settings)
+
+        // A settings file from before these keys existed loads with all Batch-3 defaults.
+        try Data(#"{"persistencePolicy":"reconnectOnQuit"}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        let loaded = SettingsStore(directory: directory).load()
+        XCTAssertFalse(loaded.mediaKeyInterceptionEnabled)
+        XCTAssertEqual(loaded.mediaKeyTargetMode, .underCursor)
+        XCTAssertTrue(loaded.osdEnabled)
+        XCTAssertEqual(loaded.osdStyle, .native)
+    }
+
     func testSettingsFileIsIndependentlyReadable() throws {
         let store = SettingsStore(directory: directory)
         try store.save(OpenDisplaySettings(persistencePolicy: .reconnectOnWake))
