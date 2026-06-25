@@ -223,6 +223,13 @@ final class AppModel: ObservableObject {
     /// the launch topology so a pre-attached external isn't treated as a fresh arrival.
     private var autoDisconnectPolicy = AutoDisconnectBuiltInPolicy()
 
+    /// Native-looking OSD HUD for brightness/volume changes (Batch-3 #4).
+    private let osdHUD = OSDHUDController()
+    /// Active media-key event tap (Batch-3 #3) when interception is on AND Accessibility is granted.
+    private var mediaKeyTap: MediaKeyTap?
+    /// Remembered pre-mute DDC volume per display, so a mute toggle can restore the prior level.
+    private var preMuteVolume: [DisplayRecordID: Float] = [:]
+
     init() {
         let observer = CoreGraphicsProvider()
         self.observer = observer
@@ -250,6 +257,7 @@ final class AppModel: ObservableObject {
         // (recovery hierarchy step 3) and reachable even when the menu bar isn't; the rest are unbound
         // by default. A chord that can't be claimed is simply skipped (menu-bar item remains).
         registerHotkeys()
+        reconcileMediaKeyTap()  // Batch-3 #3: arm the media-key tap if enabled + Accessibility granted
         if settings.displayNotificationsEnabled { NotificationDelivery.requestAuthorization() }  // Batch-2 #5
         #if DEBUG
         FileHandle.standardError.write(Data("Global hotkeys registered: \(hotKeys.count)\n".utf8))
@@ -290,7 +298,10 @@ final class AppModel: ObservableObject {
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             CoreGraphicsProvider.restoreGamma()
-            MainActor.assumeIsolated { self?.sleepGuard.releaseAll() }
+            MainActor.assumeIsolated {
+                self?.sleepGuard.releaseAll()
+                self?.mediaKeyTap?.stop()
+            }
         }
     }
 
@@ -748,6 +759,7 @@ final class AppModel: ObservableObject {
             softwareDim[id] = gamma
             observer.setGammaDim(gamma, for: cgID)
         }
+        presentOSD(kind: .brightness, value: value, for: observation)  // Batch-3 #4
     }
 
     #if !PUBLIC_API_ONLY
@@ -833,6 +845,7 @@ final class AppModel: ObservableObject {
         if ddcControlWriter[key] == nil {
             ddcControlWriter[key] = Task { [weak self] in await self?.drainHardwareWrites(key, control, observation) }
         }
+        if control == .volume { presentOSD(kind: .volume, value: value, for: observation) }  // Batch-3 #4
         #endif
     }
 
@@ -1470,6 +1483,136 @@ final class AppModel: ObservableObject {
         guard let main = displays.first(where: { $0.isMain }) else { return }
         let current = brightness[main.recordID] ?? 0.5
         setBrightness(max(0, min(1, current + delta)), for: main)
+    }
+
+    // MARK: - OSD HUD + media keys (Batch-3)
+
+    /// Show the OSD HUD for a brightness/volume change and (when enabled) broadcast it for external/
+    /// notch HUDs (Batch-3 #4/#6). The single funnel that `setBrightness` / `setHardwareControl(.volume)`
+    /// call, so the HUD fires for every in-app source (menu slider, media keys).
+    func presentOSD(kind: OSDContent.Kind, value: Float, for observation: DisplayObservation,
+                    source: String = "app") {
+        let content = OSDContent(kind: kind, value: value)
+        if settings.osdEnabled && settings.osdStyle != .external {
+            osdHUD.present(content, cgDisplayID: observation.cgDisplayID,
+                           style: settings.osdStyle, position: settings.osdPosition)
+        }
+        if settings.publishOSDEventsEnabled {
+            OSDBroadcaster.publish(kind: kind, value: Double(value),
+                                   displayID: observation.recordID.rawValue,
+                                   displayName: displayName(for: observation), source: source)
+        }
+    }
+
+    /// Handle a captured media key (Batch-3 #1/#3). Resolves the target display via the pure
+    /// `MediaKeyTargetPolicy`, applies the change through the existing brightness/volume sinks (which
+    /// raise the OSD), and returns whether it acted — so the tap can swallow handled keys and let
+    /// others (e.g. volume on the built-in) pass through to macOS.
+    @discardableResult
+    func handleMediaKey(_ action: MediaKeyAction, fineStep: Bool) -> Bool {
+        guard let target = MediaKeyTargetPolicy.target(
+            for: action, in: displays, cursor: cursorInCGCoordinates(),
+            mode: settings.mediaKeyTargetMode, volumeCapable: volumeCapableDisplayIDs())
+        else { return false }
+        let id = target.recordID
+
+        switch action {
+        case .brightnessUp, .brightnessDown:
+            let current = brightness[id] ?? 0.5
+            setBrightness(min(1, max(0, current + action.signedDelta(fineStep: fineStep))), for: target)
+        case .volumeUp, .volumeDown:
+            let current = ddcControl(.volume, for: target) ?? 0.5
+            setHardwareControl(.volume, min(1, max(0, current + action.signedDelta(fineStep: fineStep))),
+                               for: target)
+        case .muteToggle:
+            // A volume of 0 already renders the speaker-slash glyph; toggle to 0 or back to the prior level.
+            let current = ddcControl(.volume, for: target) ?? 0
+            if current > 0 {
+                preMuteVolume[id] = current
+                setHardwareControl(.volume, 0, for: target)
+            } else {
+                setHardwareControl(.volume, preMuteVolume[id] ?? 0.5, for: target)
+            }
+        }
+        return true
+    }
+
+    /// External displays that can take DDC audio (VCP 0x62) — the only valid volume-key targets. The
+    /// built-in is never included, so its volume keys pass through to system volume. Fail-open: an
+    /// external whose capabilities haven't been read yet is treated as capable (`ddcSupports`).
+    private func volumeCapableDisplayIDs() -> Set<DisplayRecordID> {
+        Set(displays
+            .filter { $0.displayClass != .builtIn && ddcSupports(HardwareControl.volume.vcp, for: $0) }
+            .map(\.recordID))
+    }
+
+    /// The pointer location in Core Graphics (top-left origin) coordinates, to match `observation.origin`
+    /// (which comes from `CGDisplayBounds`). `NSEvent.mouseLocation` is bottom-left, so flip about the
+    /// primary display's height.
+    private func cursorInCGCoordinates() -> DisplayOrigin? {
+        let mouse = NSEvent.mouseLocation
+        guard let primaryHeight = (NSScreen.screens.first { $0.frame.origin == .zero }
+            ?? NSScreen.main)?.frame.height else { return nil }
+        return DisplayOrigin(x: Int(mouse.x.rounded()), y: Int((primaryHeight - mouse.y).rounded()))
+    }
+
+    /// Create/tear down the media-key tap to match the setting (Batch-3 #3). Idempotent.
+    private func reconcileMediaKeyTap() {
+        if settings.mediaKeyInterceptionEnabled {
+            guard mediaKeyTap == nil else { return }
+            let tap = MediaKeyTap { [weak self] action, fineStep in
+                self?.handleMediaKey(action, fineStep: fineStep) ?? false
+            }
+            _ = tap.start()
+            mediaKeyTap = tap
+        } else {
+            mediaKeyTap?.stop()
+            mediaKeyTap = nil
+        }
+    }
+
+    /// Whether the media-key tap is currently capturing keys (true only with the toggle on AND the
+    /// Accessibility grant present). Drives the Settings status row.
+    var mediaKeysActive: Bool { mediaKeyTap != nil && MediaKeyTap.isAccessibilityTrusted }
+
+    /// Toggle media-key interception (Batch-3 #3). Persists; prompts for Accessibility when enabling
+    /// without the grant; reconciles the tap.
+    func setMediaKeyInterceptionEnabled(_ enabled: Bool) {
+        guard settings.mediaKeyInterceptionEnabled != enabled else { return }
+        settings.mediaKeyInterceptionEnabled = enabled
+        persistSettings()
+        if enabled && !MediaKeyTap.isAccessibilityTrusted { MediaKeyTap.promptForAccessibility() }
+        reconcileMediaKeyTap()
+    }
+
+    func setMediaKeyTargetMode(_ mode: MediaKeyTargetMode) {
+        guard settings.mediaKeyTargetMode != mode else { return }
+        settings.mediaKeyTargetMode = mode
+        persistSettings()
+    }
+
+    func setOSDEnabled(_ enabled: Bool) {
+        guard settings.osdEnabled != enabled else { return }
+        settings.osdEnabled = enabled
+        persistSettings()
+    }
+
+    func setOSDStyle(_ style: OSDStyle) {
+        guard settings.osdStyle != style else { return }
+        settings.osdStyle = style
+        persistSettings()
+    }
+
+    func setOSDPosition(_ position: OSDPosition) {
+        guard settings.osdPosition != position else { return }
+        settings.osdPosition = position
+        persistSettings()
+    }
+
+    func setPublishOSDEventsEnabled(_ enabled: Bool) {
+        guard settings.publishOSDEventsEnabled != enabled else { return }
+        settings.publishOSDEventsEnabled = enabled
+        persistSettings()
     }
 
     #if DEBUG
