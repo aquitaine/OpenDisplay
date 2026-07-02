@@ -41,6 +41,11 @@ struct DisplayDetailView: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .task(id: display.recordID) {
+            // Opening the detail pane is a deliberate act — if this display currently has NO working
+            // hardware control, retry even negatively-cached DDC features so a monitor that just
+            // recovered (power-cycle, input switch) shows its controls now. Healthy displays keep
+            // their probe cache, so reopening the pane stays fast.
+            model.retryDDCDiscoveryIfDead(for: display)
             await model.refreshBrightness(for: display)
             await model.refreshColorProfile(for: display)
             if display.displayClass != .builtIn {
@@ -225,13 +230,23 @@ private struct AppearanceCard: View {
             if display.displayClass != .builtIn {
                 ODDivider()
                 ODRow("Colour mode") {
-                    Menu(model.colorPreset[display.recordID].map { model.presetName($0) } ?? "—") {
-                        let maxCode = max(model.colorPresetMax[display.recordID] ?? 5, 1)
-                        ForEach(1...maxCode, id: \.self) { code in
-                            Button(model.presetName(code)) { model.setColorPreset(code, for: display) }
+                    // Offer only the preset codes the panel advertises (VCP 0x14 is a non-continuous
+                    // enum); a contiguous 1...max guess offers codes the monitor silently ignores.
+                    // NOTE: capabilities are only populated by an explicit read (the 0xF3 read can
+                    // wedge panels, so the app never runs it automatically) — until then this takes
+                    // the 1...max fallback path.
+                    let codes = model.colorPresetCodes(for: display)
+                    if codes.isEmpty {
+                        Text(model.colorPreset[display.recordID].map { model.presetName($0) } ?? "—")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    } else {
+                        Menu(model.colorPreset[display.recordID].map { model.presetName($0) } ?? "—") {
+                            ForEach(codes, id: \.self) { code in
+                                Button(model.presetName(code)) { model.setColorPreset(code, for: display) }
+                            }
                         }
+                        .menuStyle(.borderlessButton).fixedSize()
                     }
-                    .menuStyle(.borderlessButton).fixedSize()
                 }
             }
             ODDivider()
@@ -268,6 +283,13 @@ private struct ControlsCard: View {
             let controls = HardwareControl.allCases.filter { model.ddcControl($0, for: display) != nil }
             if controls.isEmpty {
                 ODRow("No adjustable hardware controls reported") {}
+                // A panel that answers nothing usually isn't DDC-less — its scaler's DDC channel is
+                // often just stuck (a state that survives display sleep; only its own power button
+                // clears it). Say so, or "unsupported" reads as a dead feature the user can't act on.
+                Text("If this monitor supported hardware control before, its DDC channel may be stuck — try turning the monitor off and on with its own power button, then reopen this pane.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 10).padding(.bottom, 6)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 ForEach(Array(controls.enumerated()), id: \.element) { index, control in
                     if index > 0 { ODDivider() }

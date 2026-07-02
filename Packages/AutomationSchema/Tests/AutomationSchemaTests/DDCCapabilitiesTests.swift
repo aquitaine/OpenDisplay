@@ -80,4 +80,24 @@ final class DDCCapabilitiesTests: XCTestCase {
         let back = try JSONDecoder().decode(DDCCapabilities.self, from: data)
         XCTAssertEqual(back, caps)
     }
+
+    // Regression: VCP 0x14 (Select Color Preset) is a non-continuous enum. The colour-mode menu must
+    // offer the panel's *advertised* preset codes, not a contiguous 1...max range — otherwise the user
+    // picks codes the monitor never listed and the write is a silent no-op ("shows, but does nothing").
+    func testOfferedValuesUsesAdvertisedDiscreteValuesForColorPreset() {
+        let caps = DDCCapabilities.parse("vcp(10 12 14(05 08 0B) 60(01 03 11) D6(01 04 05))")!
+        // The bug offered [1,2,3,4,5]; the fix offers exactly the advertised set.
+        XCTAssertEqual(DDCCapabilities.offeredValues(caps, for: 0x14, fallbackMax: 5), [5, 8, 11])
+        XCTAssertEqual(DDCCapabilities.offeredValues(caps, for: 0x60, fallbackMax: 99), [1, 3, 17])
+    }
+
+    func testOfferedValuesFallsBackToRangeWhenCapabilitiesUnavailable() {
+        // No capabilities read yet → fall back to the 1...max guess (best-effort).
+        XCTAssertEqual(DDCCapabilities.offeredValues(nil, for: 0x14, fallbackMax: 5), [1, 2, 3, 4, 5])
+        // Capabilities present but this code wasn't enumerated (continuous, or no discrete list) → fallback.
+        let caps = DDCCapabilities.parse("vcp(10 14)")!
+        XCTAssertEqual(DDCCapabilities.offeredValues(caps, for: 0x14, fallbackMax: 3), [1, 2, 3])
+        // Degenerate fallback max → empty, never a crash.
+        XCTAssertEqual(DDCCapabilities.offeredValues(nil, for: 0x14, fallbackMax: 0), [])
+    }
 }

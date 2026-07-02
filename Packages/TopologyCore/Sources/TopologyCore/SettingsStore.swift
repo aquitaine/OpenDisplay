@@ -25,6 +25,22 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     public var hotkeyShortcuts: KeyboardShortcutRegistry
     /// When on, post a user notification on display connect/disconnect and related events (Batch-2 #5).
     public var displayNotificationsEnabled: Bool
+    /// When on, intercept the hardware brightness/volume media keys and route them to the target
+    /// display (Batch-3 #3). Requires the Accessibility permission; default off so a user who never
+    /// enables it is never prompted.
+    public var mediaKeyInterceptionEnabled: Bool
+    /// Which display the media keys act on (Batch-3 #1/#3).
+    public var mediaKeyTargetMode: MediaKeyTargetMode
+    /// When on, show the on-screen-display HUD for brightness/volume changes (Batch-3 #4). Independent
+    /// of media keys — the HUD also fires for menu/CLI/Intent-driven changes.
+    public var osdEnabled: Bool
+    /// The OSD HUD's visual style (Batch-3 #5).
+    public var osdStyle: OSDStyle
+    /// Where the OSD HUD appears on the target display (Batch-3 #5).
+    public var osdPosition: OSDPosition
+    /// When on, broadcast each OSD event over `DistributedNotificationCenter` for external/notch HUD
+    /// apps (Batch-3 #6). Default off.
+    public var publishOSDEventsEnabled: Bool
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
@@ -34,7 +50,13 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         autoDisconnectBuiltInOnExternal: Bool = false,
         arrangementAutoRevertSeconds: Int = 10,
         hotkeyShortcuts: KeyboardShortcutRegistry = .defaults,
-        displayNotificationsEnabled: Bool = false
+        displayNotificationsEnabled: Bool = false,
+        mediaKeyInterceptionEnabled: Bool = false,
+        mediaKeyTargetMode: MediaKeyTargetMode = .underCursor,
+        osdEnabled: Bool = true,
+        osdStyle: OSDStyle = .native,
+        osdPosition: OSDPosition = .bottomCenter,
+        publishOSDEventsEnabled: Bool = false
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
@@ -44,6 +66,12 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.arrangementAutoRevertSeconds = arrangementAutoRevertSeconds
         self.hotkeyShortcuts = hotkeyShortcuts
         self.displayNotificationsEnabled = displayNotificationsEnabled
+        self.mediaKeyInterceptionEnabled = mediaKeyInterceptionEnabled
+        self.mediaKeyTargetMode = mediaKeyTargetMode
+        self.osdEnabled = osdEnabled
+        self.osdStyle = osdStyle
+        self.osdPosition = osdPosition
+        self.publishOSDEventsEnabled = publishOSDEventsEnabled
     }
 
     public static let `default` = OpenDisplaySettings()
@@ -55,6 +83,12 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case arrangementAutoRevertSeconds
         case hotkeyShortcuts
         case displayNotificationsEnabled
+        case mediaKeyInterceptionEnabled
+        case mediaKeyTargetMode
+        case osdEnabled
+        case osdStyle
+        case osdPosition
+        case publishOSDEventsEnabled
     }
 
     /// Tolerant decoder: every missing key falls back to its default and unknown keys are ignored,
@@ -83,6 +117,21 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         displayNotificationsEnabled = try container
             .decodeIfPresent(Bool.self, forKey: .displayNotificationsEnabled)
             ?? defaults.displayNotificationsEnabled
+        mediaKeyInterceptionEnabled = try container
+            .decodeIfPresent(Bool.self, forKey: .mediaKeyInterceptionEnabled)
+            ?? defaults.mediaKeyInterceptionEnabled
+        mediaKeyTargetMode = try container
+            .decodeIfPresent(MediaKeyTargetMode.self, forKey: .mediaKeyTargetMode)
+            ?? defaults.mediaKeyTargetMode
+        osdEnabled = try container.decodeIfPresent(Bool.self, forKey: .osdEnabled)
+            ?? defaults.osdEnabled
+        osdStyle = try container.decodeIfPresent(OSDStyle.self, forKey: .osdStyle)
+            ?? defaults.osdStyle
+        osdPosition = try container.decodeIfPresent(OSDPosition.self, forKey: .osdPosition)
+            ?? defaults.osdPosition
+        publishOSDEventsEnabled = try container
+            .decodeIfPresent(Bool.self, forKey: .publishOSDEventsEnabled)
+            ?? defaults.publishOSDEventsEnabled
     }
 }
 
