@@ -1,6 +1,11 @@
 # OpenDisplay
 
-Open-source display management for macOS.
+**Free, open-source display management for macOS.** Control your external monitor's
+**brightness, contrast, volume, colour and input source** over **DDC/CI** — from the menu
+bar, from your keyboard's **brightness keys** (with a native-style on-screen HUD), from
+the `opendisplay` CLI, or from Apple Shortcuts. If you're looking for a free, open
+alternative to commercial display managers like **BetterDisplay** or **Lunar**, or a
+broader take on **MonitorControl**, this is that project.
 
 OpenDisplay gives predictable, **safe** control over multiple displays: a stable
 registry and topology model, scenes (desired-state snapshots), brightness/audio/input
@@ -29,7 +34,17 @@ the disconnected screen was the one showing the app.
 - **Unified brightness** for every display from one slider — built-in panels via the
   system API, external monitors over **DDC/CI**, and a universal **software (gamma)**
   fallback for displays that answer neither (including below the hardware minimum).
-- **Hardware controls** over DDC/CI: contrast, volume, input source, and colour preset.
+- **Keyboard media keys** (opt-in): your Mac's hardware brightness keys change the
+  external monitor's *real backlight* over DDC — macOS-style steps (⇧⌥ for fine
+  control), a native-looking on-screen HUD, and a configurable target (display under
+  cursor / main display / built-in). Volume keys drive DDC audio on monitors with speakers.
+- **Hardware controls** over DDC/CI: contrast, volume, input source, colour preset,
+  **sharpness, and RGB gain** — sliders appear automatically when the monitor answers for
+  them, and any other MCCS feature is reachable through the CLI's raw `vcp` command.
+- **Works with your monitor:** displays are matched to their DDC channel by **EDID
+  identity** (vendor / model / serial), not port order — correct on docks, mixed
+  HDMI/DisplayPort setups, and identical twin monitors — with checksum-validated,
+  desync-tolerant reads that recover replies from quirky panels.
 - **Per-display colour profiles** (ICC) via public ColorSync — applied with validation and
   reversible to the factory profile, targeted by each display's persistent UUID.
 - **Resolution, refresh rate, and HiDPI (Retina)** switching, plus **mirroring** and a
@@ -47,6 +62,28 @@ the disconnected screen was the one showing the app.
 Built for **Apple Silicon**: the slow I/O (DDC/CI, private SPI, ColorSync iteration) runs
 off the main thread, so the menu stays responsive while monitors are being driven.
 
+## Coming from BetterDisplay, Lunar, or MonitorControl?
+
+Fair comparison, honestly stated. **BetterDisplay** and **Lunar** are excellent, mature
+commercial apps with features OpenDisplay doesn't have yet (virtual/dummy displays, EDID
+overrides, XDR brightness upscaling, adaptive sync tuning). **MonitorControl** is a great
+free tool focused on brightness/volume keys. What OpenDisplay brings to that landscape:
+
+- **Free and fully open source (GPL)** — every line of the DDC engine, the safety
+  transaction model, and the private-API usage is inspectable.
+- **External monitor hardware control**: brightness, contrast, volume, input switching,
+  colour presets, sharpness, RGB gain — plus raw access to *any* VCP code from the CLI.
+- **Media keys + native-style OSD**, like your monitor was built in.
+- **A safety model the others don't attempt**: every risky operation goes through an
+  audited transaction with checkpoints, verification, automatic rollback, an
+  always-one-display-active guarantee, and a **standalone rescue app** that can recover
+  your desktop even if the main app can't run.
+- **Automation as a first-class citizen**: CLI, Shortcuts/Siri intents, and a URL scheme
+  all drive the same audited command path as the UI.
+
+If OpenDisplay is missing something you rely on, [open an issue](https://github.com/aquitaine/OpenDisplay/issues)
+— the roadmap is public and shaped by real setups.
+
 ## Install
 
 **Requirements:** an Apple Silicon Mac running macOS 14 (Sonoma) or later. (Developed and
@@ -59,7 +96,15 @@ verified on macOS 26 / Apple Silicon.) OpenDisplay runs as a menu-bar item — n
 3. Open it. The build is **signed with a Developer ID and notarized by Apple**, so it
    launches with no Gatekeeper warning.
 
-Then click the display glyph in the menu bar.
+Then click the display glyph in the menu bar. Two optional one-time steps:
+
+- **Media keys** — to have the keyboard brightness keys drive your external monitor, turn
+  on *"Use the brightness & volume keys to control displays"* in the app's Settings
+  (**Media keys** section). macOS will ask once for the **Accessibility** permission
+  (needed to capture the keys); the feature arms itself the moment you grant it — no
+  relaunch needed.
+- **Start at login** — add OpenDisplay in *System Settings → General → Login Items* if you
+  want it always available.
 
 ### Option 2 — build from source
 
@@ -102,7 +147,7 @@ toolchain is installed (macOS Xcode 16+ or Linux).
 
 ```sh
 make bootstrap   # ensure a Swift 6 toolchain (installs it on Ubuntu; checks Xcode on macOS)
-make test        # swift build && swift test --parallel   (78 unit/state-machine tests)
+make test        # swift build && swift test --parallel   (240 unit/state-machine tests)
 make lint        # SwiftLint, if installed
 ```
 

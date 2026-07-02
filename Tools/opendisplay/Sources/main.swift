@@ -428,14 +428,15 @@ func runDDC() async {
     let featureNames: [String: ExternalDisplayDDC.Feature] = [
         "brightness": .brightness, "contrast": .contrast, "volume": .volume, "input": .inputSource,
         "colour": .colorPreset, "color": .colorPreset, "preset": .colorPreset,
+        "sharpness": .sharpness, "red": .redGain, "green": .greenGain, "blue": .blueGain,
+        "mute": .audioMute,
     ]
-    guard let sel = selectorArg, let featureArg = valueArg else {
-        fail("usage: opendisplay ddc <selector> <brightness|contrast|volume|input|colour|power|caps> [value]")
-    }
+    let usage = "usage: opendisplay ddc <selector> <brightness|contrast|volume|input|colour|sharpness|red|green|blue|mute|power|caps|vcp <0xNN>> [value]"
+    guard let sel = selectorArg, let featureArg = valueArg else { fail(usage) }
     let featureKey = featureArg.lowercased()
     let isCaps = featureKey == "caps" || featureKey == "capabilities"
-    guard isCaps || featureKey == "power" || featureNames[featureKey] != nil else {
-        fail("unknown feature '\(featureArg)' (brightness|contrast|volume|input|colour|power|caps)")
+    guard isCaps || featureKey == "power" || featureKey == "vcp" || featureNames[featureKey] != nil else {
+        fail("unknown feature '\(featureArg)' — \(usage)")
     }
     let pairs = await resolveCurrentDisplays()
     let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
@@ -456,6 +457,31 @@ func runDDC() async {
         return
     }
     let setValue = positional.count > 3 ? positional[3] : nil
+    // Raw VCP escape hatch: monitors implement far more of MCCS than we name (KVM switches, OSD
+    // language, colour temperature, power LEDs…). `ddc <sel> vcp 0x87 [value]` reads/writes ANY
+    // code — 0x-prefixed hex or plain decimal — so a new panel's controls are reachable without a
+    // rebuild. Same best-effort semantics as the named features.
+    if featureKey == "vcp" {
+        guard let codeArg = setValue else { fail("usage: opendisplay ddc <selector> vcp <0xNN|decimal> [value]") }
+        let lower = codeArg.lowercased()
+        let code: UInt8? = lower.hasPrefix("0x") ? UInt8(lower.dropFirst(2), radix: 16) : UInt8(lower)
+        guard let code else { fail("bad VCP code '\(codeArg)' (0x00–0xFF, e.g. 0x87)") }
+        let label = String(format: "vcp 0x%02X", code)
+        if positional.count > 4 {
+            // DDC values are 16-bit on the wire; an unchecked Int would be silently truncated and
+            // the success message would then lie about what was written.
+            guard let value = Int(positional[4]), (0...0xFFFF).contains(value) else {
+                fail("value must be an integer 0-65535")
+            }
+            let ok = await ddc.write(vcp: code, value)
+            print(ok ? "\(label) = \(value)" : "DDC write failed")
+        } else if let reading = await ddc.read(vcp: code) {
+            print("\(label): \(reading.current)/\(reading.max)")
+        } else {
+            print("\(label): unsupported")
+        }
+        return
+    }
     // Power is a one-shot DPM command whose value is a word (on|standby|off), not a numeric level.
     // Best-effort: a NAK/ignore just reports a failed write, never crashes.
     if featureKey == "power" {
@@ -470,10 +496,22 @@ func runDDC() async {
         return
     }
     guard let feature = featureNames[featureKey] else {
-        fail("unknown feature '\(featureArg)' (brightness|contrast|volume|input|colour|power)")
+        fail("unknown feature '\(featureArg)' — \(usage)")
     }
-    if let raw = setValue {
-        guard let value = Int(raw) else { fail("value must be an integer") }
+    if var raw = setValue {
+        // VCP 0x8D (mute) is discrete — 1 = mute, 2 = unmute — which nobody guesses from numbers;
+        // accept the words. (`power` gets the same treatment via DDCPowerMode above.)
+        if feature == .audioMute {
+            switch raw.lowercased() {
+            case "on", "mute", "muted": raw = "1"
+            case "off", "unmute", "unmuted": raw = "2"
+            default: break
+            }
+        }
+        guard let value = Int(raw), (0...0xFFFF).contains(value) else {
+            fail(feature == .audioMute ? "mute value must be on|off (or 1=mute, 2=unmute)"
+                                       : "value must be an integer 0-65535")
+        }
         let ok = await ddc.write(feature, value)
         print(ok ? "\(featureArg) = \(value)" : "DDC write failed")
     } else if let reading = await ddc.read(feature) {
@@ -631,7 +669,8 @@ case "help", "--help", "-h":
       opendisplay recover [--json]
       opendisplay scene <list|save|show|plan|apply|delete> [name] [--json]
       opendisplay brightness <selector> [0..1]
-      opendisplay ddc <selector> <brightness|contrast|volume|input|power|caps> [value]
+      opendisplay ddc <selector> <brightness|contrast|volume|input|colour|sharpness|red|green|blue|mute|power|caps> [value]
+      opendisplay ddc <selector> vcp <0xNN> [value]   # any raw MCCS feature code
       opendisplay edid <selector> [--out <path.bin>]
       opendisplay favorite <list|set|unset> <selector> [WxH[@Hz][@2x]]
 

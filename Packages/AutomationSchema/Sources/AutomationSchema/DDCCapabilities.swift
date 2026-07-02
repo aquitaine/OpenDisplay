@@ -30,6 +30,17 @@ public struct DDCCapabilities: Hashable, Sendable, Codable {
     /// continuous control like brightness, or simply absent).
     public func values(for code: UInt8) -> [Int]? { discreteValues[code] }
 
+    /// The values a picker should offer for a feature. For a **non-continuous** code (e.g. `0x14`
+    /// Select Color Preset, `0x60` Input Source) the only values the panel honors are the discrete ones
+    /// it advertised — offering a contiguous `1...max` range instead makes most selections silent no-ops,
+    /// because the monitor ignores codes it never listed. So: prefer the advertised discrete values; fall
+    /// back to `1...fallbackMax` only when capabilities are unavailable (`caps == nil`) or the panel
+    /// didn't enumerate this code. `caps` is optional so callers can pass a possibly-unread cache.
+    public static func offeredValues(_ caps: DDCCapabilities?, for code: UInt8, fallbackMax: Int) -> [Int] {
+        if let values = caps?.values(for: code), !values.isEmpty { return values }
+        return fallbackMax >= 1 ? Array(1...fallbackMax) : []
+    }
+
     /// Parses an MCCS capabilities string. Returns nil when there's no balanced `vcp(...)` block to read
     /// (or it lists no codes) — callers then fall back to offering everything. Within the block it's
     /// best-effort and tolerant: a token it can't make sense of is skipped, never fatal.
