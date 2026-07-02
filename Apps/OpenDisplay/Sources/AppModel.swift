@@ -1,5 +1,6 @@
 #if os(macOS)
 import AppKit
+import AutomationSchema
 import CoreGraphicsProvider
 import DisplayDomain
 import Foundation
@@ -13,24 +14,36 @@ import ExperimentalLifecycleProvider
 /// A hardware (DDC) control the menu can offer for an external display. Public-safe (no private-SPI
 /// types), so the menu can reference it in every build; AppModel maps it to a DDC VCP code.
 enum HardwareControl: CaseIterable, Hashable {
-    case contrast, volume
+    case contrast, volume, sharpness, redGain, greenGain, blueGain
 
     var vcp: UInt8 {
         switch self {
         case .contrast: return 0x12
         case .volume: return 0x62
+        case .sharpness: return 0x87
+        case .redGain: return 0x16
+        case .greenGain: return 0x18
+        case .blueGain: return 0x1A
         }
     }
     var label: String {
         switch self {
         case .contrast: return "Contrast"
         case .volume: return "Volume"
+        case .sharpness: return "Sharpness"
+        case .redGain: return "Red gain"
+        case .greenGain: return "Green gain"
+        case .blueGain: return "Blue gain"
         }
     }
     var icon: String {
         switch self {
         case .contrast: return "circle.lefthalf.filled"
         case .volume: return "speaker.wave.2"
+        case .sharpness: return "triangle.lefthalf.filled"
+        case .redGain: return "r.circle"
+        case .greenGain: return "g.circle"
+        case .blueGain: return "b.circle"
         }
     }
 }
@@ -104,6 +117,9 @@ final class AppModel: ObservableObject {
     }
     /// Cached DDC hardware-control levels (0...1) keyed by display then VCP code (contrast/volume).
     @Published private(set) var ddcControlLevel: [DisplayRecordID: [UInt8: Float]] = [:]
+    /// Cached DDC capabilities (VCP 0xF3) per external display (Batch-2 #1): what the panel advertises,
+    /// so the UI/CLI only offer supported controls. Absent = not yet read → fall back to offering all.
+    @Published private(set) var ddcCapabilities: [DisplayRecordID: DDCCapabilities] = [:]
     /// Per-display software (gamma) dim level, 1 = no dim. Applies on top of hardware brightness and
     /// works on any display, including DDC-less externals and below the hardware minimum.
     @Published private(set) var softwareDim: [DisplayRecordID: Float] = [:]
@@ -187,11 +203,54 @@ final class AppModel: ObservableObject {
     private var inputSourceWriter: [DisplayRecordID: Task<Void, Never>] = [:]
     private var colorPresetTarget: [DisplayRecordID: Int] = [:]
     private var colorPresetWriter: [DisplayRecordID: Task<Void, Never>] = [:]
+    /// Per-display negative cache of VCP features that repeatedly failed to read, so refresh passes
+    /// stop spending ~0.7s of retried I2C on every control the panel doesn't implement (with a
+    /// periodic recheck baked into the tracker — see `DDCProbeTracker`). Dropped on disconnect.
+    private var ddcProbe: [DisplayRecordID: DDCProbeTracker] = [:]
     #endif
-    private var hotKey: GlobalHotKey?
+    private var hotKeys: [GlobalHotKey] = []
     private var registry: DisplayRegistry?
     private var sceneLibrary: SceneLibrary?
-    let settings: OpenDisplaySettings
+    /// Persisted user settings. Mutated only through the dedicated setters (which also persist and
+    /// reconcile side effects), so the on-disk store and any derived state stay in lockstep.
+    @Published private(set) var settings: OpenDisplaySettings
+    /// On-disk settings store (Application Support); nil only if that directory can't be resolved.
+    private let settingsStore: SettingsStore?
+    /// Holds the "prevent display idle-sleep" power assertion while the toggle is on and an external
+    /// display is present (Issue 3). Decision logic is the platform-independent `DisplaySleepGuard`.
+    private let sleepGuard: DisplaySleepGuard
+
+    /// Pinned favourite resolutions per display (Batch-2 #3), persisted to favorites.json.
+    @Published private(set) var favorites = FavoriteResolutions()
+    private let favoritesStore: FavoritesStore?
+
+    /// Live "Keep these settings?" prompt for an arrangement-altering change (Issue 6), or nil when no
+    /// revert window is open. Drives the countdown banner; the UI calls `confirmArrangementChange()` /
+    /// `revertArrangementChange()`.
+    @Published private(set) var pendingRevert: PendingRevert?
+    /// UI state for the timed auto-revert banner.
+    struct PendingRevert: Equatable { var message: String; var secondsRemaining: Int }
+    /// Decision core for the open revert window; `before` is the arrangement to restore on timeout.
+    private var revertGate: TimedRevertGate<[DisplayObservation]>?
+    private var revertMessage = ""
+    private var revertTask: Task<Void, Never>?
+
+    /// Edge detector for "auto-disconnect the built-in when an external connects" (Issue 5). Seeded to
+    /// the launch topology so a pre-attached external isn't treated as a fresh arrival.
+    private var autoDisconnectPolicy = AutoDisconnectBuiltInPolicy()
+
+    /// Native-looking OSD HUD for brightness/volume changes (Batch-3 #4).
+    private let osdHUD = OSDHUDController()
+    /// Active media-key event tap (Batch-3 #3) when interception is on AND Accessibility is granted.
+    private var mediaKeyTap: MediaKeyTap?
+    /// Re-arms the media-key tap once the Accessibility grant lands. TCC has no notification API, so
+    /// without this poll the user must relaunch the app after granting — the #1 "keys don't work" trap.
+    private var mediaKeyTapRetry: Task<Void, Never>?
+    /// One system Accessibility prompt per launch, max — reconcile runs on every toggle change and at
+    /// init, and re-prompting each time would nag.
+    private var promptedForAccessibility = false
+    /// Remembered pre-mute DDC volume per display, so a mute toggle can restore the prior level.
+    private var preMuteVolume: [DisplayRecordID: Float] = [:]
 
     init() {
         let observer = CoreGraphicsProvider()
@@ -209,23 +268,21 @@ final class AppModel: ObservableObject {
             // `.blocked` cases — chiefly "this would leave no active display" — are NOT bypassable here.
             confirm: { _, _ in true }
         )
-        self.settings = AppModel.loadSettings()
-        // Always-available global Reconnect-All (recovery hierarchy step 3): reachable even when the
-        // menu bar isn't. Skipped if disabled in settings; falls back to the menu-bar item if the
-        // chord can't be registered.
-        if settings.reconnectAllHotkeyEnabled {
-            self.hotKey = GlobalHotKey.reconnectAll { [weak self] in
-                #if DEBUG
-                AppModel.debugMarkHotKeyFired()
-                #endif
-                Task { await self?.reconnectAll() }
-            }
-        }
+        let settingsStore = (try? SettingsStore.defaultDirectory()).map(SettingsStore.init(directory:))
+        self.settingsStore = settingsStore
+        self.settings = settingsStore?.load() ?? .default
+        self.sleepGuard = DisplaySleepGuard(backend: IOKitPowerAssertions())
+        let favoritesStore = (try? SettingsStore.defaultDirectory()).map(FavoritesStore.init(directory:))
+        self.favoritesStore = favoritesStore
+        self.favorites = favoritesStore?.load() ?? FavoriteResolutions()
+        // Register the configurable global hotkeys (Batch-2 #4). Reconnect-All is always-available
+        // (recovery hierarchy step 3) and reachable even when the menu bar isn't; the rest are unbound
+        // by default. A chord that can't be claimed is simply skipped (menu-bar item remains).
+        registerHotkeys()
+        reconcileMediaKeyTap()  // Batch-3 #3: arm the media-key tap if enabled + Accessibility granted
+        if settings.displayNotificationsEnabled { NotificationDelivery.requestAuthorization() }  // Batch-2 #5
         #if DEBUG
-        let hotkeyState = settings.reconnectAllHotkeyEnabled
-            ? (hotKey != nil ? "registered" : "FAILED")
-            : "disabled in settings"
-        FileHandle.standardError.write(Data("Global Reconnect-All hotkey (Ctrl-Opt-Cmd-R) \(hotkeyState)\n".utf8))
+        FileHandle.standardError.write(Data("Global hotkeys registered: \(hotKeys.count)\n".utf8))
         #endif
         Task {
             await setUpRegistry()
@@ -233,6 +290,8 @@ final class AppModel: ObservableObject {
             await loadManagedOffline()
             await refresh()
             await enforceActiveSurfaceInvariant()  // recover if we launched into a stranded (0-active) state
+            reconcileDisplaySleepGuard()  // hold/release the keep-awake assertion for the launch topology
+            autoDisconnectPolicy.seed(externalPresent: hasExternalDisplay)  // don't treat a pre-attached external as an arrival
             await writeBaselineCheckpoint()
             if let marker = Self.readRotationMarker() {
                 // A prior experimental rotation didn't confirm — restore that display's safe angle and
@@ -242,6 +301,12 @@ final class AppModel: ObservableObject {
                 Self.clearRotationMarker()
                 await refresh()
             }
+            if let priorArrangement = Self.readRevertMarker() {
+                // An arrangement-revert window was open when the app last died — restore the prior
+                // mode/origin/mirror/main so a bad resolution or mirror can't survive a crash/quit.
+                await restoreArrangement(priorArrangement)
+                Self.clearRevertMarker()
+            }
             #if DEBUG
             if let token = ProcessInfo.processInfo.environment["OPENDISPLAY_DISCONNECT"] {
                 await debugDisconnectCycle(token: token)
@@ -250,9 +315,16 @@ final class AppModel: ObservableObject {
         }
         Task { await observeTopologyChanges() }
         // A software gamma dim persists until logout; restore on quit so it never outlives the app.
+        // The keep-awake assertion is process-bound, but release it explicitly so it's gone the instant
+        // we quit rather than at process teardown.
         NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             CoreGraphicsProvider.restoreGamma()
+            MainActor.assumeIsolated {
+                self?.sleepGuard.releaseAll()
+                self?.mediaKeyTapRetry?.cancel()
+                self?.mediaKeyTap?.stop()
+            }
         }
     }
 
@@ -264,11 +336,6 @@ final class AppModel: ObservableObject {
         #else
         return RoutedLifecycleProvider(primary: ExperimentalLifecycleProvider(), fallback: publicProvider)
         #endif
-    }
-
-    /// Loads persisted user settings, or defaults if the store can't be resolved/read.
-    private static func loadSettings() -> OpenDisplaySettings {
-        (try? SettingsStore.defaultDirectory()).map(SettingsStore.init(directory:))?.load() ?? .default
     }
 
     /// Persistent, rescue-readable checkpoints in Application Support, falling back to in-memory
@@ -439,6 +506,7 @@ final class AppModel: ObservableObject {
     /// Reversible (public Core Graphics mirroring).
     func setMirrored(_ on: Bool, for observation: DisplayObservation) async {
         guard let cgID = observation.cgDisplayID else { return }
+        // Reversible and never unreadable, so (like set-main) it applies directly without the revert gate.
         _ = await observer.setMirroring(of: cgID, enabled: on)
         await refresh()
     }
@@ -585,6 +653,7 @@ final class AppModel: ObservableObject {
         colorPresetTarget = colorPresetTarget.filter { ids.contains($0.key) }
         ddcControlMax = ddcControlMax.filter { ids.contains($0.key.id) }
         ddcControlTarget = ddcControlTarget.filter { ids.contains($0.key.id) }
+        ddcProbe = ddcProbe.filter { ids.contains($0.key) }
     }
     #endif
 
@@ -662,12 +731,32 @@ final class AppModel: ObservableObject {
                 brightnessMethod[id] = .native
                 return
             }
-        } else if let controller = await ddcController(for: observation),
-                  let reading = await controller.read(.brightness), reading.max > 0 {
-            brightness[id] = Float(reading.current) / Float(reading.max)
-            brightnessMax[id] = reading.max
-            brightnessMethod[id] = .hardware
-            return
+        } else if let controller = await ddcController(for: observation) {
+            // The probe tracker keeps a DDC-less external from paying the full retried read
+            // (~0.7s) on every refresh before falling back to gamma — after a couple of failures
+            // it goes straight to software, rechecking hardware only occasionally. The controller
+            // is resolved BEFORE admitProbe: admitProbe is mutating (it spends the periodic
+            // recheck token), so consuming it and then bailing on a nil controller would silently
+            // push hardware rediscovery a whole recheck interval further out.
+            let vcp = ExternalDisplayDDC.Feature.brightness.rawValue
+            if ddcProbe[id, default: DDCProbeTracker()].admitProbe(vcp) {
+                if let reading = await controller.read(vcp: vcp), reading.max > 0 {
+                    ddcProbe[id, default: DDCProbeTracker()].recordSuccess(vcp)
+                    // Hardware brightness just (re)appeared — lift any leftover software-gamma dim
+                    // from the fallback era, or the two dimming layers stack and the panel stays
+                    // dark no matter where the (now hardware) slider sits. Never while Black Out
+                    // holds the panel at gamma 0 — a background refresh must not light it up.
+                    if let dim = softwareDim[id], dim < 1.0, !blackedOut.contains(id) {
+                        observer.setGammaDim(1.0, for: cgID)
+                        softwareDim[id] = nil
+                    }
+                    brightness[id] = Float(reading.current) / Float(reading.max)
+                    brightnessMax[id] = reading.max
+                    brightnessMethod[id] = .hardware
+                    return
+                }
+                ddcProbe[id, default: DDCProbeTracker()].recordFailure(vcp)
+            }
         }
         #endif
         // Universal fallback: software gamma is public Core Graphics and works on every display.
@@ -714,6 +803,7 @@ final class AppModel: ObservableObject {
             softwareDim[id] = gamma
             observer.setGammaDim(gamma, for: cgID)
         }
+        presentOSD(kind: .brightness, value: value, for: observation)  // Batch-3 #4
     }
 
     #if !PUBLIC_API_ONLY
@@ -749,17 +839,79 @@ final class AppModel: ObservableObject {
         ddcControlLevel[observation.recordID]?[control.vcp]
     }
 
-    /// Reads every hardware (DDC) control for an external display into the cache. Skips the built-in
-    /// and any feature the panel reports as unsupported. No-op in the public-API-only build.
+    /// Forgets the DDC negative-probe cache for one display (or all). Called when the world may have
+    /// changed under the cache — a topology event (hotplug, wake, monitor power-cycle) or the user
+    /// deliberately opening a display's detail pane — so a monitor whose DDC just came back (e.g.
+    /// power-cycled out of a wedged scaler state) regains hardware control on the *next* refresh
+    /// instead of waiting out the tracker's periodic recheck. The menu-bar popover keeps using the
+    /// cache, so the cheap fast path stays cheap.
+    func resetDDCProbeCache(for id: DisplayRecordID? = nil) {
+        #if !PUBLIC_API_ONLY
+        if let id { ddcProbe[id] = nil } else { ddcProbe = [:] }
+        #endif
+    }
+
+    /// Pane-open variant of `resetDDCProbeCache`: forgets the negative cache ONLY when the display
+    /// currently shows no working hardware control at all. A healthy display keeps its knowledge —
+    /// wiping it on every pane open would re-pay the full probe ladder (~0.75s per absent feature,
+    /// serially) each time; a fully-dead one is exactly the recovery case the reset exists for
+    /// (monitor power-cycled out of a wedged state), and there the re-probe cost was being paid
+    /// anyway. The tracker's periodic recheck covers the in-between (some controls lost, not all).
+    func retryDDCDiscoveryIfDead(for observation: DisplayObservation) {
+        #if !PUBLIC_API_ONLY
+        let id = observation.recordID
+        let hasWorkingControl = !(ddcControlLevel[id] ?? [:]).isEmpty || brightnessMethod[id] == .hardware
+        if !hasWorkingControl { ddcProbe[id] = nil }
+        #endif
+    }
+
+    /// Whether the display advertises a VCP feature in its DDC capabilities (Batch-2 #1). **Fail-open:**
+    /// if capabilities haven't been read (or the panel didn't return any), returns true so nothing is
+    /// hidden just because discovery hasn't happened — capabilities only ever *remove* dead controls.
+    func ddcSupports(_ vcp: UInt8, for observation: DisplayObservation) -> Bool {
+        guard let caps = ddcCapabilities[observation.recordID] else { return true }
+        return caps.supports(vcp)
+    }
+
+    /// Reads + caches the display's DDC capabilities string (VCP 0xF3) once per external display.
+    ///
+    /// ⚠️ EXPLICIT / DIAGNOSTIC USE ONLY — do NOT call from the control-refresh path. The multi-chunk
+    /// `0xF3` read desynchronizes DDC/CI on some panels (Samsung S34J55x: it leaves the panel replaying a
+    /// stale reply buffer so every later read returns garbage and writes are ignored until a power-cycle).
+    /// Controls are fail-open without it (`ddcSupports` returns true when uncached), so the only thing
+    /// lost by not calling this is hiding genuinely-unsupported controls.
+    func refreshCapabilities(for observation: DisplayObservation) async {
+        #if !PUBLIC_API_ONLY
+        guard observation.displayClass != .builtIn, ddcCapabilities[observation.recordID] == nil,
+              let controller = await ddcController(for: observation),
+              let raw = await controller.readCapabilitiesString(),
+              let caps = DDCCapabilities.parse(raw) else { return }
+        ddcCapabilities[observation.recordID] = caps
+        #endif
+    }
+
+    /// Reads every hardware (DDC) control for an external display into the cache. Skips the built-in,
+    /// anything the capabilities string says is unsupported (when known — `ddcSupports` is fail-open),
+    /// and any feature the panel doesn't read back. No-op in the public-API-only build.
+    ///
+    /// NOTE: this deliberately does NOT auto-read the `0xF3` capabilities string. That multi-chunk read
+    /// desynchronizes DDC/CI on some panels (e.g. Samsung S34J55x), wedging *all* subsequent reads — it
+    /// is now an explicit, diagnostic-only path (CLI `ddc … caps`). See `refreshCapabilities`.
     func refreshHardwareControls(for observation: DisplayObservation) async {
         #if !PUBLIC_API_ONLY
         guard observation.displayClass != .builtIn, let controller = await ddcController(for: observation) else { return }
         let id = observation.recordID
         for control in HardwareControl.allCases {
-            guard let feature = ExternalDisplayDDC.Feature(rawValue: control.vcp),
-                  let reading = await controller.read(feature), reading.max > 0 else { continue }
-            ddcControlLevel[id, default: [:]][control.vcp] = Float(reading.current) / Float(reading.max)
-            ddcControlMax[DDCControlKey(id: id, vcp: control.vcp)] = reading.max
+            let vcp = control.vcp
+            guard ddcSupports(vcp, for: observation),
+                  ddcProbe[id, default: DDCProbeTracker()].admitProbe(vcp) else { continue }
+            if let reading = await controller.read(vcp: vcp), reading.max > 0 {
+                ddcProbe[id, default: DDCProbeTracker()].recordSuccess(vcp)
+                ddcControlLevel[id, default: [:]][vcp] = Float(reading.current) / Float(reading.max)
+                ddcControlMax[DDCControlKey(id: id, vcp: vcp)] = reading.max
+            } else {
+                ddcProbe[id, default: DDCProbeTracker()].recordFailure(vcp)
+            }
         }
         #endif
     }
@@ -776,16 +928,16 @@ final class AppModel: ObservableObject {
         if ddcControlWriter[key] == nil {
             ddcControlWriter[key] = Task { [weak self] in await self?.drainHardwareWrites(key, control, observation) }
         }
+        if control == .volume { presentOSD(kind: .volume, value: value, for: observation) }  // Batch-3 #4
         #endif
     }
 
     #if !PUBLIC_API_ONLY
     private func drainHardwareWrites(_ key: DDCControlKey, _ control: HardwareControl, _ observation: DisplayObservation) async {
-        guard let feature = ExternalDisplayDDC.Feature(rawValue: control.vcp),
-              let controller = await ddcController(for: observation) else { ddcControlWriter[key] = nil; return }
+        guard let controller = await ddcController(for: observation) else { ddcControlWriter[key] = nil; return }
         while let target = ddcControlTarget[key] {
             ddcControlTarget[key] = nil
-            await controller.write(feature, target)
+            await controller.write(vcp: key.vcp, target)
         }
         ddcControlWriter[key] = nil
     }
@@ -794,9 +946,19 @@ final class AppModel: ObservableObject {
     /// Reads the external display's current DDC input source into the cache.
     func refreshInputSource(for observation: DisplayObservation) async {
         #if !PUBLIC_API_ONLY
-        guard observation.displayClass != .builtIn, let controller = await ddcController(for: observation),
-              let reading = await controller.read(.inputSource) else { return }
-        inputSource[observation.recordID] = reading.current
+        let id = observation.recordID
+        let vcp = ExternalDisplayDDC.Feature.inputSource.rawValue
+        // Controller before admitProbe — admitProbe spends the periodic recheck token (see
+        // refreshBrightness), so it must only run when a probe can actually happen.
+        guard observation.displayClass != .builtIn,
+              let controller = await ddcController(for: observation),
+              ddcProbe[id, default: DDCProbeTracker()].admitProbe(vcp) else { return }
+        guard let reading = await controller.read(vcp: vcp) else {
+            ddcProbe[id, default: DDCProbeTracker()].recordFailure(vcp)
+            return
+        }
+        ddcProbe[id, default: DDCProbeTracker()].recordSuccess(vcp)
+        inputSource[id] = reading.current
         #endif
     }
 
@@ -826,6 +988,21 @@ final class AppModel: ObservableObject {
     }
     #endif
 
+    /// Sends a DDC power-mode command (VCP 0xD6) to an external display (Issue 1). Best-effort and
+    /// fire-and-forget: the panel may NAK or ignore the write, and many displays cannot be woken back
+    /// On over DDC once powered Off — none of that is treated as an error. No-op on the built-in and in
+    /// the public-API-only build (DDC uses private SPI). The audit/safety path is untouched because a
+    /// power command doesn't alter the logical arrangement.
+    func setPowerMode(_ mode: DDCPowerMode, for observation: DisplayObservation) {
+        #if !PUBLIC_API_ONLY
+        guard observation.displayClass != .builtIn else { return }
+        Task { [weak self] in
+            guard let controller = await self?.ddcController(for: observation) else { return }
+            await controller.write(.power, mode.vcpValue)
+        }
+        #endif
+    }
+
     /// Refreshes a display's cached ICC state — controllability, current profile name, and (once) the
     /// installed-profile list — all OFF the main actor, since ColorSync iterates and parses profiles
     /// from disk. The menu reads only the published caches and never touches ColorSync in a view body.
@@ -853,6 +1030,7 @@ final class AppModel: ObservableObject {
             return ColorProfileService.currentProfileName(for: cgID)
         }.value
         colorProfileName[id] = name
+        reapplySoftwareDim(for: observation)
     }
 
     /// Reverts a display to its factory ICC profile, then re-reads the resulting name off-main.
@@ -864,6 +1042,17 @@ final class AppModel: ObservableObject {
             return ColorProfileService.currentProfileName(for: cgID)
         }.value
         colorProfileName[id] = name
+        reapplySoftwareDim(for: observation)
+    }
+
+    /// Re-asserts an active software-gamma dim after a colour-profile change. Applying a profile can
+    /// rebuild the display's transfer tables WindowServer-side, silently wiping a formula-based dim —
+    /// the screen would jump to full brightness while the slider still shows the dimmed level.
+    /// Skipped while Black Out holds the panel at gamma 0: dim < blackout, re-asserting would light it.
+    private func reapplySoftwareDim(for observation: DisplayObservation) {
+        guard let cgID = observation.cgDisplayID, !blackedOut.contains(observation.recordID),
+              let dim = softwareDim[observation.recordID], dim < 1.0 else { return }
+        observer.setGammaDim(dim, for: cgID)
     }
 
     /// Current rotation of a display in degrees (0/90/180/270), read via public Core Graphics.
@@ -934,13 +1123,35 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The colour-preset codes to offer for a display. VCP 0x14 (Select Color Preset) is a
+    /// **non-continuous** enum: the panel only honours the specific values it advertises in its DDC
+    /// capabilities, so we offer those (when known) rather than a contiguous 1...max range — otherwise
+    /// most selections are codes the monitor silently ignores and the control appears to "do nothing".
+    /// Falls back to 1...max only when capabilities haven't been read.
+    func colorPresetCodes(for observation: DisplayObservation) -> [Int] {
+        DDCCapabilities.offeredValues(
+            ddcCapabilities[observation.recordID], for: 0x14,
+            fallbackMax: colorPresetMax[observation.recordID] ?? 5)
+    }
+
     /// Reads the external display's current DDC colour preset (VCP 0x14) + its max code into the cache.
+    /// Does NOT auto-fetch the capabilities string (it wedges some panels — see `refreshHardwareControls`);
+    /// `colorPresetCodes` falls back to a 1...max menu when capabilities aren't cached.
     func refreshColorPreset(for observation: DisplayObservation) async {
         #if !PUBLIC_API_ONLY
-        guard observation.displayClass != .builtIn, let controller = await ddcController(for: observation),
-              let reading = await controller.read(.colorPreset) else { return }
-        colorPreset[observation.recordID] = reading.current
-        colorPresetMax[observation.recordID] = max(reading.max, 1)
+        let id = observation.recordID
+        let vcp = ExternalDisplayDDC.Feature.colorPreset.rawValue
+        // Controller before admitProbe — see refreshInputSource.
+        guard observation.displayClass != .builtIn,
+              let controller = await ddcController(for: observation),
+              ddcProbe[id, default: DDCProbeTracker()].admitProbe(vcp) else { return }
+        guard let reading = await controller.read(vcp: vcp) else {
+            ddcProbe[id, default: DDCProbeTracker()].recordFailure(vcp)
+            return
+        }
+        ddcProbe[id, default: DDCProbeTracker()].recordSuccess(vcp)
+        colorPreset[id] = reading.current
+        colorPresetMax[id] = max(reading.max, 1)
         #endif
     }
 
@@ -969,11 +1180,32 @@ final class AppModel: ObservableObject {
     }
     #endif
 
-    /// Applies a chosen resolution/mode, then re-reads the topology.
+    /// Applies a chosen resolution/mode behind the timed auto-revert gate (Issue 6), then re-reads the
+    /// topology. A bad/blank resolution can leave a display unreadable, so the change is checkpointed
+    /// and reverts itself unless confirmed within the window.
     func setMode(_ mode: DisplayMode, for observation: DisplayObservation) async {
         guard let cgID = observation.cgDisplayID else { return }
-        _ = observer.applyArrangement([.init(displayID: cgID, origin: nil, mode: mode)])
-        await refresh()
+        await applyWithRevert("Resolution changed on \(displayName(for: observation))") {
+            _ = self.observer.applyArrangement([.init(displayID: cgID, origin: nil, mode: mode)])
+        }
+    }
+
+    /// Whether `mode` is a pinned favourite for this display (Batch-2 #3).
+    func isFavoriteResolution(_ mode: DisplayMode, for observation: DisplayObservation) -> Bool {
+        favorites.isFavorite(mode, for: observation.recordID)
+    }
+
+    /// Pins/unpins `mode` as a favourite for this display and persists.
+    func toggleFavoriteResolution(_ mode: DisplayMode, for observation: DisplayObservation) {
+        favorites.toggle(mode, for: observation.recordID)
+        try? favoritesStore?.save(favorites)
+    }
+
+    /// The display's favourite modes (newest first), resolved against `stops` — stale ones drop out.
+    func favoriteResolutions(among stops: [DisplayMode], for observation: DisplayObservation) -> [DisplayMode] {
+        let merged = favorites.merged(stops: stops, for: observation.recordID)
+        let count = favorites.favoriteKeys(for: observation.recordID).count
+        return Array(merged.prefix(min(count, merged.count))).filter { isFavoriteResolution($0, for: observation) }
     }
 
     /// Refresh rates available at the display's current resolution (same point size + HiDPI), descending.
@@ -1012,19 +1244,139 @@ final class AppModel: ObservableObject {
 
     /// Makes a display the main display by re-anchoring every origin so this one sits at (0,0) —
     /// Core Graphics treats the display at the origin as main.
+    /// Makes a display the main display by re-anchoring every origin so this one sits at (0,0) — Core
+    /// Graphics treats the display at the origin as main, and accepts the negative origins this gives
+    /// the other displays, so the physical arrangement is preserved.
+    ///
+    /// Applies immediately and sticks — no timed auto-revert. Changing the main display never leaves a
+    /// display unreadable (both stay usable), so the revert gate (which is for bad resolutions) would
+    /// only undo the user's intended change and bounce the menu bar back.
+    ///
+    /// The shift is computed from a **fresh** snapshot, re-resolving the target by display id: the
+    /// observation handed in by the menu can carry a stale origin (cached from before the last
+    /// arrangement change), which would compute a zero/wrong shift and silently no-op — exactly the
+    /// "set-main does nothing / the other screen stays main" symptom.
     func setMain(for observation: DisplayObservation) async {
-        guard !observation.isMain else { return }
+        guard let cgID = observation.cgDisplayID else { return }
         let snapshot = await observer.currentSnapshot()
-        let dx = -observation.origin.x
-        let dy = -observation.origin.y
+        guard let target = snapshot.observations.first(where: { $0.cgDisplayID == cgID }),
+              !target.isMain else { return }
+        let dx = -target.origin.x
+        let dy = -target.origin.y
         let targets = snapshot.observations.compactMap { obs -> CoreGraphicsProvider.ArrangementTarget? in
-            guard let cgID = obs.cgDisplayID else { return nil }
-            return .init(displayID: cgID,
+            guard let id = obs.cgDisplayID else { return nil }
+            return .init(displayID: id,
                          origin: DisplayOrigin(x: obs.origin.x + dx, y: obs.origin.y + dy),
                          mode: nil)
         }
         _ = observer.applyArrangement(targets)
         await refresh()
+    }
+
+    // MARK: - Timed auto-revert safety gate (Issue 6)
+
+    /// Countdown length for the resolution revert window (clamped to a sane minimum).
+    private var arrangementRevertSeconds: Int { max(3, settings.arrangementAutoRevertSeconds) }
+
+    /// Applies a **resolution** change behind a macOS-style timed auto-revert: snapshot the prior mode,
+    /// apply, then start a "Keep these settings?" countdown that restores it unless the user confirms.
+    /// Used for resolution only — a bad/blank mode can strand a display, whereas set-main and mirror
+    /// never leave a display unreadable, so those apply directly (reverting them just fights the user).
+    /// The auto-revert needs no input, so recovery is guaranteed even if the display became unreadable.
+    private func applyWithRevert(_ message: String, _ apply: () async -> Void) async {
+        // A change made while a window is still open keeps the prior one, then opens a fresh window.
+        if revertGate?.isPending == true { confirmArrangementChange() }
+        let before = await observer.currentSnapshot().observations
+        await apply()
+        await refresh()
+        beginRevertWindow(before: before, message: message)
+    }
+
+    private func beginRevertWindow(before: [DisplayObservation], message: String) {
+        let seconds = arrangementRevertSeconds
+        revertGate = TimedRevertGate(before: before, deadline: Date().addingTimeInterval(Double(seconds)))
+        revertMessage = message
+        // Crash recovery: a marker (same Application Support dir the checkpoints/rotation marker use)
+        // lets the next launch restore the prior arrangement if the app dies mid-window.
+        Self.writeRevertMarker(before)
+        pendingRevert = PendingRevert(message: message, secondsRemaining: seconds)
+        // The confirmation renders in-context (menu-bar pop-out and the Settings window), both of which
+        // observe `pendingRevert`. The AppKit status item ensures the pop-out is on the right screen.
+        revertTask?.cancel()
+        revertTask = Task { [weak self] in await self?.driveRevertCountdown() }
+    }
+
+    /// Ticks the open window ~5×/second: updates the countdown label and, at the deadline, restores
+    /// the prior arrangement. Self-cancels once the gate resolves (keep or revert).
+    private func driveRevertCountdown() async {
+        while !Task.isCancelled {
+            guard var gate = revertGate, gate.isPending else { return }
+            let now = Date()
+            if let before = gate.tick(now: now) {
+                revertGate = gate
+                await restoreArrangement(before)
+                clearRevertWindow()
+                return
+            }
+            revertGate = gate
+            pendingRevert = PendingRevert(message: revertMessage, secondsRemaining: gate.secondsRemaining(now: now))
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+    }
+
+    /// User accepted the change — keep it and close the window.
+    func confirmArrangementChange() {
+        guard var gate = revertGate, gate.confirm() else { return }
+        revertGate = gate
+        clearRevertWindow()
+    }
+
+    /// User asked to revert now — restore the prior arrangement and close the window.
+    func revertArrangementChange() async {
+        guard var gate = revertGate, let before = gate.revert() else { return }
+        revertGate = gate
+        await restoreArrangement(before)
+        clearRevertWindow()
+    }
+
+    private func clearRevertWindow() {
+        revertTask?.cancel()
+        revertTask = nil
+        revertGate = nil
+        pendingRevert = nil
+        Self.clearRevertMarker()
+    }
+
+    /// Restores each display's exact prior mode + origin (origins also restore which display is main,
+    /// since Core Graphics treats the display at (0,0) as main), then its prior mirror state.
+    private func restoreArrangement(_ observations: [DisplayObservation]) async {
+        let targets = observations.compactMap { obs -> CoreGraphicsProvider.ArrangementTarget? in
+            guard let cgID = obs.cgDisplayID else { return nil }
+            return .init(displayID: cgID, origin: obs.origin, mode: obs.mode)
+        }
+        if !targets.isEmpty { _ = observer.applyArrangement(targets) }
+        for obs in observations {
+            guard let cgID = obs.cgDisplayID else { continue }
+            _ = await observer.setMirroring(of: cgID, enabled: obs.isMirrored)
+        }
+        await refresh()
+    }
+
+    /// Pending-revert marker (mirrors the rotation marker): the prior arrangement, persisted so a
+    /// crash/quit during the window doesn't strand a bad layout — the next launch restores it.
+    private static func revertMarkerURL() -> URL? {
+        (try? DiskCheckpointStore.defaultDirectory())?.appendingPathComponent("revert.pending")
+    }
+    private static func writeRevertMarker(_ observations: [DisplayObservation]) {
+        guard let url = revertMarkerURL(), let data = try? JSONEncoder().encode(observations) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+    private static func readRevertMarker() -> [DisplayObservation]? {
+        guard let url = revertMarkerURL(), let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode([DisplayObservation].self, from: data)
+    }
+    private static func clearRevertMarker() {
+        if let url = revertMarkerURL() { try? FileManager.default.removeItem(at: url) }
     }
 
     /// Turns a live display off (flagship). Routes through the coordinator, which preflights and
@@ -1071,9 +1423,89 @@ final class AppModel: ObservableObject {
     private func observeTopologyChanges() async {
         let stream = await observer.changes()
         for await _ in stream {
+            let prior = displays
+            // A reconfiguration can mean a monitor was re-plugged or power-cycled — its DDC may have
+            // just come back (or gone away), so any negative probe knowledge is stale.
+            resetDDCProbeCache()
             await refresh()
             await enforceActiveSurfaceInvariant()
+            reconcileDisplaySleepGuard()  // external arrived/left → acquire or release the keep-awake assertion
+            let autoDisconnected = await applyAutoDisconnectBuiltInIfNeeded()  // external arrived → built-in off
+            postDisplayNotifications(prior: prior, builtInAutoDisconnected: autoDisconnected)  // Batch-2 #5
         }
+    }
+
+    /// Posts user notifications for a topology transition, per the pure `NotificationPolicy` (Batch-2 #5).
+    private func postDisplayNotifications(prior: [DisplayObservation], builtInAutoDisconnected: Bool) {
+        let names = Dictionary(
+            (prior + displays).map { ($0.recordID, displayName(for: $0)) }, uniquingKeysWith: { _, b in b }
+        )
+        let notes = NotificationPolicy.notifications(
+            prior: prior, current: displays, names: names,
+            builtInAutoDisconnected: builtInAutoDisconnected,
+            enabled: settings.displayNotificationsEnabled
+        )
+        for note in notes { NotificationDelivery.post(note) }
+    }
+
+    /// Toggle for display notifications (Batch-2 #5). Persists and, when turned on, requests
+    /// notification authorization (the one-time system prompt).
+    func setDisplayNotificationsEnabled(_ enabled: Bool) {
+        guard settings.displayNotificationsEnabled != enabled else { return }
+        settings.displayNotificationsEnabled = enabled
+        persistSettings()
+        if enabled { NotificationDelivery.requestAuthorization() }
+    }
+
+    /// True when at least one external (non-built-in) display is currently present.
+    var hasExternalDisplay: Bool { displays.contains { $0.displayClass != .builtIn } }
+
+    /// On an external-arrival edge (and only then), turn the built-in panel off through the gated
+    /// coordinator path (Issue 5). The built-in returns when the last external leaves — that's the
+    /// existing always-one-active safety net (`enforceActiveSurfaceInvariant`), not duplicated here.
+    @discardableResult
+    private func applyAutoDisconnectBuiltInIfNeeded() async -> Bool {
+        let fire = autoDisconnectPolicy.onTopologyChange(
+            enabled: settings.autoDisconnectBuiltInOnExternal,
+            externalPresent: hasExternalDisplay
+        )
+        guard fire, !busy,
+              let builtIn = displays.first(where: { $0.displayClass == .builtIn && $0.isActive })
+        else { return false }
+        await setDisplayActive(false, for: builtIn)
+        return true
+    }
+
+    /// Toggle for "auto-disconnect the built-in when an external connects" (Issue 5). Persists the
+    /// setting; takes effect on the next external arrival (it never disconnects retroactively).
+    func setAutoDisconnectBuiltInOnExternal(_ enabled: Bool) {
+        guard settings.autoDisconnectBuiltInOnExternal != enabled else { return }
+        settings.autoDisconnectBuiltInOnExternal = enabled
+        persistSettings()
+    }
+
+    /// Toggle for "prevent display sleep while an external is connected" (Issue 3). Persists the
+    /// setting and immediately reconciles the power assertion against the current topology.
+    func setPreventDisplaySleepWithExternal(_ enabled: Bool) {
+        guard settings.preventDisplaySleepWithExternal != enabled else { return }
+        settings.preventDisplaySleepWithExternal = enabled
+        persistSettings()
+        reconcileDisplaySleepGuard()
+    }
+
+    /// Acquire or release the keep-awake assertion for the current (toggle, external-presence) state.
+    /// Idempotent — safe to call on every topology change and every settings change.
+    private func reconcileDisplaySleepGuard() {
+        sleepGuard.update(
+            enabled: settings.preventDisplaySleepWithExternal,
+            externalPresent: hasExternalDisplay
+        )
+    }
+
+    /// Persists `settings` to the on-disk store (best-effort; a write failure leaves the in-memory
+    /// value authoritative for this session).
+    private func persistSettings() {
+        try? settingsStore?.save(settings)
     }
 
     /// The "one display is always active" safety net. If a topology change leaves nothing active —
@@ -1096,6 +1528,248 @@ final class AppModel: ObservableObject {
         defer { busy = false }
         _ = await coordinator.reconnectAll()
         await refresh()
+    }
+
+    // MARK: - Quit-time revert
+
+    /// True when the app has put the system into a non-default state whose reversal needs async work
+    /// before the process exits — currently, a display it logically turned off. Gamma dim and the
+    /// keep-awake assertion are restored synchronously by the `willTerminate` backstop, so they don't
+    /// gate termination on their own.
+    var needsQuitReversion: Bool { !managedOffline.isEmpty }
+
+    /// Reverts every app-made system change so quitting returns the Mac to a clean default: reconnect
+    /// any display we turned off, lift any software dim/blackout, and drop keep-awake assertions. The
+    /// delegate's `applicationShouldTerminate` defers termination until this completes so the
+    /// reconnect actually lands before the process exits.
+    func teardownForQuit() async {
+        // Reconnect each off-card the way `reconnectOffline(_:)` does — by raw display id, since a
+        // disabled display drops off the online list. `coordinator.reconnectAll()` only sees the
+        // observer snapshot's offline list, which doesn't include this persisted `managedOffline`
+        // set, so it would no-op here and leave the display off.
+        for offline in managedOffline {
+            let reconnectID = offline.cgID != 0
+                ? DisplayRecordID(rawValue: "cgid:\(offline.cgID)")
+                : offline.recordID
+            try? await lifecycle.reconnect(reconnectID, deadline: Date().addingTimeInterval(10))
+        }
+        if !managedOffline.isEmpty {
+            managedOffline.removeAll()
+            persistManagedOffline()
+        }
+        CoreGraphicsProvider.restoreGamma()
+        softwareDim.removeAll()
+        sleepGuard.releaseAll()
+    }
+
+    // MARK: - Global keyboard shortcuts (Batch-2 #4)
+
+    /// Registers a Carbon global hotkey for every bound action in the (defaults-merged) shortcut
+    /// registry, mapping each to its handler. Reconnect-All honours the existing enable toggle.
+    private func registerHotkeys() {
+        hotKeys.removeAll()
+        let registry = settings.hotkeyShortcuts.mergedWithDefaults()
+        var nextID: UInt32 = 1
+        for action in HotkeyAction.allCases {
+            guard let binding = registry.binding(for: action) else { continue }
+            if action == .reconnectAll && !settings.reconnectAllHotkeyEnabled { continue }
+            if let hotkey = GlobalHotKey(keyCode: binding.keyCode, modifiers: binding.modifiers,
+                                         id: nextID, action: hotkeyHandler(for: action)) {
+                hotKeys.append(hotkey)
+            }
+            nextID += 1
+        }
+    }
+
+    private func hotkeyHandler(for action: HotkeyAction) -> () -> Void {
+        switch action {
+        case .reconnectAll:
+            return { [weak self] in
+                #if DEBUG
+                AppModel.debugMarkHotKeyFired()
+                #endif
+                Task { await self?.reconnectAll() }
+            }
+        case .cycleMainDisplay:
+            return { [weak self] in Task { await self?.cycleMainDisplay() } }
+        case .brightnessUp:
+            return { [weak self] in Task { await self?.adjustMainBrightness(by: 0.1) } }
+        case .brightnessDown:
+            return { [weak self] in Task { await self?.adjustMainBrightness(by: -0.1) } }
+        }
+    }
+
+    /// Makes the next active display the main display (wraps around).
+    func cycleMainDisplay() async {
+        let actives = displays.filter(\.isActive)
+        guard actives.count > 1 else { return }
+        let idx = actives.firstIndex(where: { $0.isMain }) ?? 0
+        await setMain(for: actives[(idx + 1) % actives.count])
+    }
+
+    /// Nudges the main display's brightness by `delta`, clamped to 0...1.
+    func adjustMainBrightness(by delta: Float) async {
+        guard let main = displays.first(where: { $0.isMain }) else { return }
+        let current = brightness[main.recordID] ?? 0.5
+        setBrightness(max(0, min(1, current + delta)), for: main)
+    }
+
+    // MARK: - OSD HUD + media keys (Batch-3)
+
+    /// Show the OSD HUD for a brightness/volume change and (when enabled) broadcast it for external/
+    /// notch HUDs (Batch-3 #4/#6). The single funnel that `setBrightness` / `setHardwareControl(.volume)`
+    /// call, so the HUD fires for every in-app source (menu slider, media keys).
+    func presentOSD(kind: OSDContent.Kind, value: Float, for observation: DisplayObservation,
+                    source: String = "app") {
+        let content = OSDContent(kind: kind, value: value)
+        if settings.osdEnabled && settings.osdStyle != .external {
+            osdHUD.present(content, cgDisplayID: observation.cgDisplayID,
+                           style: settings.osdStyle, position: settings.osdPosition)
+        }
+        if settings.publishOSDEventsEnabled {
+            OSDBroadcaster.publish(kind: kind, value: Double(value),
+                                   displayID: observation.recordID.rawValue,
+                                   displayName: displayName(for: observation), source: source)
+        }
+    }
+
+    /// Handle a captured media key (Batch-3 #1/#3). Resolves the target display via the pure
+    /// `MediaKeyTargetPolicy`, applies the change through the existing brightness/volume sinks (which
+    /// raise the OSD), and returns whether it acted — so the tap can swallow handled keys and let
+    /// others (e.g. volume on the built-in) pass through to macOS.
+    @discardableResult
+    func handleMediaKey(_ action: MediaKeyAction, fineStep: Bool) -> Bool {
+        guard let target = MediaKeyTargetPolicy.target(
+            for: action, in: displays, cursor: cursorInCGCoordinates(),
+            mode: settings.mediaKeyTargetMode, volumeCapable: volumeCapableDisplayIDs())
+        else { return false }
+        let id = target.recordID
+
+        switch action {
+        case .brightnessUp, .brightnessDown:
+            let current = brightness[id] ?? 0.5
+            setBrightness(min(1, max(0, current + action.signedDelta(fineStep: fineStep))), for: target)
+        case .volumeUp, .volumeDown:
+            let current = ddcControl(.volume, for: target) ?? 0.5
+            setHardwareControl(.volume, min(1, max(0, current + action.signedDelta(fineStep: fineStep))),
+                               for: target)
+        case .muteToggle:
+            // A volume of 0 already renders the speaker-slash glyph; toggle to 0 or back to the prior level.
+            let current = ddcControl(.volume, for: target) ?? 0
+            if current > 0 {
+                preMuteVolume[id] = current
+                setHardwareControl(.volume, 0, for: target)
+            } else {
+                setHardwareControl(.volume, preMuteVolume[id] ?? 0.5, for: target)
+            }
+        }
+        return true
+    }
+
+    /// External displays that can take DDC audio (VCP 0x62) — the only valid volume-key targets. The
+    /// built-in is never included, so its volume keys pass through to system volume. Fail-open: an
+    /// external whose capabilities haven't been read yet is treated as capable (`ddcSupports`).
+    private func volumeCapableDisplayIDs() -> Set<DisplayRecordID> {
+        Set(displays
+            .filter { $0.displayClass != .builtIn && ddcSupports(HardwareControl.volume.vcp, for: $0) }
+            .map(\.recordID))
+    }
+
+    /// The pointer location in Core Graphics (top-left origin) coordinates, to match `observation.origin`
+    /// (which comes from `CGDisplayBounds`). `NSEvent.mouseLocation` is bottom-left, so flip about the
+    /// primary display's height.
+    private func cursorInCGCoordinates() -> DisplayOrigin? {
+        let mouse = NSEvent.mouseLocation
+        guard let primaryHeight = (NSScreen.screens.first { $0.frame.origin == .zero }
+            ?? NSScreen.main)?.frame.height else { return nil }
+        return DisplayOrigin(x: Int(mouse.x.rounded()), y: Int((primaryHeight - mouse.y).rounded()))
+    }
+
+    /// Create/tear down the media-key tap to match the setting (Batch-3 #3). Idempotent.
+    ///
+    /// Owns the Accessibility flow end-to-end: when the feature is enabled but the grant is missing,
+    /// it shows the system prompt (once per launch) and then polls until the grant appears, arming the
+    /// tap the moment it does — the user grants in System Settings and the keys just start working,
+    /// no relaunch. (The Debug build is adhoc-signed, so a rebuild can invalidate a previous grant;
+    /// this same path recovers that case at next launch.)
+    private func reconcileMediaKeyTap() {
+        if settings.mediaKeyInterceptionEnabled {
+            guard mediaKeyTap == nil else { return }
+            let tap = MediaKeyTap { [weak self] action, fineStep in
+                self?.handleMediaKey(action, fineStep: fineStep) ?? false
+            }
+            mediaKeyTap = tap
+            if !tap.start() {
+                if !promptedForAccessibility {
+                    promptedForAccessibility = true
+                    MediaKeyTap.promptForAccessibility()
+                }
+                armMediaKeyTapWhenTrusted(tap)
+            }
+        } else {
+            mediaKeyTapRetry?.cancel()
+            mediaKeyTapRetry = nil
+            mediaKeyTap?.stop()
+            mediaKeyTap = nil
+        }
+    }
+
+    /// Polls for the Accessibility grant and arms `tap` when it lands. 2s cadence: TCC grants are a
+    /// one-time manual act in System Settings, so the window between grant and pickup stays invisible.
+    private func armMediaKeyTapWhenTrusted(_ tap: MediaKeyTap) {
+        mediaKeyTapRetry?.cancel()
+        mediaKeyTapRetry = Task { [weak self] in
+            while !Task.isCancelled, !MediaKeyTap.isAccessibilityTrusted {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            _ = tap.start()
+            self?.mediaKeyTapRetry = nil
+            self?.objectWillChange.send()  // Settings' "active" status row reads a computed var
+        }
+    }
+
+    /// Whether the media-key tap is currently capturing keys (true only with the toggle on AND the
+    /// Accessibility grant present). Drives the Settings status row.
+    var mediaKeysActive: Bool { mediaKeyTap != nil && MediaKeyTap.isAccessibilityTrusted }
+
+    /// Toggle media-key interception (Batch-3 #3). Persists; prompts for Accessibility when enabling
+    /// without the grant; reconciles the tap.
+    func setMediaKeyInterceptionEnabled(_ enabled: Bool) {
+        guard settings.mediaKeyInterceptionEnabled != enabled else { return }
+        settings.mediaKeyInterceptionEnabled = enabled
+        persistSettings()
+        reconcileMediaKeyTap()  // owns the Accessibility prompt + grant-poll when needed
+    }
+
+    func setMediaKeyTargetMode(_ mode: MediaKeyTargetMode) {
+        guard settings.mediaKeyTargetMode != mode else { return }
+        settings.mediaKeyTargetMode = mode
+        persistSettings()
+    }
+
+    func setOSDEnabled(_ enabled: Bool) {
+        guard settings.osdEnabled != enabled else { return }
+        settings.osdEnabled = enabled
+        persistSettings()
+    }
+
+    func setOSDStyle(_ style: OSDStyle) {
+        guard settings.osdStyle != style else { return }
+        settings.osdStyle = style
+        persistSettings()
+    }
+
+    func setOSDPosition(_ position: OSDPosition) {
+        guard settings.osdPosition != position else { return }
+        settings.osdPosition = position
+        persistSettings()
+    }
+
+    func setPublishOSDEventsEnabled(_ enabled: Bool) {
+        guard settings.publishOSDEventsEnabled != enabled else { return }
+        settings.publishOSDEventsEnabled = enabled
+        persistSettings()
     }
 
     #if DEBUG

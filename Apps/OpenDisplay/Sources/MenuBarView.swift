@@ -11,12 +11,12 @@ import SwiftUI
 /// popover stays lean. See `Docs/InterfaceRedesign.md`.
 struct MenuBarView: View {
     @EnvironmentObject private var model: AppModel
-    @Environment(\.openSettings) private var openSettingsAction
     @State private var expandedID: DisplayRecordID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             header
+            revertBanner
             ODSectionLabel("Displays")
             content
             if model.isDegraded {
@@ -35,6 +35,28 @@ struct MenuBarView: View {
         }
     }
 
+    /// "Keep these settings?" countdown for an arrangement-altering change (Issue 6), shown right below
+    /// the icon inside this pop-out — which (via the AppKit status item) now opens on the screen the
+    /// user clicked. The change also auto-reverts on its own if nothing is clicked.
+    @ViewBuilder
+    private var revertBanner: some View {
+        if let pending = model.pendingRevert {
+            VStack(alignment: .leading, spacing: 6) {
+                ODInlineBanner(tone: .orange, systemImage: "clock.arrow.circlepath",
+                               title: "Keep these display settings?",
+                               message: "\(pending.message). Reverting in \(pending.secondsRemaining)s…")
+                HStack(spacing: 8) {
+                    Button("Keep") { model.confirmArrangementChange() }
+                        .keyboardShortcut(.defaultAction)
+                    Button("Revert now") { Task { await model.revertArrangementChange() } }
+                    Spacer()
+                }
+                .padding(.horizontal, 2)
+            }
+            .padding(.bottom, 4)
+        }
+    }
+
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: "display").font(.system(size: 18)).foregroundStyle(ODColor.accent)
@@ -48,7 +70,22 @@ struct MenuBarView: View {
             }
             .buttonStyle(.plain).foregroundStyle(.secondary)
             .accessibilityLabel("Open Settings")
+            Button { NSApp.terminate(nil) } label: {
+                Image(systemName: "power").font(.system(size: 15))
+            }
+            .buttonStyle(.plain).foregroundStyle(.secondary)
+            .accessibilityLabel("Quit OpenDisplay")
+            .help("Quit OpenDisplay — reconnects any displays it turned off")
             Menu {
+                Toggle("Keep displays awake while external connected", isOn: Binding(
+                    get: { model.settings.preventDisplaySleepWithExternal },
+                    set: { model.setPreventDisplaySleepWithExternal($0) }
+                ))
+                Toggle("Turn built-in off when an external connects", isOn: Binding(
+                    get: { model.settings.autoDisconnectBuiltInOnExternal },
+                    set: { model.setAutoDisconnectBuiltInOnExternal($0) }
+                ))
+                Divider()
                 Button("About OpenDisplay") {
                     NSApp.activate(ignoringOtherApps: true)
                     NSApp.orderFrontStandardAboutPanel(nil)
@@ -101,27 +138,11 @@ struct MenuBarView: View {
         }
     }
 
-    /// Opens Settings and brings the window to the display the user is actually looking at. With
-    /// "Displays have separate Spaces" the SwiftUI Settings window opens on the main display's
-    /// Space, so clicking the menu bar on an extended display otherwise appears to do nothing.
+    /// Asks the app delegate to open Settings. The delegate owns that window (AppKit, not SwiftUI's
+    /// `Settings` scene) and places it on the screen the user is looking at — opening it through the
+    /// responder chain from this `NSPopover` was unreliable and often appeared to do nothing.
     private func showSettings() {
-        openSettingsAction()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            guard let window = NSApp.windows.first(where: {
-                $0.styleMask.contains(.titled) && $0.canBecomeMain
-            }) else { return }
-            window.collectionBehavior.insert(.moveToActiveSpace)
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-            if let screen = NSScreen.screens.first(where: {
-                NSMouseInRect(NSEvent.mouseLocation, $0.frame, false)
-            }) {
-                let visible = screen.visibleFrame
-                let size = window.frame.size
-                window.setFrameOrigin(NSPoint(x: visible.midX - size.width / 2,
-                                              y: visible.midY - size.height / 2))
-            }
-        }
+        NotificationCenter.default.post(name: .openDisplayShowSettings, object: nil)
     }
 }
 
@@ -256,6 +277,8 @@ private struct DisplayCard: View {
         HStack(spacing: 6) {
             if !display.isMain {
                 ODQuickAction("Set as Main", systemImage: "star", enabled: !model.busy) {
+                    // Close the pop-out first so set-main relocating the menu bar can't displace it.
+                    NotificationCenter.default.post(name: .openDisplayDismissMenu, object: nil)
                     Task { await model.setMain(for: display) }
                 }
             }

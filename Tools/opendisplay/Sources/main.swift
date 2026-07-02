@@ -428,27 +428,171 @@ func runDDC() async {
     let featureNames: [String: ExternalDisplayDDC.Feature] = [
         "brightness": .brightness, "contrast": .contrast, "volume": .volume, "input": .inputSource,
         "colour": .colorPreset, "color": .colorPreset, "preset": .colorPreset,
+        "sharpness": .sharpness, "red": .redGain, "green": .greenGain, "blue": .blueGain,
+        "mute": .audioMute,
     ]
-    guard let sel = selectorArg, let featureArg = valueArg else {
-        fail("usage: opendisplay ddc <selector> <brightness|contrast|volume|input|colour> [value]")
-    }
-    guard let feature = featureNames[featureArg.lowercased()] else {
-        fail("unknown feature '\(featureArg)' (brightness|contrast|volume|input|colour)")
+    let usage = "usage: opendisplay ddc <selector> <brightness|contrast|volume|input|colour|sharpness|red|green|blue|mute|power|caps|vcp <0xNN>> [value]"
+    guard let sel = selectorArg, let featureArg = valueArg else { fail(usage) }
+    let featureKey = featureArg.lowercased()
+    let isCaps = featureKey == "caps" || featureKey == "capabilities"
+    guard isCaps || featureKey == "power" || featureKey == "vcp" || featureNames[featureKey] != nil else {
+        fail("unknown feature '\(featureArg)' — \(usage)")
     }
     let pairs = await resolveCurrentDisplays()
     let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
     guard let cgID = target.observation.cgDisplayID, let ddc = ExternalDisplayDDC(displayID: cgID) else {
         fail("no DDC for this display (external displays only)")
     }
+    // Capabilities (VCP 0xF3): read the display's advertised feature set, read-only.
+    if isCaps {
+        if let raw = await ddc.readCapabilitiesString() {
+            print("capabilities: \(raw)")
+            if let caps = DDCCapabilities.parse(raw) {
+                let codes = caps.supportedVCPCodes.sorted().map { String(format: "0x%02X", $0) }.joined(separator: " ")
+                print("supported VCP codes: \(codes)")
+            }
+        } else {
+            print("capabilities: unavailable")
+        }
+        return
+    }
     let setValue = positional.count > 3 ? positional[3] : nil
-    if let raw = setValue {
-        guard let value = Int(raw) else { fail("value must be an integer") }
+    // Raw VCP escape hatch: monitors implement far more of MCCS than we name (KVM switches, OSD
+    // language, colour temperature, power LEDs…). `ddc <sel> vcp 0x87 [value]` reads/writes ANY
+    // code — 0x-prefixed hex or plain decimal — so a new panel's controls are reachable without a
+    // rebuild. Same best-effort semantics as the named features.
+    if featureKey == "vcp" {
+        guard let codeArg = setValue else { fail("usage: opendisplay ddc <selector> vcp <0xNN|decimal> [value]") }
+        let lower = codeArg.lowercased()
+        let code: UInt8? = lower.hasPrefix("0x") ? UInt8(lower.dropFirst(2), radix: 16) : UInt8(lower)
+        guard let code else { fail("bad VCP code '\(codeArg)' (0x00–0xFF, e.g. 0x87)") }
+        let label = String(format: "vcp 0x%02X", code)
+        if positional.count > 4 {
+            // DDC values are 16-bit on the wire; an unchecked Int would be silently truncated and
+            // the success message would then lie about what was written.
+            guard let value = Int(positional[4]), (0...0xFFFF).contains(value) else {
+                fail("value must be an integer 0-65535")
+            }
+            let ok = await ddc.write(vcp: code, value)
+            print(ok ? "\(label) = \(value)" : "DDC write failed")
+        } else if let reading = await ddc.read(vcp: code) {
+            print("\(label): \(reading.current)/\(reading.max)")
+        } else {
+            print("\(label): unsupported")
+        }
+        return
+    }
+    // Power is a one-shot DPM command whose value is a word (on|standby|off), not a numeric level.
+    // Best-effort: a NAK/ignore just reports a failed write, never crashes.
+    if featureKey == "power" {
+        guard let raw = setValue else {
+            fail("usage: opendisplay ddc <selector> power <\(DDCPowerMode.acceptedTokens)>")
+        }
+        guard let mode = DDCPowerMode(parsing: raw) else {
+            fail("unknown power mode '\(raw)' (\(DDCPowerMode.acceptedTokens))")
+        }
+        let ok = await ddc.write(.power, mode.vcpValue)
+        print(ok ? "power = \(mode.label)" : "DDC write failed")
+        return
+    }
+    guard let feature = featureNames[featureKey] else {
+        fail("unknown feature '\(featureArg)' — \(usage)")
+    }
+    if var raw = setValue {
+        // VCP 0x8D (mute) is discrete — 1 = mute, 2 = unmute — which nobody guesses from numbers;
+        // accept the words. (`power` gets the same treatment via DDCPowerMode above.)
+        if feature == .audioMute {
+            switch raw.lowercased() {
+            case "on", "mute", "muted": raw = "1"
+            case "off", "unmute", "unmuted": raw = "2"
+            default: break
+            }
+        }
+        guard let value = Int(raw), (0...0xFFFF).contains(value) else {
+            fail(feature == .audioMute ? "mute value must be on|off (or 1=mute, 2=unmute)"
+                                       : "value must be an integer 0-65535")
+        }
         let ok = await ddc.write(feature, value)
         print(ok ? "\(featureArg) = \(value)" : "DDC write failed")
     } else if let reading = await ddc.read(feature) {
         print("\(featureArg): \(reading.current)/\(reading.max)")
     } else {
         print("\(featureArg): unsupported")
+    }
+}
+
+func runEDID() async {
+    guard let sel = selectorArg else { fail("usage: opendisplay edid <selector> [--out <path.bin>]") }
+    let pairs = await resolveCurrentDisplays()
+    let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
+    guard let cgID = target.observation.cgDisplayID else { fail("no display for selector '\(sel)'") }
+    guard let bytes = EDIDReader.rawEDID(for: cgID) else {
+        print("edid: unavailable for this display")
+        return
+    }
+    if let edid = EDID.parse(bytes) {
+        print("manufacturer:     \(edid.manufacturerID)")
+        print("product code:     \(edid.productCode)")
+        if let n = edid.monitorName { print("model:            \(n)") }
+        if let s = edid.serialText { print("serial (text):    \(s)") }
+        if edid.serialNumber != 0 { print("serial (numeric): \(edid.serialNumber)") }
+        print("edid version:     \(edid.edidVersion).\(edid.edidRevision)")
+        if let y = edid.manufactureYear {
+            print("manufactured:     week \(edid.manufactureWeek.map(String.init) ?? "?") / \(y)")
+        }
+        if let r = edid.preferredResolution { print("preferred:        \(r.width)x\(r.height)") }
+        if let w = edid.widthCm, let h = edid.heightCm { print("size:             \(w)x\(h) cm") }
+        print("checksum:         \(edid.checksumValid ? "valid" : "INVALID")")
+        print("extensions:       \(edid.extensionCount)")
+        print("hash:             \(EDID.stableHash(bytes))")
+    } else {
+        print("edid: \(bytes.count) bytes read, but the base block failed to parse")
+    }
+    if let i = rawArgs.firstIndex(of: "--out"), i + 1 < rawArgs.count {
+        let path = rawArgs[i + 1]
+        do {
+            try Data(bytes).write(to: URL(fileURLWithPath: path))
+            print("wrote \(bytes.count) bytes → \(path)")
+        } catch {
+            print("write failed: \(error)")
+        }
+    }
+}
+
+/// Parses a mode argument like `1920x1080`, `1920x1080@60`, or `1512x982@60@2x` into a `DisplayMode`
+/// (pixel size mirrors point size; only point-size/refresh/HiDPI matter for the favourite key).
+func parseModeArg(_ s: String) -> DisplayMode? {
+    let hiDPI = s.contains("@2x")
+    let parts = s.replacingOccurrences(of: "@2x", with: "").split(separator: "@")
+    let dims = parts[0].lowercased().split(separator: "x")
+    guard dims.count == 2, let w = Int(dims[0]), let h = Int(dims[1]) else { return nil }
+    let hz = parts.count > 1 ? (Double(parts[1]) ?? 60) : 60
+    return DisplayMode(pixelWidth: w, pixelHeight: h, pointWidth: w, pointHeight: h, refreshHz: hz, isHiDPI: hiDPI)
+}
+
+func runFavorite() async {
+    guard let sub = selectorArg, let sel = valueArg else {
+        fail("usage: opendisplay favorite <list|set|unset> <selector> [WxH[@Hz][@2x]]")
+    }
+    let store = (try? SettingsStore.defaultDirectory()).map(FavoritesStore.init(directory:))
+    var favorites = store?.load() ?? FavoriteResolutions()
+    let pairs = await resolveCurrentDisplays()
+    let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
+    let recordID = target.record.id
+    switch sub.lowercased() {
+    case "list":
+        let keys = favorites.favoriteKeys(for: recordID)
+        print(keys.isEmpty ? "(no favourites)" : keys.joined(separator: "\n"))
+    case "set", "unset":
+        guard positional.count > 3, let mode = parseModeArg(positional[3]) else {
+            fail("mode must look like 1920x1080[@60][@2x]")
+        }
+        if sub.lowercased() == "set" { favorites.add(mode, for: recordID) }
+        else { favorites.remove(mode, for: recordID) }
+        try? store?.save(favorites)
+        print("\(sub.lowercased()) \(FavoriteResolutions.key(for: mode)) for \(name(for: target))")
+    default:
+        fail("unknown favorite subcommand '\(sub)' (list|set|unset)")
     }
 }
 
@@ -508,6 +652,8 @@ case "reconnect": await runReconnect()
 case "scene": await runScene()
 case "brightness": await runBrightness()
 case "ddc": await runDDC()
+case "edid": await runEDID()
+case "favorite", "favourite": await runFavorite()
 case "_rotate-exp": await runRotateExperimental()
 case "help", "--help", "-h":
     print("""
@@ -523,7 +669,10 @@ case "help", "--help", "-h":
       opendisplay recover [--json]
       opendisplay scene <list|save|show|plan|apply|delete> [name] [--json]
       opendisplay brightness <selector> [0..1]
-      opendisplay ddc <selector> <brightness|contrast|volume|input> [value]
+      opendisplay ddc <selector> <brightness|contrast|volume|input|colour|sharpness|red|green|blue|mute|power|caps> [value]
+      opendisplay ddc <selector> vcp <0xNN> [value]   # any raw MCCS feature code
+      opendisplay edid <selector> [--out <path.bin>]
+      opendisplay favorite <list|set|unset> <selector> [WxH[@Hz][@2x]]
 
     SELECTORS: id:<recordID> · alias:<name> · tag:<tag> · main · builtin · state:<active|managedOffline> · <cgDisplayID>
     """)

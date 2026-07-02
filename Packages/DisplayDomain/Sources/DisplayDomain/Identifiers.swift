@@ -84,4 +84,6 @@ public enum Actor: String, Hashable, Sendable, Codable {
     case httpAPI
     case recovery
     case system
+    /// An `opendisplay://` URL-scheme invocation (a distinct automation front door, like `cli`).
+    case url
 }

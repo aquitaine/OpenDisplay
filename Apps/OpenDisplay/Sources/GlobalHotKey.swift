@@ -12,6 +12,7 @@ final class GlobalHotKey {
     // unchecked isolation lets the nonisolated deinit clean them up.
     private nonisolated(unsafe) var hotKeyRef: EventHotKeyRef?
     private nonisolated(unsafe) var eventHandler: EventHandlerRef?
+    private let id: UInt32
     private let action: () -> Void
 
     /// Registers the default Reconnect-All chord, ⌃⌥⌘R. Returns nil if registration fails (e.g. the
@@ -20,11 +21,14 @@ final class GlobalHotKey {
         GlobalHotKey(
             keyCode: UInt32(kVK_ANSI_R),
             modifiers: UInt32(controlKey | optionKey | cmdKey),
-            action: action
+            id: 1, action: action
         )
     }
 
-    private init?(keyCode: UInt32, modifiers: UInt32, action: @escaping () -> Void) {
+    /// Registers an arbitrary system-wide chord with a unique `id` (Batch-2 #4). Returns nil if
+    /// registration fails so the caller can skip that binding.
+    init?(keyCode: UInt32, modifiers: UInt32, id: UInt32, action: @escaping () -> Void) {
+        self.id = id
         self.action = action
 
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
@@ -32,19 +36,30 @@ final class GlobalHotKey {
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         let installStatus = InstallEventHandler(
             GetApplicationEventTarget(),
-            { _, _, userData -> OSStatus in
-                guard let userData else { return OSStatus(eventNotHandledErr) }
+            { _, event, userData -> OSStatus in
+                guard let userData, let event else { return OSStatus(eventNotHandledErr) }
+                // Every GlobalHotKey installs a handler on the one shared application event target, so
+                // each must check *which* chord fired and decline (letting the others get a turn) when
+                // the delivered EventHotKeyID isn't its own — otherwise the first handler in the chain
+                // would swallow every hotkey and run the wrong action.
+                var firedID = EventHotKeyID()
+                let status = GetEventParameter(
+                    event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                    nil, MemoryLayout<EventHotKeyID>.size, nil, &firedID)
+                guard status == noErr else { return status }
                 // Carbon delivers hotkey events on the main run loop, so this is the main actor.
-                MainActor.assumeIsolated {
-                    Unmanaged<GlobalHotKey>.fromOpaque(userData).takeUnretainedValue().action()
+                return MainActor.assumeIsolated {
+                    let hotKey = Unmanaged<GlobalHotKey>.fromOpaque(userData).takeUnretainedValue()
+                    guard firedID.id == hotKey.id else { return OSStatus(eventNotHandledErr) }
+                    hotKey.action()
+                    return noErr
                 }
-                return noErr
             },
             1, &eventSpec, selfPtr, &eventHandler
         )
         guard installStatus == noErr else { return nil }
 
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4F44_4953) /* 'ODIS' */, id: 1)
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4F44_4953) /* 'ODIS' */, id: id)
         let registerStatus = RegisterEventHotKey(
             keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef
         )

@@ -1,7 +1,9 @@
 #if os(macOS)
+import AppKit
 import DisplayDomain
 import OpenDisplayDesignSystem
 import SwiftUI
+import TopologyCore
 
 /// Settings window. A sidebar (Displays · Arrange · Scenes · Health & Recovery) replaces the old
 /// 3-tab shell: "Displays" is now a selection list feeding a per-display detail pane (so the topology
@@ -209,6 +211,131 @@ private struct HealthSection: View {
                 }
                 .disabled(model.busy)
 
+                Divider()
+
+                Text("Behavior").font(.title3)
+                Toggle(isOn: Binding(
+                    get: { model.settings.preventDisplaySleepWithExternal },
+                    set: { model.setPreventDisplaySleepWithExternal($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Keep displays awake while an external is connected")
+                        Text("Holds a system \u{201C}prevent display sleep\u{201D} assertion whenever at least one "
+                             + "external display is present, so the screens don\u{2019}t idle-dim during a "
+                             + "presentation or always-on setup. Released automatically when the last external "
+                             + "is disconnected.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: Binding(
+                    get: { model.settings.autoDisconnectBuiltInOnExternal },
+                    set: { model.setAutoDisconnectBuiltInOnExternal($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Turn the built-in display off when an external connects")
+                        Text("When an external display arrives, the built-in panel is turned off automatically "
+                             + "(through the same safety-checked path as a manual disconnect). It comes back on "
+                             + "its own when the last external is unplugged. A second external doesn\u{2019}t change "
+                             + "anything.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: Binding(
+                    get: { model.settings.displayNotificationsEnabled },
+                    set: { model.setDisplayNotificationsEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Notify on display connect / disconnect")
+                        Text("Posts a system notification when an external display is connected or "
+                             + "disconnected, and when the built-in is auto-disconnected. Asks for notification "
+                             + "permission the first time you turn this on.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                Divider()
+
+                Text("On-screen display").font(.title3)
+                Toggle(isOn: Binding(
+                    get: { model.settings.osdEnabled },
+                    set: { model.setOSDEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show an on-screen display for brightness & volume")
+                        Text("A floating HUD, like the system\u{2019}s own, appears on the affected display when "
+                             + "brightness or volume changes \u{2014} including changes driven by the menu or the "
+                             + "media keys below.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if model.settings.osdEnabled {
+                    HStack {
+                        Picker("Style", selection: Binding(
+                            get: { model.settings.osdStyle }, set: { model.setOSDStyle($0) })) {
+                            Text("Native").tag(OSDStyle.native)
+                            Text("Minimal").tag(OSDStyle.minimal)
+                            Text("Classic").tag(OSDStyle.classicTahoe)
+                            Text("External HUD only").tag(OSDStyle.external)
+                        }
+                        .fixedSize()
+                        Picker("Position", selection: Binding(
+                            get: { model.settings.osdPosition }, set: { model.setOSDPosition($0) })) {
+                            Text("Bottom").tag(OSDPosition.bottomCenter)
+                            Text("Top").tag(OSDPosition.topCenter)
+                            Text("Center").tag(OSDPosition.center)
+                        }
+                        .fixedSize()
+                    }
+                }
+                Toggle(isOn: Binding(
+                    get: { model.settings.publishOSDEventsEnabled },
+                    set: { model.setPublishOSDEventsEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Broadcast display events for notch / external HUD apps")
+                        Text("Publishes each brightness/volume change over a distributed notification "
+                             + "(\u{201C}dev.opendisplay.osd\u{201D}) so a notch app can render it. Off by default.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                Divider()
+
+                Text("Media keys").font(.title3)
+                Toggle(isOn: Binding(
+                    get: { model.settings.mediaKeyInterceptionEnabled },
+                    set: { model.setMediaKeyInterceptionEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Use the brightness & volume keys to control displays")
+                        Text("Routes the hardware F1/F2 brightness and volume keys to the chosen display "
+                             + "(external brightness/volume over DDC). Needs macOS Accessibility permission "
+                             + "to capture the keys; nothing is requested until you turn this on.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if model.settings.mediaKeyInterceptionEnabled {
+                    Picker("Control the", selection: Binding(
+                        get: { model.settings.mediaKeyTargetMode }, set: { model.setMediaKeyTargetMode($0) })) {
+                        Text("Display under the pointer").tag(MediaKeyTargetMode.underCursor)
+                        Text("Main display").tag(MediaKeyTargetMode.mainDisplay)
+                        Text("Built-in display").tag(MediaKeyTargetMode.builtInAlways)
+                    }
+                    .fixedSize()
+                    if !MediaKeyTap.isAccessibilityTrusted {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                            Text("Accessibility permission needed to capture the keys.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Button("Open Accessibility Settings\u{2026}") { openAccessibilitySettings() }
+                                .controlSize(.small)
+                        }
+                    } else {
+                        Text("Accessibility granted \u{2014} media keys are active.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
                 #if !PUBLIC_API_ONLY
                 Divider()
 
@@ -321,6 +448,14 @@ private struct DisplayTile: View {
                         Task { await model.setPosition(origin, for: display) }
                     }
             )
+    }
+}
+
+/// Opens System Settings → Privacy & Security → Accessibility so the user can grant the permission the
+/// media-key tap needs (Batch-3 #3/#5).
+private func openAccessibilitySettings() {
+    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+        NSWorkspace.shared.open(url)
     }
 }
 #endif

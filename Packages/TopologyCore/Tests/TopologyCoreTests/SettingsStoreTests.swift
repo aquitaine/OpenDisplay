@@ -47,6 +47,98 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(loaded.confirmationCountdownSeconds, OpenDisplaySettings.default.confirmationCountdownSeconds)
     }
 
+    func testPreventDisplaySleepDefaultsOffAndRoundTrips() throws {
+        XCTAssertFalse(OpenDisplaySettings.default.preventDisplaySleepWithExternal)
+        let store = SettingsStore(directory: directory)
+        let settings = OpenDisplaySettings(preventDisplaySleepWithExternal: true)
+        try store.save(settings)
+        XCTAssertTrue(store.load().preventDisplaySleepWithExternal)
+    }
+
+    func testMissingPreventDisplaySleepKeyDefaultsOff() throws {
+        // A settings file written before this key existed must still load, defaulting the key off.
+        let json = #"{"persistencePolicy":"reconnectOnQuit","confirmationCountdownSeconds":5}"#
+        try Data(json.utf8).write(to: directory.appendingPathComponent("settings.json"))
+        XCTAssertFalse(SettingsStore(directory: directory).load().preventDisplaySleepWithExternal)
+    }
+
+    func testDisplayNotificationsDefaultsOffAndRoundTrips() throws {
+        XCTAssertFalse(OpenDisplaySettings.default.displayNotificationsEnabled)
+        let store = SettingsStore(directory: directory)
+        try store.save(OpenDisplaySettings(displayNotificationsEnabled: true))
+        XCTAssertTrue(store.load().displayNotificationsEnabled)
+        try Data(#"{"persistencePolicy":"reconnectOnQuit"}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        XCTAssertFalse(SettingsStore(directory: directory).load().displayNotificationsEnabled)
+    }
+
+    func testHotkeyShortcutsDefaultAndRoundTrip() throws {
+        XCTAssertEqual(OpenDisplaySettings.default.hotkeyShortcuts, .defaults)
+        let store = SettingsStore(directory: directory)
+        var reg = KeyboardShortcutRegistry()
+        reg.setBinding(KeyBinding(keyCode: 0x7E, modifiers: KeyBinding.controlOptionCommand), for: .brightnessUp)
+        try store.save(OpenDisplaySettings(hotkeyShortcuts: reg))
+        XCTAssertEqual(store.load().hotkeyShortcuts, reg)
+        // Older file without the key → defaults.
+        try Data(#"{"persistencePolicy":"reconnectOnQuit"}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        XCTAssertEqual(SettingsStore(directory: directory).load().hotkeyShortcuts, .defaults)
+    }
+
+    func testArrangementAutoRevertDefaultsTo10AndRoundTrips() throws {
+        XCTAssertEqual(OpenDisplaySettings.default.arrangementAutoRevertSeconds, 10)
+        let store = SettingsStore(directory: directory)
+        try store.save(OpenDisplaySettings(arrangementAutoRevertSeconds: 15))
+        XCTAssertEqual(store.load().arrangementAutoRevertSeconds, 15)
+        // A file from before this key existed defaults to 10.
+        try Data(#"{"persistencePolicy":"reconnectOnQuit","confirmationCountdownSeconds":5}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        XCTAssertEqual(SettingsStore(directory: directory).load().arrangementAutoRevertSeconds, 10)
+    }
+
+    func testAutoDisconnectBuiltInDefaultsOffAndRoundTrips() throws {
+        XCTAssertFalse(OpenDisplaySettings.default.autoDisconnectBuiltInOnExternal)
+        let store = SettingsStore(directory: directory)
+        try store.save(OpenDisplaySettings(autoDisconnectBuiltInOnExternal: true))
+        XCTAssertTrue(store.load().autoDisconnectBuiltInOnExternal)
+        // Missing key in an older file defaults off.
+        try Data(#"{"persistencePolicy":"reconnectOnQuit"}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        XCTAssertFalse(SettingsStore(directory: directory).load().autoDisconnectBuiltInOnExternal)
+    }
+
+    func testMediaKeyAndOSDDefaultsAndRoundTrip() throws {
+        // Batch-3 defaults: media keys off, OSD on, native style, bottom-center, broadcast off.
+        let defaults = OpenDisplaySettings.default
+        XCTAssertFalse(defaults.mediaKeyInterceptionEnabled)
+        XCTAssertEqual(defaults.mediaKeyTargetMode, .underCursor)
+        XCTAssertTrue(defaults.osdEnabled)
+        XCTAssertEqual(defaults.osdStyle, .native)
+        XCTAssertEqual(defaults.osdPosition, .bottomCenter)
+        XCTAssertFalse(defaults.publishOSDEventsEnabled)
+
+        let store = SettingsStore(directory: directory)
+        let settings = OpenDisplaySettings(
+            mediaKeyInterceptionEnabled: true,
+            mediaKeyTargetMode: .mainDisplay,
+            osdEnabled: false,
+            osdStyle: .minimal,
+            osdPosition: .topCenter,
+            publishOSDEventsEnabled: true
+        )
+        try store.save(settings)
+        XCTAssertEqual(store.load(), settings)
+
+        // A settings file from before these keys existed loads with all Batch-3 defaults.
+        try Data(#"{"persistencePolicy":"reconnectOnQuit"}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        let loaded = SettingsStore(directory: directory).load()
+        XCTAssertFalse(loaded.mediaKeyInterceptionEnabled)
+        XCTAssertEqual(loaded.mediaKeyTargetMode, .underCursor)
+        XCTAssertTrue(loaded.osdEnabled)
+        XCTAssertEqual(loaded.osdStyle, .native)
+    }
+
     func testSettingsFileIsIndependentlyReadable() throws {
         let store = SettingsStore(directory: directory)
         try store.save(OpenDisplaySettings(persistencePolicy: .reconnectOnWake))
