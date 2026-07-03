@@ -62,6 +62,42 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertFalse(SettingsStore(directory: directory).load().preventDisplaySleepWithExternal)
     }
 
+    func testAdaptiveFieldsDefaultOffAndRoundTrip() throws {
+        // Both behaviors default OFF (opt-in Labs feature); tunables have sane defaults.
+        let defaults = OpenDisplaySettings.default
+        XCTAssertFalse(defaults.adaptiveBrightnessSyncEnabled)
+        XCTAssertFalse(defaults.adaptiveWarmthEnabled)
+        XCTAssertEqual(defaults.adaptiveDayStartMinute, 420)
+        XCTAssertEqual(defaults.adaptiveNightStartMinute, 1140)
+        XCTAssertEqual(defaults.adaptiveEveningPreset, 4)
+        XCTAssertTrue(defaults.adaptiveDayPresetByDisplay.isEmpty)
+
+        let store = SettingsStore(directory: directory)
+        let settings = OpenDisplaySettings(
+            adaptiveBrightnessSyncEnabled: true,
+            adaptiveWarmthEnabled: true,
+            adaptiveNightStartMinute: 1200,
+            adaptiveEveningPreset: 3,
+            adaptiveDayPresetByDisplay: ["cg:abc": 2],
+            adaptiveBrightnessOffsetByDisplay: ["cg:abc": -0.15]
+        )
+        try store.save(settings)
+        XCTAssertEqual(store.load(), settings)
+    }
+
+    func testPreAdaptiveSettingsFileDecodesToAdaptiveDefaults() throws {
+        // A 0.3.0-era settings file (no adaptive keys) must load with the user's values intact
+        // and every adaptive field at its default — never fall back to .default wholesale.
+        let json = #"{"persistencePolicy":"persistentOffline","mediaKeyInterceptionEnabled":true}"#
+        try Data(json.utf8).write(to: directory.appendingPathComponent("settings.json"))
+        let loaded = SettingsStore(directory: directory).load()
+        XCTAssertEqual(loaded.persistencePolicy, .persistentOffline)
+        XCTAssertTrue(loaded.mediaKeyInterceptionEnabled)
+        XCTAssertFalse(loaded.adaptiveBrightnessSyncEnabled)
+        XCTAssertEqual(loaded.adaptiveEveningPreset, 4)
+        XCTAssertTrue(loaded.adaptiveBrightnessOffsetByDisplay.isEmpty)
+    }
+
     func testDisplayNotificationsDefaultsOffAndRoundTrips() throws {
         XCTAssertFalse(OpenDisplaySettings.default.displayNotificationsEnabled)
         let store = SettingsStore(directory: directory)

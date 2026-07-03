@@ -41,6 +41,35 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// When on, broadcast each OSD event over `DistributedNotificationCenter` for external/notch HUD
     /// apps (Batch-3 #6). Default off.
     public var publishOSDEventsEnabled: Bool
+    /// Adaptive Display (Labs): mirror the built-in panel's (ambient-light-driven) brightness to
+    /// external displays' hardware backlight over DDC; falls back to the schedule curve below when
+    /// no built-in is active (clamshell). Default off.
+    public var adaptiveBrightnessSyncEnabled: Bool
+    /// Adaptive Display (Labs): switch external displays' hardware colour preset (VCP 0x14) to a
+    /// warm preset in the evening and back in the morning. Follows macOS Night Shift's live state
+    /// when readable; otherwise the schedule below. Default off.
+    public var adaptiveWarmthEnabled: Bool
+    /// Minute-of-day the adaptive "day" phase begins (default 420 = 07:00).
+    public var adaptiveDayStartMinute: Int
+    /// Minute-of-day the adaptive "night" phase begins (default 1140 = 19:00).
+    public var adaptiveNightStartMinute: Int
+    /// Width in minutes of the linear brightness ramp at each schedule edge (default 30).
+    public var adaptiveTransitionMinutes: Int
+    /// Schedule-fallback brightness during the day phase, 0...1 (default 0.8).
+    public var adaptiveFallbackDayLevel: Float
+    /// Schedule-fallback brightness during the night phase, 0...1 (default 0.35).
+    public var adaptiveFallbackNightLevel: Float
+    /// Colour-preset code applied in the evening (MCCS 0x14; default 4 = 5000 K — mild warmth).
+    public var adaptiveEveningPreset: Int
+    /// Day-preset memory, keyed by `DisplayRecordID.rawValue` (String keys — raw-representable
+    /// dictionary keys encode as flat arrays in JSON). INVARIANT: a key is present if and only if
+    /// an evening preset is currently applied and a day restore is owed; persisted BEFORE the
+    /// evening write and cleared after every restore, so a crash/relaunch mid-evening still
+    /// restores correctly and never re-captures the warm preset as "day".
+    public var adaptiveDayPresetByDisplay: [String: Int]
+    /// Learned brightness offsets (user's manual tweak relative to the built-in), keyed by
+    /// `DisplayRecordID.rawValue`; survives relaunch so sync resumes at the user's preference.
+    public var adaptiveBrightnessOffsetByDisplay: [String: Float]
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
@@ -56,7 +85,17 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         osdEnabled: Bool = true,
         osdStyle: OSDStyle = .native,
         osdPosition: OSDPosition = .bottomCenter,
-        publishOSDEventsEnabled: Bool = false
+        publishOSDEventsEnabled: Bool = false,
+        adaptiveBrightnessSyncEnabled: Bool = false,
+        adaptiveWarmthEnabled: Bool = false,
+        adaptiveDayStartMinute: Int = 420,
+        adaptiveNightStartMinute: Int = 1140,
+        adaptiveTransitionMinutes: Int = 30,
+        adaptiveFallbackDayLevel: Float = 0.8,
+        adaptiveFallbackNightLevel: Float = 0.35,
+        adaptiveEveningPreset: Int = 4,
+        adaptiveDayPresetByDisplay: [String: Int] = [:],
+        adaptiveBrightnessOffsetByDisplay: [String: Float] = [:]
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
@@ -72,6 +111,16 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.osdStyle = osdStyle
         self.osdPosition = osdPosition
         self.publishOSDEventsEnabled = publishOSDEventsEnabled
+        self.adaptiveBrightnessSyncEnabled = adaptiveBrightnessSyncEnabled
+        self.adaptiveWarmthEnabled = adaptiveWarmthEnabled
+        self.adaptiveDayStartMinute = adaptiveDayStartMinute
+        self.adaptiveNightStartMinute = adaptiveNightStartMinute
+        self.adaptiveTransitionMinutes = adaptiveTransitionMinutes
+        self.adaptiveFallbackDayLevel = adaptiveFallbackDayLevel
+        self.adaptiveFallbackNightLevel = adaptiveFallbackNightLevel
+        self.adaptiveEveningPreset = adaptiveEveningPreset
+        self.adaptiveDayPresetByDisplay = adaptiveDayPresetByDisplay
+        self.adaptiveBrightnessOffsetByDisplay = adaptiveBrightnessOffsetByDisplay
     }
 
     public static let `default` = OpenDisplaySettings()
@@ -89,6 +138,16 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case osdStyle
         case osdPosition
         case publishOSDEventsEnabled
+        case adaptiveBrightnessSyncEnabled
+        case adaptiveWarmthEnabled
+        case adaptiveDayStartMinute
+        case adaptiveNightStartMinute
+        case adaptiveTransitionMinutes
+        case adaptiveFallbackDayLevel
+        case adaptiveFallbackNightLevel
+        case adaptiveEveningPreset
+        case adaptiveDayPresetByDisplay
+        case adaptiveBrightnessOffsetByDisplay
     }
 
     /// Tolerant decoder: every missing key falls back to its default and unknown keys are ignored,
@@ -132,6 +191,36 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         publishOSDEventsEnabled = try container
             .decodeIfPresent(Bool.self, forKey: .publishOSDEventsEnabled)
             ?? defaults.publishOSDEventsEnabled
+        adaptiveBrightnessSyncEnabled = try container
+            .decodeIfPresent(Bool.self, forKey: .adaptiveBrightnessSyncEnabled)
+            ?? defaults.adaptiveBrightnessSyncEnabled
+        adaptiveWarmthEnabled = try container
+            .decodeIfPresent(Bool.self, forKey: .adaptiveWarmthEnabled)
+            ?? defaults.adaptiveWarmthEnabled
+        adaptiveDayStartMinute = try container
+            .decodeIfPresent(Int.self, forKey: .adaptiveDayStartMinute)
+            ?? defaults.adaptiveDayStartMinute
+        adaptiveNightStartMinute = try container
+            .decodeIfPresent(Int.self, forKey: .adaptiveNightStartMinute)
+            ?? defaults.adaptiveNightStartMinute
+        adaptiveTransitionMinutes = try container
+            .decodeIfPresent(Int.self, forKey: .adaptiveTransitionMinutes)
+            ?? defaults.adaptiveTransitionMinutes
+        adaptiveFallbackDayLevel = try container
+            .decodeIfPresent(Float.self, forKey: .adaptiveFallbackDayLevel)
+            ?? defaults.adaptiveFallbackDayLevel
+        adaptiveFallbackNightLevel = try container
+            .decodeIfPresent(Float.self, forKey: .adaptiveFallbackNightLevel)
+            ?? defaults.adaptiveFallbackNightLevel
+        adaptiveEveningPreset = try container
+            .decodeIfPresent(Int.self, forKey: .adaptiveEveningPreset)
+            ?? defaults.adaptiveEveningPreset
+        adaptiveDayPresetByDisplay = try container
+            .decodeIfPresent([String: Int].self, forKey: .adaptiveDayPresetByDisplay)
+            ?? defaults.adaptiveDayPresetByDisplay
+        adaptiveBrightnessOffsetByDisplay = try container
+            .decodeIfPresent([String: Float].self, forKey: .adaptiveBrightnessOffsetByDisplay)
+            ?? defaults.adaptiveBrightnessOffsetByDisplay
     }
 }
 
