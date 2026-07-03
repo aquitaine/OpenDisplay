@@ -10,11 +10,11 @@ final class AdaptiveDisplayPolicyTests: XCTestCase {
 
     private func input(now: Date = Date(timeIntervalSinceReferenceDate: 0),
                        minute: Int, builtInPresent: Bool = true, builtIn: Float? = nil,
-                       asleep: Bool = false, currentPreset: Int? = nil, dayPreset: Int? = nil,
-                       nightShift: Bool? = nil, sync: Bool = false, warmth: Bool = false)
-        -> Policy.Input {
+                       lux: Double? = nil, asleep: Bool = false, currentPreset: Int? = nil,
+                       dayPreset: Int? = nil, nightShift: Bool? = nil, sync: Bool = false,
+                       warmth: Bool = false) -> Policy.Input {
         Policy.Input(now: now, minuteOfDay: minute, builtInPresent: builtInPresent,
-                     builtInBrightness: builtIn, displayAsleep: asleep,
+                     builtInBrightness: builtIn, ambientLux: lux, displayAsleep: asleep,
                      currentPreset: currentPreset, dayPreset: dayPreset,
                      nightShiftActive: nightShift, brightnessSyncEnabled: sync,
                      warmthEnabled: warmth)
@@ -110,11 +110,80 @@ final class AdaptiveDisplayPolicyTests: XCTestCase {
         XCTAssertEqual(decision.brightnessWrite ?? -1, 0.8, accuracy: 0.0001)
     }
 
+    // MARK: - Ambient-light mode (built-in off, lid open)
+
+    func testAmbientLevelCurveAnchorsAndMonotonicity() {
+        XCTAssertEqual(Policy.ambientLevel(forLux: 0), 0.25)     // dark room floor
+        XCTAssertEqual(Policy.ambientLevel(forLux: 10), 0.25)
+        XCTAssertEqual(Policy.ambientLevel(forLux: 5000), 1.0)   // daylight ceiling
+        XCTAssertEqual(Policy.ambientLevel(forLux: 50000), 1.0)
+        let dim = Policy.ambientLevel(forLux: 60)     // evening lamp light
+        let office = Policy.ambientLevel(forLux: 300)
+        let bright = Policy.ambientLevel(forLux: 1000)
+        XCTAssertLessThan(dim, office)
+        XCTAssertLessThan(office, bright)
+        XCTAssertEqual(office, 0.25 + 0.75 * Float((log10(300.0) - 1) / (log10(5000.0) - 1)),
+                       accuracy: 0.0001)
+    }
+
+    func testAmbientModeFollowsLuxWithOffsetWhenBuiltInAbsent() {
+        // The user's mode: internal display off, lid open — brightness follows the room's light.
+        let level = Policy.ambientLevel(forLux: 300)
+        var decision = Policy.evaluate(
+            input(minute: noon, builtInPresent: false, lux: 300, sync: true),
+            config: config, state: Policy.DisplayState())
+        XCTAssertEqual(decision.brightnessWrite ?? -1, level, accuracy: 0.0001)
+
+        decision = Policy.evaluate(
+            input(minute: noon, builtInPresent: false, lux: 300, sync: true),
+            config: config, state: Policy.DisplayState(brightnessOffset: -0.1))
+        XCTAssertEqual(decision.brightnessWrite ?? -1, level - 0.1, accuracy: 0.0001)
+    }
+
+    func testModePriorityBuiltInOverAmbientOverSchedule() {
+        // Built-in active wins even with a lux sample (Apple's tuned curve beats ours).
+        var decision = Policy.evaluate(
+            input(minute: noon, builtIn: 0.5, lux: 5000, sync: true),
+            config: config, state: Policy.DisplayState())
+        XCTAssertEqual(decision.brightnessWrite ?? -1, 0.5, accuracy: 0.0001)
+        // No built-in, no lux → schedule.
+        decision = Policy.evaluate(
+            input(minute: noon, builtInPresent: false, lux: nil, sync: true),
+            config: config, state: Policy.DisplayState())
+        XCTAssertEqual(decision.brightnessWrite ?? -1, 0.8, accuracy: 0.0001)
+    }
+
+    func testManualInAmbientModeLearnsOffsetAndResumesQuietly() {
+        let manualAt = Date(timeIntervalSinceReferenceDate: 0)
+        let level300 = Policy.ambientLevel(forLux: 300)
+        // User dials to 0.5 while the room reads 300 lux → offset = 0.5 − level(300).
+        var state = Policy.noteManualBrightness(0.5, reference: level300, scheduleTarget: 0.8,
+                                                at: manualAt, state: Policy.DisplayState())
+        XCTAssertEqual(state.brightnessOffset, 0.5 - level300, accuracy: 0.0001)
+        XCTAssertNil(state.manualScheduleAnchor)
+
+        // Post-cooldown with unchanged light: no redundant write.
+        var decision = Policy.evaluate(
+            input(now: manualAt.addingTimeInterval(120), minute: noon, builtInPresent: false,
+                  lux: 300, sync: true),
+            config: config, state: state)
+        XCTAssertNil(decision.brightnessWrite)
+
+        // Room gets brighter → target rises from the user's preferred baseline.
+        state = decision.state
+        decision = Policy.evaluate(
+            input(now: manualAt.addingTimeInterval(180), minute: noon, builtInPresent: false,
+                  lux: 1000, sync: true),
+            config: config, state: state)
+        XCTAssertEqual(decision.brightnessWrite ?? -1,
+                       Policy.ambientLevel(forLux: 1000) + state.brightnessOffset, accuracy: 0.0001)
+    }
+
     // MARK: - Manual override
 
     func testManualBrightnessLearnsOffsetAndStampsCooldown() {
         let at = Date(timeIntervalSinceReferenceDate: 100)
-        let state = Policy.noteManualBrightness(0.4, builtInBrightness: 0.6, scheduleTarget: 0.8,
+        let state = Policy.noteManualBrightness(0.4, reference: 0.6, scheduleTarget: 0.8,
                                                 at: at, state: Policy.DisplayState())
         XCTAssertEqual(state.brightnessOffset, -0.2, accuracy: 0.0001)
         XCTAssertEqual(state.manualBrightnessAt, at)
@@ -124,7 +193,7 @@ final class AdaptiveDisplayPolicyTests: XCTestCase {
 
     func testNoWritesDuringCooldownThenResumesWithLearnedOffset() {
         let manualAt = Date(timeIntervalSinceReferenceDate: 0)
-        var state = Policy.noteManualBrightness(0.4, builtInBrightness: 0.6, scheduleTarget: 0.8,
+        var state = Policy.noteManualBrightness(0.4, reference: 0.6, scheduleTarget: 0.8,
                                                 at: manualAt, state: Policy.DisplayState())
         // 30s later — inside cooldown, even though the built-in moved.
         var decision = Policy.evaluate(
@@ -144,7 +213,7 @@ final class AdaptiveDisplayPolicyTests: XCTestCase {
         let manualAt = Date(timeIntervalSinceReferenceDate: 0)
         // User set 0.4 while built-in was 0.6 (offset −0.2). Built-in unchanged after cooldown:
         // target = 0.6 − 0.2 = 0.4 == lastWritten → no pointless DDC write on resume.
-        let state = Policy.noteManualBrightness(0.4, builtInBrightness: 0.6, scheduleTarget: 0.8,
+        let state = Policy.noteManualBrightness(0.4, reference: 0.6, scheduleTarget: 0.8,
                                                 at: manualAt, state: Policy.DisplayState())
         let decision = Policy.evaluate(
             input(now: manualAt.addingTimeInterval(120), minute: noon, builtIn: 0.6, sync: true),
@@ -155,7 +224,7 @@ final class AdaptiveDisplayPolicyTests: XCTestCase {
     func testScheduleModeManualAdoptsUntilTargetMovesPastHysteresis() {
         let manualAt = Date(timeIntervalSinceReferenceDate: 0)
         // Clamshell at noon (target 0.8); user dials down to 0.55.
-        var state = Policy.noteManualBrightness(0.55, builtInBrightness: nil, scheduleTarget: 0.8,
+        var state = Policy.noteManualBrightness(0.55, reference: nil, scheduleTarget: 0.8,
                                                 at: manualAt, state: Policy.DisplayState())
         XCTAssertEqual(state.manualScheduleAnchor ?? -1, 0.8, accuracy: 0.0001)
 

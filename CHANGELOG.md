@@ -16,7 +16,10 @@ change until 1.0.
   following macOS Night Shift's live state when readable (best effort, private CoreBrightness),
   otherwise a configurable schedule. The daytime preset is remembered and restored on quit,
   disable, next morning, and even across a crash or relaunch mid-evening. Adaptive changes are
-  silent (no OSD) and never write to displays without working DDC.
+  silent (no OSD) and never write to displays without working DDC. With the built-in display
+  turned OFF but the lid open (external-monitor-plus-Mac-keyboard setups), brightness reads the
+  **ambient light sensor directly** — true light-driven dimming with no panel to mirror; only a
+  closed lid (sensor covered) falls back to the schedule.
 
 ## [0.3.0] — 2026-07-02
 

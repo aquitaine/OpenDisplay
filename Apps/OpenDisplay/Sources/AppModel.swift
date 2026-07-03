@@ -212,6 +212,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var adaptiveStates: [DisplayRecordID: AdaptiveDisplayPolicy.DisplayState] = [:]
     private var adaptiveLoop: Task<Void, Never>?
     private let nightShift = NightShiftStatusReader()
+    private let ambientLight = AmbientLightReader()
+    /// EMA-smoothed ambient lux (α=0.4 toward the newest sample) so a hand shadow over the sensor
+    /// doesn't ripple into DDC writes; nil when the sensor is unreadable (lid closed).
+    private var ambientLuxEMA: Double?
     #endif
     private var hotKeys: [GlobalHotKey] = []
     private var registry: DisplayRegistry?
@@ -1247,6 +1251,19 @@ final class AppModel: ObservableObject {
                 brightness[builtIn.recordID] = sample
             }
         }
+        if syncOn, builtInObs == nil {
+            // Built-in off: read the ambient light sensor directly (lid-open-display-off setups —
+            // the sensor keeps reporting even though macOS drives no panel from it). EMA-smoothed;
+            // an unreadable sensor (lid actually closed) clears it → schedule mode.
+            let reader = ambientLight
+            if let sample = await Task.detached(priority: .utility) { reader.lux() }.value {
+                ambientLuxEMA = ambientLuxEMA.map { $0 * 0.6 + sample * 0.4 } ?? sample
+            } else {
+                ambientLuxEMA = nil
+            }
+        } else {
+            ambientLuxEMA = nil  // built-in active (or sync off): ambient mode dormant
+        }
         var nightShiftActive: Bool?
         if warmthOn {
             let reader = nightShift
@@ -1269,6 +1286,7 @@ final class AppModel: ObservableObject {
                 now: now, minuteOfDay: minuteOfDay,
                 builtInPresent: builtInObs != nil,
                 builtInBrightness: builtInSample,
+                ambientLux: ambientLuxEMA,
                 displayAsleep: CGDisplayIsAsleep(cgID) != 0,
                 currentPreset: colorPreset[id],
                 dayPreset: settings.adaptiveDayPresetByDisplay[id.rawValue],
@@ -1352,9 +1370,13 @@ final class AppModel: ObservableObject {
         let builtIn = displays.first { $0.displayClass == .builtIn && $0.isActive }
         let comps = Calendar.current.dateComponents([.hour, .minute], from: Date())
         let minute = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
+        // The offset-teaching reference is whatever adaptive is currently following: the built-in's
+        // level in sync mode, the light-sensor curve in ambient mode, nothing in schedule mode.
+        let reference: Float? = builtIn.flatMap { brightness[$0.recordID] }
+            ?? ambientLuxEMA.map(AdaptiveDisplayPolicy.ambientLevel(forLux:))
         adaptiveStates[id] = AdaptiveDisplayPolicy.noteManualBrightness(
             value,
-            builtInBrightness: builtIn.flatMap { brightness[$0.recordID] },
+            reference: reference,
             scheduleTarget: AdaptiveDisplayPolicy.scheduleLevel(atMinute: minute,
                                                                 config: settings.adaptiveConfig),
             at: Date(),
@@ -1378,8 +1400,10 @@ final class AppModel: ObservableObject {
                 let offset = Int(((state?.brightnessOffset ?? 0) * 100).rounded())
                 parts.append(offset == 0 ? "following built-in"
                                          : String(format: "following built-in (%+d%%)", offset))
+            } else if let lux = ambientLuxEMA {
+                parts.append("following room light (\(Int(lux.rounded())) lx)")
             } else {
-                parts.append("on schedule (lid closed)")
+                parts.append("on schedule (no light sensor)")
             }
         }
         if settings.adaptiveWarmthEnabled {

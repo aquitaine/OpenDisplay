@@ -435,10 +435,11 @@ private struct HealthSection: View {
                         }
                         .fixedSize()
                     }
-                    Text("The schedule is the fallback intelligence: with the lid closed (no ambient "
-                         + "light sensor), brightness ramps between the day and night levels over the "
-                         + "ramp window; warmth uses the schedule whenever Night Shift isn\u{2019}t readable. "
-                         + "Lid open, brightness follows the built-in\u{2019}s light-sensor level instead.")
+                    Text("Brightness intelligence, best available first: built-in display active \u{2192} "
+                         + "mirror its light-sensor level · built-in off but lid open \u{2192} read the "
+                         + "ambient light sensor directly · lid closed \u{2192} this schedule (day/night "
+                         + "levels, ramped). Warmth uses the schedule whenever Night Shift isn\u{2019}t "
+                         + "readable.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 

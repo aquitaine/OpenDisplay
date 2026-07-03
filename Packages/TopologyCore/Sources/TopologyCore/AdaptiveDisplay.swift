@@ -89,11 +89,15 @@ public enum AdaptiveDisplayPolicy {
     public struct Input: Hashable, Sendable {
         public var now: Date
         public var minuteOfDay: Int
-        /// Topology says a built-in panel is ACTIVE (false ⇒ clamshell ⇒ schedule mode). Never
+        /// Topology says a built-in panel is ACTIVE (false ⇒ built-in off or lid closed). Never
         /// derive this from a read failure — a transient failure must skip the tick, not flip modes.
         public var builtInPresent: Bool
         /// The built-in's current brightness, nil on a transient read failure.
         public var builtInBrightness: Float?
+        /// Smoothed ambient light in lux, when the sensor is readable (lid open). Drives brightness
+        /// directly when the built-in is off-but-lid-open — the user's "internal display off, Mac
+        /// keyboard" mode — so real light intelligence survives without any panel to mirror.
+        public var ambientLux: Double?
         /// This external is asleep — adaptive must not touch it at all.
         public var displayAsleep: Bool
         /// The external's current colour preset (cache); nil ⇒ warmth is inert for this display.
@@ -106,12 +110,14 @@ public enum AdaptiveDisplayPolicy {
         public var warmthEnabled: Bool
 
         public init(now: Date, minuteOfDay: Int, builtInPresent: Bool, builtInBrightness: Float?,
-                    displayAsleep: Bool, currentPreset: Int?, dayPreset: Int?,
-                    nightShiftActive: Bool?, brightnessSyncEnabled: Bool, warmthEnabled: Bool) {
+                    ambientLux: Double? = nil, displayAsleep: Bool, currentPreset: Int?,
+                    dayPreset: Int?, nightShiftActive: Bool?, brightnessSyncEnabled: Bool,
+                    warmthEnabled: Bool) {
             self.now = now
             self.minuteOfDay = minuteOfDay
             self.builtInPresent = builtInPresent
             self.builtInBrightness = builtInBrightness
+            self.ambientLux = ambientLux
             self.displayAsleep = displayAsleep
             self.currentPreset = currentPreset
             self.dayPreset = dayPreset
@@ -167,6 +173,20 @@ public enum AdaptiveDisplayPolicy {
         inWrappedRange(minute, from: config.nightStartMinute, to: config.dayStartMinute)
     }
 
+    /// Brightness level for an ambient light reading: log-linear from 10 lux (dark room → 0.25)
+    /// to 5000 lux (bright daylight room → 1.0). Log because perception and typical indoor
+    /// lighting both span orders of magnitude — linear lux would slam to full brightness the
+    /// moment a lamp comes on. The learned per-display offset applies on top, so the curve only
+    /// has to be *reasonable*, not perfect for every room.
+    public static func ambientLevel(forLux lux: Double) -> Float {
+        let floorLux = 10.0, ceilLux = 5000.0
+        let floorLevel: Float = 0.25, ceilLevel: Float = 1.0
+        guard lux > floorLux else { return floorLevel }
+        guard lux < ceilLux else { return ceilLevel }
+        let progress = Float((log10(lux) - log10(floorLux)) / (log10(ceilLux) - log10(floorLux)))
+        return floorLevel + (ceilLevel - floorLevel) * progress
+    }
+
     /// Progress 0...1 through a ramp starting at `start` of `width` minutes, or nil outside it
     /// (wrap-aware: a ramp beginning at 23:50 continues past midnight).
     private static func rampProgress(_ minute: Int, from start: Int, width: Int) -> Float? {
@@ -189,17 +209,19 @@ public enum AdaptiveDisplayPolicy {
     // MARK: - Manual-change bookkeeping
 
     /// Record a user-initiated brightness change on a synced display. Sets the cooldown stamp and
-    /// the hysteresis anchor (so post-cooldown resumption doesn't immediately re-write); in sync
-    /// mode learns the offset, in schedule mode records the adoption anchor (see
-    /// `DisplayState.manualScheduleAnchor`).
-    public static func noteManualBrightness(_ value: Float, builtInBrightness: Float?,
+    /// the hysteresis anchor (so post-cooldown resumption doesn't immediately re-write). When a
+    /// live reference level exists (the built-in's brightness in sync mode, or the ambient-light
+    /// curve level in sensor mode) the change *teaches the offset* relative to it; with no
+    /// reference (schedule mode) it records the adoption anchor instead — see
+    /// `DisplayState.manualScheduleAnchor`.
+    public static func noteManualBrightness(_ value: Float, reference: Float?,
                                             scheduleTarget: Float, at now: Date,
                                             state: DisplayState) -> DisplayState {
         var state = state
         state.manualBrightnessAt = now
         state.lastWrittenBrightness = value
-        if let builtIn = builtInBrightness {
-            state.brightnessOffset = min(1, max(-1, value - builtIn))
+        if let reference {
+            state.brightnessOffset = min(1, max(-1, value - reference))
         } else {
             state.manualScheduleAnchor = scheduleTarget
         }
@@ -276,10 +298,15 @@ public enum AdaptiveDisplayPolicy {
         let target: Float
         if input.builtInPresent {
             // Sync mode. A nil sample is a transient read failure: skip the tick — NEVER treat it
-            // as clamshell (that would yank brightness to the schedule level on a hiccup).
+            // as built-in-gone (that would yank brightness to a fallback level on a hiccup).
             guard let builtIn = input.builtInBrightness else { return nil }
             target = min(1, max(0, builtIn + state.brightnessOffset))
             state.manualScheduleAnchor = nil  // anchor is a schedule-mode concept
+        } else if let lux = input.ambientLux {
+            // Ambient mode: built-in off but the lid is open, so the light sensor still sees the
+            // room — follow it directly. Same offset-learning contract as sync mode.
+            target = min(1, max(0, ambientLevel(forLux: lux) + state.brightnessOffset))
+            state.manualScheduleAnchor = nil
         } else {
             target = scheduleLevel(atMinute: input.minuteOfDay, config: config)
             // Schedule-mode adoption: hold the user's manual level until the schedule target
