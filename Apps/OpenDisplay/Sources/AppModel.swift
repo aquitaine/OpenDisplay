@@ -1409,6 +1409,17 @@ final class AppModel: ObservableObject {
         persistSettings()
     }
 
+    /// The schedule-fallback brightness plateaus (0.1...1) — what clamshell mode dims between.
+    func setAdaptiveFallbackLevels(day: Float, night: Float) {
+        let day = min(max(day, 0.1), 1)
+        let night = min(max(night, 0.1), 1)
+        guard settings.adaptiveFallbackDayLevel != day
+            || settings.adaptiveFallbackNightLevel != night else { return }
+        settings.adaptiveFallbackDayLevel = day
+        settings.adaptiveFallbackNightLevel = night
+        persistSettings()
+    }
+
     func setAdaptiveSchedule(dayStartMinute: Int, nightStartMinute: Int, transitionMinutes: Int) {
         let day = min(max(dayStartMinute, 0), 1439)
         let night = min(max(nightStartMinute, 0), 1439)

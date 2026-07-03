@@ -418,9 +418,27 @@ private struct HealthSection: View {
                                 in: 5...120, step: 5)
                     }
                     .fixedSize()
-                    Text("The schedule is the fallback intelligence: brightness ramps between day and "
-                         + "night levels over the ramp window when the lid is closed, and warmth uses it "
-                         + "when Night Shift isn\u{2019}t readable.")
+                    if model.settings.adaptiveBrightnessSyncEnabled {
+                        HStack(spacing: 16) {
+                            Stepper("Day brightness: \(Int((model.settings.adaptiveFallbackDayLevel * 100).rounded()))%",
+                                    value: Binding(
+                                        get: { Double(model.settings.adaptiveFallbackDayLevel) },
+                                        set: { model.setAdaptiveFallbackLevels(day: Float($0),
+                                                                               night: model.settings.adaptiveFallbackNightLevel) }),
+                                    in: 0.1...1, step: 0.05)
+                            Stepper("Night brightness: \(Int((model.settings.adaptiveFallbackNightLevel * 100).rounded()))%",
+                                    value: Binding(
+                                        get: { Double(model.settings.adaptiveFallbackNightLevel) },
+                                        set: { model.setAdaptiveFallbackLevels(day: model.settings.adaptiveFallbackDayLevel,
+                                                                               night: Float($0)) }),
+                                    in: 0.1...1, step: 0.05)
+                        }
+                        .fixedSize()
+                    }
+                    Text("The schedule is the fallback intelligence: with the lid closed (no ambient "
+                         + "light sensor), brightness ramps between the day and night levels over the "
+                         + "ramp window; warmth uses the schedule whenever Night Shift isn\u{2019}t readable. "
+                         + "Lid open, brightness follows the built-in\u{2019}s light-sensor level instead.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
