@@ -207,6 +207,11 @@ final class AppModel: ObservableObject {
     /// stop spending ~0.7s of retried I2C on every control the panel doesn't implement (with a
     /// periodic recheck baked into the tracker — see `DDCProbeTracker`). Dropped on disconnect.
     private var ddcProbe: [DisplayRecordID: DDCProbeTracker] = [:]
+    /// Adaptive Display (Labs): per-display policy state. Published so the detail card's status
+    /// line updates as the loop acts. All decisions live in the pure `AdaptiveDisplayPolicy`.
+    @Published private(set) var adaptiveStates: [DisplayRecordID: AdaptiveDisplayPolicy.DisplayState] = [:]
+    private var adaptiveLoop: Task<Void, Never>?
+    private let nightShift = NightShiftStatusReader()
     #endif
     private var hotKeys: [GlobalHotKey] = []
     private var registry: DisplayRegistry?
@@ -291,6 +296,9 @@ final class AppModel: ObservableObject {
             await refresh()
             await enforceActiveSurfaceInvariant()  // recover if we launched into a stranded (0-active) state
             reconcileDisplaySleepGuard()  // hold/release the keep-awake assertion for the launch topology
+            #if !PUBLIC_API_ONLY
+            reconcileAdaptiveLoop()  // start adaptive brightness/warmth if enabled for this topology
+            #endif
             autoDisconnectPolicy.seed(externalPresent: hasExternalDisplay)  // don't treat a pre-attached external as an arrival
             await writeBaselineCheckpoint()
             if let marker = Self.readRotationMarker() {
@@ -324,6 +332,9 @@ final class AppModel: ObservableObject {
                 self?.sleepGuard.releaseAll()
                 self?.mediaKeyTapRetry?.cancel()
                 self?.mediaKeyTap?.stop()
+                #if !PUBLIC_API_ONLY
+                self?.adaptiveLoop?.cancel()
+                #endif
             }
         }
     }
@@ -654,6 +665,9 @@ final class AppModel: ObservableObject {
         ddcControlMax = ddcControlMax.filter { ids.contains($0.key.id) }
         ddcControlTarget = ddcControlTarget.filter { ids.contains($0.key.id) }
         ddcProbe = ddcProbe.filter { ids.contains($0.key) }
+        if !adaptiveStates.keys.allSatisfy(ids.contains) {
+            adaptiveStates = adaptiveStates.filter { ids.contains($0.key) }
+        }
     }
     #endif
 
@@ -793,6 +807,11 @@ final class AppModel: ObservableObject {
             #endif
         case .hardware:
             #if !PUBLIC_API_ONLY
+            // A user-initiated change on a synced display teaches Adaptive Display: learn the
+            // offset (or the schedule adoption anchor in clamshell) and start the cooldown, so
+            // adaptive yields instead of fighting the slider. The adaptive loop's own writes go
+            // through `applyAdaptiveBrightness`, never here.
+            noteManualBrightnessForAdaptive(value, id: id)
             ddcTarget[id] = Int((value * Float(brightnessMax[id] ?? 100)).rounded())
             if ddcWriters[id] == nil {
                 ddcWriters[id] = Task { [weak self] in await self?.drainDDCWrites(id, observation) }
@@ -1161,6 +1180,12 @@ final class AppModel: ObservableObject {
         #if !PUBLIC_API_ONLY
         guard observation.displayClass != .builtIn else { return }
         let id = observation.recordID
+        // A user-picked preset during an adaptive evening is adopted for the rest of the phase
+        // (one-night adoption) — the policy stops issuing preset writes until the next transition.
+        if settings.adaptiveWarmthEnabled {
+            adaptiveStates[id] = AdaptiveDisplayPolicy.noteManualPreset(
+                state: adaptiveStates[id] ?? seededAdaptiveState(for: id))
+        }
         colorPreset[id] = code
         colorPresetTarget[id] = code
         if colorPresetWriter[id] == nil {
@@ -1177,6 +1202,223 @@ final class AppModel: ObservableObject {
             await controller.write(.colorPreset, target)
         }
         colorPresetWriter[id] = nil
+    }
+
+    // MARK: - Adaptive Display (Labs): brightness sync + evening warmth
+
+    /// Idempotent start/stop of the adaptive sampling loop — runs only while a feature toggle is on
+    /// AND an active external exists (mirrors `reconcileMediaKeyTap`/`reconcileDisplaySleepGuard`).
+    /// 5s cadence: one cheap DisplayServices IPC per tick; slower would visibly lag the built-in
+    /// panel animating right next to the external, faster buys nothing through the 0.02 hysteresis.
+    func reconcileAdaptiveLoop() {
+        let wantRunning = (settings.adaptiveBrightnessSyncEnabled || settings.adaptiveWarmthEnabled)
+            && displays.contains { $0.isActive && $0.displayClass != .builtIn }
+        if wantRunning {
+            guard adaptiveLoop == nil else { return }
+            adaptiveLoop = Task { [weak self] in
+                while !Task.isCancelled {
+                    await self?.adaptiveTick()
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                }
+            }
+        } else {
+            adaptiveLoop?.cancel()
+            adaptiveLoop = nil
+        }
+    }
+
+    /// One adaptive pass: sample the world once (built-in brightness, Night Shift, clock), then let
+    /// the pure `AdaptiveDisplayPolicy` decide per display and apply its Decision in the required
+    /// order — persist the day-preset memory BEFORE the preset write (restore-owed invariant),
+    /// then preset, then the memory clear, then brightness.
+    private func adaptiveTick() async {
+        let config = settings.adaptiveConfig
+        let syncOn = settings.adaptiveBrightnessSyncEnabled
+        let warmthOn = settings.adaptiveWarmthEnabled
+        guard syncOn || warmthOn else { return }
+
+        let builtInObs = displays.first { $0.displayClass == .builtIn && $0.isActive }
+        var builtInSample: Float?
+        if syncOn, let builtIn = builtInObs, let builtInCG = builtIn.cgDisplayID {
+            let control = brightnessControl
+            builtInSample = await Task.detached(priority: .utility) { control.brightness(for: builtInCG) }.value
+            // Keep the built-in's own slider live too — macOS auto-brightness moves it under us.
+            if let sample = builtInSample, abs((brightness[builtIn.recordID] ?? -1) - sample) > 0.004 {
+                brightness[builtIn.recordID] = sample
+            }
+        }
+        var nightShiftActive: Bool?
+        if warmthOn {
+            let reader = nightShift
+            nightShiftActive = await Task.detached(priority: .utility) { reader.isActive() }.value
+        }
+        let now = Date()
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: now)
+        let minuteOfDay = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
+
+        for observation in displays where observation.displayClass != .builtIn && observation.isActive {
+            guard let cgID = observation.cgDisplayID else { continue }
+            let id = observation.recordID
+            // Resolve capabilities lazily, once — the caches are sticky and pruned on disconnect.
+            if brightnessMethod[id] == nil { await refreshBrightness(for: observation) }
+            guard brightnessMethod[id] == .hardware else { continue }  // DDC-safety gate
+            if warmthOn, colorPreset[id] == nil { await refreshColorPreset(for: observation) }
+
+            let state = adaptiveStates[id] ?? seededAdaptiveState(for: id)
+            let input = AdaptiveDisplayPolicy.Input(
+                now: now, minuteOfDay: minuteOfDay,
+                builtInPresent: builtInObs != nil,
+                builtInBrightness: builtInSample,
+                displayAsleep: CGDisplayIsAsleep(cgID) != 0,
+                currentPreset: colorPreset[id],
+                dayPreset: settings.adaptiveDayPresetByDisplay[id.rawValue],
+                nightShiftActive: nightShiftActive,
+                brightnessSyncEnabled: syncOn, warmthEnabled: warmthOn)
+            let decision = AdaptiveDisplayPolicy.evaluate(input, config: config, state: state)
+
+            if let dayPreset = decision.rememberDayPreset {
+                settings.adaptiveDayPresetByDisplay[id.rawValue] = dayPreset
+                persistSettings()  // BEFORE the evening write — a crash between must still owe a restore
+            }
+            if let preset = decision.presetWrite { applyAdaptivePreset(preset, for: observation) }
+            if decision.clearDayPreset {
+                settings.adaptiveDayPresetByDisplay[id.rawValue] = nil
+                persistSettings()
+            }
+            if let value = decision.brightnessWrite { applyAdaptiveBrightness(value, for: observation) }
+            // Learned offsets persist at tick-time, not per slider move — no disk spam mid-drag.
+            if settings.adaptiveBrightnessOffsetByDisplay[id.rawValue] != decision.state.brightnessOffset {
+                settings.adaptiveBrightnessOffsetByDisplay[id.rawValue] = decision.state.brightnessOffset
+                persistSettings()
+            }
+            adaptiveStates[id] = decision.state
+        }
+    }
+
+    /// First state for a display: carry the learned offset across relaunches.
+    private func seededAdaptiveState(for id: DisplayRecordID) -> AdaptiveDisplayPolicy.DisplayState {
+        AdaptiveDisplayPolicy.DisplayState(
+            brightnessOffset: settings.adaptiveBrightnessOffsetByDisplay[id.rawValue] ?? 0)
+    }
+
+    /// OSD-silent adaptive brightness apply: cache + coalesced DDC write, NO OSD flash and NO
+    /// manual-change note — this is the machine's hand, not the user's. (`setBrightness` is the
+    /// user funnel and does both.)
+    private func applyAdaptiveBrightness(_ value: Float, for observation: DisplayObservation) {
+        let id = observation.recordID
+        brightness[id] = value  // keep the visible slider honest
+        ddcTarget[id] = Int((value * Float(brightnessMax[id] ?? 100)).rounded())
+        if ddcWriters[id] == nil {
+            ddcWriters[id] = Task { [weak self] in await self?.drainDDCWrites(id, observation) }
+        }
+    }
+
+    /// OSD-silent adaptive preset apply. Updates the cache first so the policy's drift detection
+    /// doesn't mistake our own write for a monitor-button change on the next tick.
+    private func applyAdaptivePreset(_ code: Int, for observation: DisplayObservation) {
+        let id = observation.recordID
+        colorPreset[id] = code
+        colorPresetTarget[id] = code
+        if colorPresetWriter[id] == nil {
+            colorPresetWriter[id] = Task { [weak self] in await self?.drainColorPresetWrites(id, observation) }
+        }
+    }
+
+    /// Restores every owed daytime colour preset (quit / warmth-disable), awaited directly on the
+    /// DDC controller so process exit can't race the fire-and-forget writers. Entries whose display
+    /// isn't currently present stay persisted — the day-phase restore rule picks them up whenever
+    /// the display returns.
+    private func restoreOwedDayPresets() async {
+        guard !settings.adaptiveDayPresetByDisplay.isEmpty else { return }
+        var remaining = settings.adaptiveDayPresetByDisplay
+        for (rawID, code) in settings.adaptiveDayPresetByDisplay {
+            guard let observation = displays.first(where: { $0.recordID.rawValue == rawID }),
+                  observation.isActive,
+                  let controller = await ddcController(for: observation) else { continue }
+            await controller.write(.colorPreset, code)
+            colorPreset[observation.recordID] = code
+            remaining[rawID] = nil
+        }
+        if remaining != settings.adaptiveDayPresetByDisplay {
+            settings.adaptiveDayPresetByDisplay = remaining
+            persistSettings()
+        }
+    }
+
+    /// The manual-brightness note for `setBrightness`'s hardware branch (user slider/media keys on
+    /// a synced external): learn the offset in sync mode, anchor the adoption in schedule mode.
+    private func noteManualBrightnessForAdaptive(_ value: Float, id: DisplayRecordID) {
+        guard settings.adaptiveBrightnessSyncEnabled else { return }
+        let builtIn = displays.first { $0.displayClass == .builtIn && $0.isActive }
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: Date())
+        let minute = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
+        adaptiveStates[id] = AdaptiveDisplayPolicy.noteManualBrightness(
+            value,
+            builtInBrightness: builtIn.flatMap { brightness[$0.recordID] },
+            scheduleTarget: AdaptiveDisplayPolicy.scheduleLevel(atMinute: minute,
+                                                                config: settings.adaptiveConfig),
+            at: Date(),
+            state: adaptiveStates[id] ?? seededAdaptiveState(for: id))
+    }
+
+    /// One-line adaptive status for the display detail card, or nil when adaptive isn't acting on
+    /// this display (built-in, features off, or no hardware brightness).
+    func adaptiveStatusLine(for observation: DisplayObservation) -> String? {
+        guard observation.displayClass != .builtIn,
+              settings.adaptiveBrightnessSyncEnabled || settings.adaptiveWarmthEnabled,
+              brightnessMethod[observation.recordID] == .hardware else { return nil }
+        let id = observation.recordID
+        let state = adaptiveStates[id]
+        var parts: [String] = []
+        if settings.adaptiveBrightnessSyncEnabled {
+            if let manualAt = state?.manualBrightnessAt,
+               Date() < manualAt.addingTimeInterval(settings.adaptiveConfig.manualCooldown) {
+                parts.append("brightness paused (manual)")
+            } else if displays.contains(where: { $0.displayClass == .builtIn && $0.isActive }) {
+                let offset = Int(((state?.brightnessOffset ?? 0) * 100).rounded())
+                parts.append(offset == 0 ? "following built-in"
+                                         : String(format: "following built-in (%+d%%)", offset))
+            } else {
+                parts.append("on schedule (lid closed)")
+            }
+        }
+        if settings.adaptiveWarmthEnabled {
+            parts.append(state?.warmthPhase == .evening ? "evening warmth active" : "day colour")
+        }
+        return "Adaptive: " + parts.joined(separator: " · ")
+    }
+
+    func setAdaptiveBrightnessSyncEnabled(_ enabled: Bool) {
+        guard settings.adaptiveBrightnessSyncEnabled != enabled else { return }
+        settings.adaptiveBrightnessSyncEnabled = enabled
+        persistSettings()
+        reconcileAdaptiveLoop()
+    }
+
+    func setAdaptiveWarmthEnabled(_ enabled: Bool) {
+        guard settings.adaptiveWarmthEnabled != enabled else { return }
+        settings.adaptiveWarmthEnabled = enabled
+        persistSettings()
+        reconcileAdaptiveLoop()
+        if !enabled { Task { [weak self] in await self?.restoreOwedDayPresets() } }
+    }
+
+    func setAdaptiveEveningPreset(_ code: Int) {
+        guard settings.adaptiveEveningPreset != code else { return }
+        settings.adaptiveEveningPreset = code
+        persistSettings()
+    }
+
+    func setAdaptiveSchedule(dayStartMinute: Int, nightStartMinute: Int, transitionMinutes: Int) {
+        let day = min(max(dayStartMinute, 0), 1439)
+        let night = min(max(nightStartMinute, 0), 1439)
+        let ramp = min(max(transitionMinutes, 1), 180)
+        guard settings.adaptiveDayStartMinute != day || settings.adaptiveNightStartMinute != night
+            || settings.adaptiveTransitionMinutes != ramp else { return }
+        settings.adaptiveDayStartMinute = day
+        settings.adaptiveNightStartMinute = night
+        settings.adaptiveTransitionMinutes = ramp
+        persistSettings()
     }
     #endif
 
@@ -1430,6 +1672,9 @@ final class AppModel: ObservableObject {
             await refresh()
             await enforceActiveSurfaceInvariant()
             reconcileDisplaySleepGuard()  // external arrived/left → acquire or release the keep-awake assertion
+            #if !PUBLIC_API_ONLY
+            reconcileAdaptiveLoop()  // externals may have arrived/left → start or stop adaptive
+            #endif
             let autoDisconnected = await applyAutoDisconnectBuiltInIfNeeded()  // external arrived → built-in off
             postDisplayNotifications(prior: prior, builtInAutoDisconnected: autoDisconnected)  // Batch-2 #5
         }
@@ -1536,13 +1781,29 @@ final class AppModel: ObservableObject {
     /// before the process exits — currently, a display it logically turned off. Gamma dim and the
     /// keep-awake assertion are restored synchronously by the `willTerminate` backstop, so they don't
     /// gate termination on their own.
-    var needsQuitReversion: Bool { !managedOffline.isEmpty }
+    var needsQuitReversion: Bool {
+        if !managedOffline.isEmpty { return true }
+        #if !PUBLIC_API_ONLY
+        // An applied evening colour preset owes the monitor its daytime preset back — quitting
+        // must wait for that DDC write (the willTerminate backstop can't do async I2C).
+        if !settings.adaptiveDayPresetByDisplay.isEmpty { return true }
+        #endif
+        return false
+    }
 
     /// Reverts every app-made system change so quitting returns the Mac to a clean default: reconnect
     /// any display we turned off, lift any software dim/blackout, and drop keep-awake assertions. The
     /// delegate's `applicationShouldTerminate` defers termination until this completes so the
     /// reconnect actually lands before the process exits.
     func teardownForQuit() async {
+        #if !PUBLIC_API_ONLY
+        // Stop adaptive first, then hand back the monitor's daytime colour preset if the evening
+        // one is applied — awaited directly (the coalesced writers are fire-and-forget; quitting
+        // must not race them).
+        adaptiveLoop?.cancel()
+        adaptiveLoop = nil
+        await restoreOwedDayPresets()
+        #endif
         // Reconnect each off-card the way `reconnectOffline(_:)` does — by raw display id, since a
         // disabled display drops off the online list. `coordinator.reconnectAll()` only sees the
         // observer snapshot's offline list, which doesn't include this persisted `managedOffline`

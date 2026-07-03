@@ -5,6 +5,19 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [Unreleased]
+
+### Added
+- **Adaptive Display (Labs, opt-in):** transfer the built-in display's intelligence to external
+  monitors. **Brightness sync** mirrors the built-in panel's ambient-light-driven brightness to
+  the external's real backlight over DDC (learned offset from your manual tweaks, one-minute
+  hands-off after a manual change, schedule-curve fallback with the lid closed). **Evening
+  warmth** switches the monitor's hardware colour preset in the evening and back each morning —
+  following macOS Night Shift's live state when readable (best effort, private CoreBrightness),
+  otherwise a configurable schedule. The daytime preset is remembered and restored on quit,
+  disable, next morning, and even across a crash or relaunch mid-evening. Adaptive changes are
+  silent (no OSD) and never write to displays without working DDC.
+
 ## [0.3.0] — 2026-07-02
 
 Third developer preview: keyboard media keys drive external-monitor hardware with a
