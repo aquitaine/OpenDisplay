@@ -11,8 +11,11 @@
 
 payload="$(cat)"
 
+# `ddc … (power|input|vcp)` is blocked too: DPMS power-off and input switching can blank a real
+# panel, and the raw `vcp` escape hatch can write any code (0xD6 power, 0x60 input) — so vcp is
+# blocked wholesale during unattended runs (over-blocking reads is the safe direction for a guard).
 if printf '%s' "$payload" | grep -Eiq \
-  'opendisplay[^"]*(disconnect|reconnect|recover|scene[[:space:]]+apply|black[-_]?out)|displayplacer|cscreen|CGConfigureDisplay|SLSConfigureDisplay'; then
+  'opendisplay[^"]*(disconnect|reconnect|recover|scene[[:space:]]+apply|black[-_]?out|ddc[^"]*[[:space:]](power|input|vcp))|displayplacer|cscreen|CGConfigureDisplay|SLSConfigureDisplay'; then
   echo "BLOCKED: refusing a real display-mutating command during an unattended run. \
 Verify this behavior via 'make test' (SimulatorProvider) and non-destructive --json reads instead. (SAFETY rule.)" >&2
   exit 2

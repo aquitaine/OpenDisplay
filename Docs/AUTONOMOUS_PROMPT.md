@@ -3,9 +3,9 @@ away for several hours. Build through the Batch 1 issues, verify each with the t
 green work as you go. Work safely and do not burn budget on dead ends.
 
 # Setup
-- Spec: read `docs/OpenDisplay-Issues-Batch-1.md` — six issues, each with acceptance criteria,
+- Spec: read `Docs/OpenDisplay-Issues-Batch-1.md` — six issues, each with acceptance criteria,
   file/symbol pointers, and test steps.
-- State: read `PROGRESS.md` first to see what's done, and update it after every issue.
+- State: read `Docs/PROGRESS.md` first to see what's done, and update it after every issue.
 - Branch: work on `batch1-auto` (create it if needed). Commit per issue. Do NOT push or open PRs.
 
 # SAFETY — hard rules, no exceptions
@@ -15,7 +15,7 @@ green work as you go. Work safely and do not burn budget on dead ends.
   Verify that behavior ONLY through `make test` (which uses the in-memory SimulatorProvider) and
   non-destructive `--json` reads.
 - If an acceptance criterion needs real hardware, implement and unit-test the logic, mark that
-  criterion `[deferred: attended verification]` in PROGRESS.md, and still commit the code.
+  criterion `[deferred: attended verification]` in Docs/PROGRESS.md, and still commit the code.
 - Do NOT modify the rescue app or the recovery path.
 - Clean-room: no BetterDisplay code, assets, UI, or copy — implement from first principles.
 
@@ -30,12 +30,12 @@ green work as you go. Work safely and do not burn budget on dead ends.
    unsure, use a subagent to explore first so your own context stays lean.
 2. Implement, and add or extend unit tests for the logic.
 3. Run `make test`. If green and the acceptance criteria (minus any `[deferred]` hardware ones) are
-   met → commit with a clear message referencing the issue, update PROGRESS.md, move to the next.
+   met → commit with a clear message referencing the issue, update Docs/PROGRESS.md, move to the next.
 4. If it's not green after TWO focused attempts on the same issue: STOP that issue. Record what you
-   tried and the blocker in PROGRESS.md under "Tried / stuck", then move to the next issue. Do NOT
+   tried and the blocker in Docs/PROGRESS.md under "Tried / stuck", then move to the next issue. Do NOT
    keep retrying the same thing — that wastes budget.
 
-# Stop cleanly (and write a final summary in PROGRESS.md) when any of these is true:
+# Stop cleanly (and write a final summary in Docs/PROGRESS.md) when any of these is true:
 - All six issues are done or deferred.
 - You reach an item that genuinely needs a human decision or real-hardware verification, with no
   logic left to build.
@@ -45,4 +45,4 @@ green work as you go. Work safely and do not burn budget on dead ends.
 - Pipe verbose build/test output to a file and grep for failures; don't paste full logs into context.
 - Prefer targeted tests while iterating; run the full `make test` before each commit.
 
-Begin by reading PROGRESS.md and docs/OpenDisplay-Issues-Batch-1.md, then start with Issue 3.
+Begin by reading Docs/PROGRESS.md and Docs/OpenDisplay-Issues-Batch-1.md, then start with Issue 3.
