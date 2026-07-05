@@ -300,6 +300,14 @@ private struct ControlsCard: View {
                     }
                 }
             }
+            #if !PUBLIC_API_ONLY
+            if let status = model.adaptiveStatusLine(for: display) {
+                ODDivider()
+                Text(status)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+            }
+            #endif
             ODDivider()
             ODRow("Input source") {
                 Menu(model.inputSource[display.recordID].map { model.inputName($0) } ?? "—") {

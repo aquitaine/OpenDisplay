@@ -32,8 +32,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "0.3.0"
-    CURRENT_PROJECT_VERSION: "3"
+    MARKETING_VERSION: "0.4.0"
+    CURRENT_PROJECT_VERSION: "4"
     CODE_SIGN_STYLE: Automatic
     ENABLE_HARDENED_RUNTIME: YES
 
@@ -146,6 +146,14 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.opendisplay.app
         INFOPLIST_FILE: Apps/OpenDisplay/Resources/Info.plist
         CODE_SIGN_ENTITLEMENTS: Apps/OpenDisplay/Resources/OpenDisplay.entitlements
+        # Sign local (Debug) builds with the stable Developer ID identity, NOT adhoc. TCC keys the
+        # Accessibility grant (needed by the media-key tap) to the code signature's designated
+        # requirement; an adhoc signature changes every rebuild, so macOS silently revokes the grant
+        # and the brightness keys stop working. A real Developer ID keeps the requirement constant
+        # (bundle id + team), so the grant survives rebuilds. Release re-signs + notarizes on top.
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application"
+        DEVELOPMENT_TEAM: 7EKTRESQRZ
     dependencies:
       - target: OpenDisplayDesignSystem
       - target: CoreGraphicsProvider

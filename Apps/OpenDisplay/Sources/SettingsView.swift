@@ -179,6 +179,21 @@ private struct SaveSceneRow: View {
 private struct HealthSection: View {
     @EnvironmentObject private var model: AppModel
 
+    /// A DatePicker binding over a minutes-since-midnight Int setting (the schedule fields store
+    /// minutes so the cross-platform policy never touches Calendar). Anchored to a fixed reference
+    /// day; only the hour/minute components round-trip.
+    private func minuteBinding(get: @escaping () -> Int, set: @escaping (Int) -> Void) -> Binding<Date> {
+        Binding<Date>(
+            get: {
+                let base = Calendar.current.startOfDay(for: Date(timeIntervalSinceReferenceDate: 0))
+                return Calendar.current.date(byAdding: .minute, value: get(), to: base) ?? base
+            },
+            set: { date in
+                let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
+                set((comps.hour ?? 0) * 60 + (comps.minute ?? 0))
+            })
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: ODSpacing.md) {
@@ -337,6 +352,97 @@ private struct HealthSection: View {
                 }
 
                 #if !PUBLIC_API_ONLY
+                Divider()
+
+                HStack(spacing: 8) {
+                    Text("Adaptive display").font(.title3)
+                    ODBadge("Labs", tone: .orange)
+                }
+                Toggle(isOn: Binding(
+                    get: { model.settings.adaptiveBrightnessSyncEnabled },
+                    set: { model.setAdaptiveBrightnessSyncEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Match external brightness to the built-in display")
+                        Text("The monitor\u{2019}s real backlight follows the built-in panel \u{2014} which macOS "
+                             + "already adjusts from the ambient light sensor \u{2014} over DDC. Moving a slider "
+                             + "teaches it your preferred offset and pauses it for a minute. With the lid "
+                             + "closed it follows the schedule below instead. Brightness changed with the "
+                             + "monitor\u{2019}s own buttons can\u{2019}t be seen and may be overridden.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: Binding(
+                    get: { model.settings.adaptiveWarmthEnabled },
+                    set: { model.setAdaptiveWarmthEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Warm the monitor\u{2019}s colours in the evening")
+                        Text("Switches the monitor\u{2019}s hardware colour preset in the evening and back "
+                             + "each morning \u{2014} reducing blue light at the panel level, on top of Night "
+                             + "Shift\u{2019}s software tint. Follows Night Shift\u{2019}s own on/off state when "
+                             + "readable (best effort); otherwise the schedule below decides.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if model.settings.adaptiveWarmthEnabled {
+                    Picker("Evening preset", selection: Binding(
+                        get: { model.settings.adaptiveEveningPreset },
+                        set: { model.setAdaptiveEveningPreset($0) })) {
+                        ForEach([1, 2, 3, 4, 5], id: \.self) { code in
+                            Text(model.presetName(code)).tag(code)
+                        }
+                    }
+                    .fixedSize()
+                }
+                if model.settings.adaptiveBrightnessSyncEnabled || model.settings.adaptiveWarmthEnabled {
+                    HStack(spacing: 16) {
+                        DatePicker("Day starts", selection: minuteBinding(
+                            get: { model.settings.adaptiveDayStartMinute },
+                            set: { model.setAdaptiveSchedule(dayStartMinute: $0,
+                                                             nightStartMinute: model.settings.adaptiveNightStartMinute,
+                                                             transitionMinutes: model.settings.adaptiveTransitionMinutes) }),
+                                   displayedComponents: .hourAndMinute)
+                        DatePicker("Evening starts", selection: minuteBinding(
+                            get: { model.settings.adaptiveNightStartMinute },
+                            set: { model.setAdaptiveSchedule(dayStartMinute: model.settings.adaptiveDayStartMinute,
+                                                             nightStartMinute: $0,
+                                                             transitionMinutes: model.settings.adaptiveTransitionMinutes) }),
+                                   displayedComponents: .hourAndMinute)
+                        Stepper("Ramp: \(model.settings.adaptiveTransitionMinutes) min",
+                                value: Binding(
+                                    get: { model.settings.adaptiveTransitionMinutes },
+                                    set: { model.setAdaptiveSchedule(dayStartMinute: model.settings.adaptiveDayStartMinute,
+                                                                     nightStartMinute: model.settings.adaptiveNightStartMinute,
+                                                                     transitionMinutes: $0) }),
+                                in: 5...120, step: 5)
+                    }
+                    .fixedSize()
+                    if model.settings.adaptiveBrightnessSyncEnabled {
+                        HStack(spacing: 16) {
+                            Stepper("Day brightness: \(Int((model.settings.adaptiveFallbackDayLevel * 100).rounded()))%",
+                                    value: Binding(
+                                        get: { Double(model.settings.adaptiveFallbackDayLevel) },
+                                        set: { model.setAdaptiveFallbackLevels(day: Float($0),
+                                                                               night: model.settings.adaptiveFallbackNightLevel) }),
+                                    in: 0.1...1, step: 0.05)
+                            Stepper("Night brightness: \(Int((model.settings.adaptiveFallbackNightLevel * 100).rounded()))%",
+                                    value: Binding(
+                                        get: { Double(model.settings.adaptiveFallbackNightLevel) },
+                                        set: { model.setAdaptiveFallbackLevels(day: model.settings.adaptiveFallbackDayLevel,
+                                                                               night: Float($0)) }),
+                                    in: 0.1...1, step: 0.05)
+                        }
+                        .fixedSize()
+                    }
+                    Text("Brightness intelligence, best available first: built-in display active \u{2192} "
+                         + "mirror its light-sensor level · built-in off but lid open \u{2192} read the "
+                         + "ambient light sensor directly · lid closed \u{2192} this schedule (day/night "
+                         + "levels, ramped). Warmth uses the schedule whenever Night Shift isn\u{2019}t "
+                         + "readable.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
                 Divider()
 
                 Text("Labs").font(.title3)
