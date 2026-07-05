@@ -5,7 +5,13 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
-## [Unreleased]
+## [0.4.0] — 2026-07-03
+
+Fourth developer preview: Adaptive Display brings macOS-grade brightness and warmth
+intelligence to external monitors over DDC — sync to the built-in panel, read the ambient
+light sensor directly when the built-in is off, or fall back to a schedule, plus Night-Shift-
+following evening warmth. 271 unit tests (up from 240); adaptive paths attended-verified live
+on a Samsung ultrawide end to end.
 
 ### Added
 - **Adaptive Display (Labs, opt-in):** transfer the built-in display's intelligence to external
@@ -20,6 +26,13 @@ change until 1.0.
   turned OFF but the lid open (external-monitor-plus-Mac-keyboard setups), brightness reads the
   **ambient light sensor directly** — true light-driven dimming with no panel to mirror; only a
   closed lid (sensor covered) falls back to the schedule.
+- Configurable day/night brightness levels and schedule times for the fallback curve.
+
+### Fixed
+- Local (non-release) builds now sign with a stable Developer ID identity instead of adhoc, so the
+  macOS Accessibility grant the media-key tap needs survives a rebuild — the hardware brightness
+  keys no longer silently stop working after the app is rebuilt. Notarized release builds were
+  never affected.
 
 ## [0.3.0] — 2026-07-02
 
