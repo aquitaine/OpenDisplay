@@ -9,7 +9,10 @@ set -euo pipefail
 CONFIG="${1:-Debug}"
 cd "$(dirname "$0")/.."
 
-[ -d OpenDisplay.xcodeproj ] || make xcode
+# Always regenerate the (gitignored) project from project.yml so the build reflects the current
+# version/settings — a stale generated project silently ships the OLD MARKETING_VERSION (0.4.0
+# release once shipped a binary still stamped 0.3.0 because the project wasn't regenerated).
+make xcode >/dev/null
 
 echo "Building OpenDisplay.app ($CONFIG)…"
 xcodebuild -project OpenDisplay.xcodeproj -scheme OpenDisplay -configuration "$CONFIG" -destination 'platform=macOS' build >/dev/null
