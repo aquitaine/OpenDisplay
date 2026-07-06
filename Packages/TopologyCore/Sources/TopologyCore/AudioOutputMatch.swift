@@ -41,10 +41,12 @@ public enum AudioOutputDisplayMatcher {
 
         let needle = normalize(deviceName)
         if !needle.isEmpty {
-            // Exact name match wins outright.
-            if let exact = candidates.first(where: { normalize(names[$0.recordID] ?? "") == needle }) {
-                return exact.recordID
-            }
+            // Exact name match — but only when a single display carries that name. Identical monitors
+            // share a product name, so two exact hits are ambiguous (CoreAudio routes to just one of
+            // them and we can't tell which) → don't guess.
+            let exact = candidates.filter { normalize(names[$0.recordID] ?? "") == needle }
+            if exact.count == 1 { return exact[0].recordID }
+            if exact.count > 1 { return nil }
             // Then prefix/contains either way — monitor audio device names usually equal or contain the
             // display's product name (and vice versa). One unambiguous hit only; two → don't guess.
             let contained = candidates.filter { candidate in

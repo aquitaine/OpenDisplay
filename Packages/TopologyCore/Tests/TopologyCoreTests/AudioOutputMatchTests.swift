@@ -71,6 +71,17 @@ final class AudioOutputMatchTests: XCTestCase {
             "two externals with no name match → don't guess")
     }
 
+    func testTwoExternalsSameExactNameIsAmbiguousNil() {
+        // Identical monitors share a product name; CoreAudio routes to only one → can't tell which.
+        let a = obs("a")
+        let b = obs("b")
+        XCTAssertNil(AudioOutputDisplayMatcher.match(
+            deviceName: "Dell U2720Q", transport: .hdmi,
+            displays: [a, b],
+            names: [rid("a"): "Dell U2720Q", rid("b"): "Dell U2720Q"]),
+            "two exact name matches → ambiguous, pass through")
+    }
+
     func testTwoExternalsAmbiguousNameMatchIsNil() {
         // Both display names contain the device name → ambiguous.
         let a = obs("a")

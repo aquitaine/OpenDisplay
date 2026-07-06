@@ -383,6 +383,14 @@ final class AppModel: ObservableObject {
         if let alias = records[observation.recordID]?.alias, !alias.isEmpty {
             return alias
         }
+        return osDisplayName(for: observation)
+    }
+
+    /// The OS-provided display name (the monitor's product name), ignoring any user alias. Used for
+    /// audio-device→display matching: a CoreAudio HDMI/DP output carries the product name, never the
+    /// user's OpenDisplay alias, so matching an aliased display ("Desk") against "Dell U2720Q" must go
+    /// through this rather than `displayName(for:)`.
+    private func osDisplayName(for observation: DisplayObservation) -> String {
         let screenNumberKey = NSDeviceDescriptionKey("NSScreenNumber")
         if let cgID = observation.cgDisplayID,
            let screen = NSScreen.screens.first(where: {
@@ -1977,11 +1985,13 @@ final class AppModel: ObservableObject {
 
     /// The display the system's default audio output is routing through, or nil when the sound isn't
     /// going to a display (built-in speakers, AirPods, USB DAC, aggregate) or can't be matched to one.
-    /// Reads CoreAudio at call time and resolves the device→display via the pure matcher, using the same
-    /// user-facing names shown elsewhere. Volume keys pass through unless this returns a real display.
+    /// Reads CoreAudio at call time and resolves the device→display via the pure matcher, using each
+    /// display's OS/hardware name. Volume keys pass through unless this returns a real display.
     private func audioOutputDisplayID() -> DisplayRecordID? {
         guard let output = AudioOutputInfo.currentDefaultOutput() else { return nil }
-        let names = Dictionary(uniqueKeysWithValues: displays.map { ($0.recordID, displayName(for: $0)) })
+        // Match on the hardware/OS name, not the alias — the CoreAudio device name carries the product
+        // name, so an aliased display would otherwise never match.
+        let names = Dictionary(uniqueKeysWithValues: displays.map { ($0.recordID, osDisplayName(for: $0)) })
         return AudioOutputDisplayMatcher.match(
             deviceName: output.name, transport: output.transport, displays: displays, names: names)
     }
