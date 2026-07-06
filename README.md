@@ -1,33 +1,45 @@
 # OpenDisplay
 
-**Free, open-source display management for macOS.** Control your external monitor's
-**brightness, contrast, volume, colour and input source** over **DDC/CI** — from the menu
-bar, from your keyboard's **brightness keys** (with a native-style on-screen HUD), from
-the `opendisplay` CLI, or from Apple Shortcuts. If you're looking for a free, open
-alternative to commercial display managers like **BetterDisplay** or **Lunar**, or a
-broader take on **MonitorControl**, this is that project.
+**Free, open-source display control for macOS (Apple Silicon).** Drive your external
+monitor's *real* hardware — brightness, volume, colour, input — over **DDC/CI**, from the
+menu bar, your keyboard's **brightness keys**, a CLI, or Shortcuts. Plus **auto-brightness**
+that follows your Mac's ambient light sensor. A free, open alternative to **BetterDisplay**,
+**Lunar**, and **MonitorControl**.
 
-OpenDisplay gives predictable, **safe** control over multiple displays: a stable
-registry and topology model, scenes (desired-state snapshots), brightness/audio/input
-controls over native and DDC routes, and — its defining capability — **safe logical
-display disconnect/reconnect with independent recovery**. You can remove a supported
-display from the active desktop without unplugging it, and always get it back, even if
-the disconnected screen was the one showing the app.
+<!-- HERO: drop a menu-bar / Adaptive-display screenshot here, e.g. ![OpenDisplay](docs/assets/hero.png) -->
 
-> **Status: pre-1.0, in active bring-up.** The product, architecture, and scope are
-> defined in the [PRD](Docs/PRD.md). The platform-independent core (domain models,
-> state machines, scene planner, safety engine, automation schema) ships with unit
-> tests, and the macOS app is functional and verified on Apple Silicon hardware:
-> a menu-bar UI with live **brightness** (built-in via DisplayServices, external via
-> DDC/CI), **hardware controls** (contrast/volume over DDC), **mirroring**, **display
-> modes** (resolution / refresh rate / HiDPI), **software dimming** (gamma, any
-> display), **scenes**, and **safe logical disconnect** with an always-one-display-active
-> guarantee and an automatic fall-back to the built-in panel. The rescue utility, the
-> `opendisplay` CLI, and Shortcuts/Siri intents drive the same safety-checked, audited path.
+## Install
 
-> Functional reference only: BetterDisplay. OpenDisplay is an independent, clean-room
-> project — no BetterDisplay name, assets, copy, UI cloning, or proprietary code. It is
-> not affiliated with or endorsed by BetterDisplay.
+```sh
+brew install --cask aquitaine/tap/opendisplay
+```
+
+…or download the notarized app from the **[latest release](https://github.com/aquitaine/OpenDisplay/releases/latest)**,
+unzip, and drag **OpenDisplay.app** to Applications. It's Developer-ID-signed and notarized,
+so it opens with no Gatekeeper warning. Then click the display glyph in the menu bar.
+
+**Requires** an Apple Silicon Mac on macOS 14 (Sonoma) or later. Runs as a menu-bar item —
+no Dock icon.
+
+## What you get
+
+- **Keyboard brightness keys** move your *external* monitor's real backlight (not a gamma
+  overlay), with a native-style on-screen HUD. ⇧⌥ for fine steps.
+- **Adaptive brightness** — the monitor follows your built-in display's ambient-light level;
+  with the built-in off it reads the light sensor **directly**; lid closed, it uses a
+  schedule. Plus **Night-Shift-following** evening colour warmth.
+- **Full DDC/CI control** — brightness, contrast, volume, input source, colour presets,
+  sharpness, and RGB gain, all driving the panel's own hardware.
+- **Safe by design** — every risky change is checkpointed and reversible, with a standalone
+  **rescue app**, so you can pull a display off your desktop without unplugging it and always
+  get it back — even the screen that was showing the app.
+
+> Pre-1.0 and moving fast. The platform-independent core (state machines, scene planner,
+> safety engine) is unit-tested; hardware paths are verified live on Apple Silicon. See the
+> [CHANGELOG](CHANGELOG.md) for what's new.
+>
+> Independent, clean-room project — not affiliated with or endorsed by BetterDisplay, Lunar,
+> or MonitorControl; no third-party names, assets, copy, UI, or code.
 
 ## Features
 
