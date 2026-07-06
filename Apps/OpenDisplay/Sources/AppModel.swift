@@ -1935,9 +1935,13 @@ final class AppModel: ObservableObject {
     /// others (e.g. volume on the built-in) pass through to macOS.
     @discardableResult
     func handleMediaKey(_ action: MediaKeyAction, fineStep: Bool) -> Bool {
+        // Volume/mute follow the system's default audio output (resolved at keypress); brightness
+        // follows the configured target mode and ignores this.
+        let audioTarget = action.isVolume ? audioOutputDisplayID() : nil
         guard let target = MediaKeyTargetPolicy.target(
             for: action, in: displays, cursor: cursorInCGCoordinates(),
-            mode: settings.mediaKeyTargetMode, volumeCapable: volumeCapableDisplayIDs())
+            mode: settings.mediaKeyTargetMode, volumeCapable: volumeCapableDisplayIDs(),
+            audioTarget: audioTarget)
         else { return false }
         let id = target.recordID
 
@@ -1969,6 +1973,17 @@ final class AppModel: ObservableObject {
         Set(displays
             .filter { $0.displayClass != .builtIn && ddcSupports(HardwareControl.volume.vcp, for: $0) }
             .map(\.recordID))
+    }
+
+    /// The display the system's default audio output is routing through, or nil when the sound isn't
+    /// going to a display (built-in speakers, AirPods, USB DAC, aggregate) or can't be matched to one.
+    /// Reads CoreAudio at call time and resolves the device→display via the pure matcher, using the same
+    /// user-facing names shown elsewhere. Volume keys pass through unless this returns a real display.
+    private func audioOutputDisplayID() -> DisplayRecordID? {
+        guard let output = AudioOutputInfo.currentDefaultOutput() else { return nil }
+        let names = Dictionary(uniqueKeysWithValues: displays.map { ($0.recordID, displayName(for: $0)) })
+        return AudioOutputDisplayMatcher.match(
+            deviceName: output.name, transport: output.transport, displays: displays, names: names)
     }
 
     /// The pointer location in Core Graphics (top-left origin) coordinates, to match `observation.origin`

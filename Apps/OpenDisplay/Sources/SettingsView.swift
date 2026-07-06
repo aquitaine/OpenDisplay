@@ -323,20 +323,24 @@ private struct HealthSection: View {
                 )) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Use the brightness & volume keys to control displays")
-                        Text("Routes the hardware F1/F2 brightness and volume keys to the chosen display "
-                             + "(external brightness/volume over DDC). Needs macOS Accessibility permission "
-                             + "to capture the keys; nothing is requested until you turn this on.")
+                        Text("Routes the hardware brightness keys to the chosen display (external "
+                             + "brightness over DDC). Volume keys follow the current sound output device, "
+                             + "driving that monitor's volume over DDC only when the audio plays through "
+                             + "it. Needs macOS Accessibility permission to capture the keys; nothing is "
+                             + "requested until you turn this on.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 if model.settings.mediaKeyInterceptionEnabled {
-                    Picker("Control the", selection: Binding(
+                    Picker("Brightness keys control the", selection: Binding(
                         get: { model.settings.mediaKeyTargetMode }, set: { model.setMediaKeyTargetMode($0) })) {
                         Text("Display under the pointer").tag(MediaKeyTargetMode.underCursor)
                         Text("Main display").tag(MediaKeyTargetMode.mainDisplay)
                         Text("Built-in display").tag(MediaKeyTargetMode.builtInAlways)
                     }
                     .fixedSize()
+                    Text("Volume keys follow the current sound output device.")
+                        .font(.caption).foregroundStyle(.secondary)
                     if !MediaKeyTap.isAccessibilityTrusted {
                         HStack(spacing: 8) {
                             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
