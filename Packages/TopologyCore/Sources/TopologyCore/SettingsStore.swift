@@ -73,6 +73,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// When on, ask GitHub for the newest release at most once a day and surface it in the menu.
     /// Manual "Check for updates" works regardless. Nothing is ever downloaded automatically.
     public var updateCheckEnabled: Bool
+    /// How the software dimming slider darkens a display (gamma table, overlay window, or both).
+    public var dimmingMethod: DimmingMethod
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
@@ -99,7 +101,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         adaptiveEveningPreset: Int = 4,
         adaptiveDayPresetByDisplay: [String: Int] = [:],
         adaptiveBrightnessOffsetByDisplay: [String: Float] = [:],
-        updateCheckEnabled: Bool = true
+        updateCheckEnabled: Bool = true,
+        dimmingMethod: DimmingMethod = .gamma
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
@@ -126,6 +129,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.adaptiveDayPresetByDisplay = adaptiveDayPresetByDisplay
         self.adaptiveBrightnessOffsetByDisplay = adaptiveBrightnessOffsetByDisplay
         self.updateCheckEnabled = updateCheckEnabled
+        self.dimmingMethod = dimmingMethod
     }
 
     public static let `default` = OpenDisplaySettings()
@@ -154,6 +158,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case adaptiveDayPresetByDisplay
         case adaptiveBrightnessOffsetByDisplay
         case updateCheckEnabled
+        case dimmingMethod
     }
 
     /// Tolerant decoder: every missing key falls back to its default and unknown keys are ignored,
@@ -229,6 +234,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
             ?? defaults.adaptiveBrightnessOffsetByDisplay
         updateCheckEnabled = try container.decodeIfPresent(Bool.self, forKey: .updateCheckEnabled)
             ?? defaults.updateCheckEnabled
+        dimmingMethod = try container.decodeIfPresent(DimmingMethod.self, forKey: .dimmingMethod)
+            ?? defaults.dimmingMethod
     }
 }
 

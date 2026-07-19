@@ -3,6 +3,7 @@ import AutomationSchema
 import DisplayDomain
 import OpenDisplayDesignSystem
 import SwiftUI
+import TopologyCore
 
 /// The per-display detail pane (Settings → Displays). This is where everything that used to crowd the
 /// menu-bar card now lives: resolution & refresh, appearance (rotation/colour), hardware controls,
@@ -346,19 +347,47 @@ private struct DimmingCard: View {
     @EnvironmentObject private var model: AppModel
     let display: DisplayObservation
 
+    /// Gamma alone bottoms out at its floor; the overlay methods can keep going (still capped short
+    /// of full black by the composer).
+    private var range: ClosedRange<Double> {
+        model.settings.dimmingMethod == .gamma ? 0.15...1 : 0...1
+    }
+
+    private var footnote: String {
+        switch model.settings.dimmingMethod {
+        case .gamma:
+            return "Software gamma dim, applied on top of brightness. Works on any display, "
+                + "including below the hardware minimum."
+        case .overlay:
+            return "A black overlay at adjustable opacity, applied on top of brightness. Works on "
+                + "any display; the menu bar stays visible so you can always find your way back."
+        case .combined:
+            return "Gamma dim first, then a black overlay on top \u{2014} darker than either method "
+                + "alone, and still never fully black."
+        }
+    }
+
     var body: some View {
-        ODCard(title: "Dimming",
-               footnote: "Software gamma dim, applied on top of brightness. Works on any display, "
-               + "including below the hardware minimum.") {
+        ODCard(title: "Dimming", footnote: footnote) {
             ODRow("Software dimming") {
                 HStack(spacing: 8) {
                     Slider(value: Binding(get: { Double(model.softwareDim[display.recordID] ?? 1) },
-                                          set: { model.setSoftwareDim(Float($0), for: display) }), in: 0.15...1)
+                                          set: { model.setSoftwareDim(Float($0), for: display) }), in: range)
                         .frame(width: 160)
                     Text("\(Int(((model.softwareDim[display.recordID] ?? 1) * 100).rounded()))%")
                         .font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary)
                         .frame(width: 34, alignment: .trailing)
                 }
+            }
+            ODRow("Method") {
+                Picker("", selection: Binding(
+                    get: { model.settings.dimmingMethod },
+                    set: { model.setDimmingMethod($0) })) {
+                    Text("Gamma").tag(DimmingMethod.gamma)
+                    Text("Overlay").tag(DimmingMethod.overlay)
+                    Text("Combined").tag(DimmingMethod.combined)
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
             }
         }
     }
