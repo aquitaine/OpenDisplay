@@ -19,12 +19,16 @@ final class MediaKeyTargetPolicyTests: XCTestCase {
         )
     }
 
+    private func rid(_ id: String) -> DisplayRecordID { DisplayRecordID(rawValue: id) }
+
+    // MARK: - Brightness (follows the target mode; unaffected by audio routing)
+
     func testUnderCursorPicksDisplayContainingPoint() {
         let builtIn = obs("builtin", main: true, builtIn: true, x: 0, y: 0)
         let ext = obs("ext", x: 1920, y: 0)
         let target = MediaKeyTargetPolicy.target(
             for: .brightnessUp, in: [builtIn, ext],
-            cursor: DisplayOrigin(x: 2000, y: 100), mode: .underCursor, volumeCapable: [])
+            cursor: DisplayOrigin(x: 2000, y: 100), mode: .underCursor, volumeCapable: [], audioTarget: nil)
         XCTAssertEqual(target?.recordID.rawValue, "ext")
     }
 
@@ -33,7 +37,7 @@ final class MediaKeyTargetPolicyTests: XCTestCase {
         let ext = obs("ext", x: 1920, y: 0)
         let target = MediaKeyTargetPolicy.target(
             for: .brightnessUp, in: [builtIn, ext],
-            cursor: DisplayOrigin(x: 99999, y: 99999), mode: .underCursor, volumeCapable: [])
+            cursor: DisplayOrigin(x: 99999, y: 99999), mode: .underCursor, volumeCapable: [], audioTarget: nil)
         XCTAssertEqual(target?.recordID.rawValue, "builtin")
     }
 
@@ -42,7 +46,7 @@ final class MediaKeyTargetPolicyTests: XCTestCase {
         let ext = obs("ext", main: true, x: 1920, y: 0)
         let target = MediaKeyTargetPolicy.target(
             for: .brightnessDown, in: [builtIn, ext],
-            cursor: DisplayOrigin(x: 100, y: 100), mode: .mainDisplay, volumeCapable: [])
+            cursor: DisplayOrigin(x: 100, y: 100), mode: .mainDisplay, volumeCapable: [], audioTarget: nil)
         XCTAssertEqual(target?.recordID.rawValue, "ext")
     }
 
@@ -51,37 +55,71 @@ final class MediaKeyTargetPolicyTests: XCTestCase {
         let ext = obs("ext", main: true, x: 1920, y: 0)
         let target = MediaKeyTargetPolicy.target(
             for: .brightnessUp, in: [builtIn, ext],
-            cursor: DisplayOrigin(x: 2000, y: 100), mode: .builtInAlways, volumeCapable: [])
+            cursor: DisplayOrigin(x: 2000, y: 100), mode: .builtInAlways, volumeCapable: [], audioTarget: nil)
         XCTAssertEqual(target?.recordID.rawValue, "builtin")
     }
 
     func testSingleDisplayResolvesToItself() {
         let only = obs("only", main: true, builtIn: true)
         let target = MediaKeyTargetPolicy.target(
-            for: .brightnessUp, in: [only], cursor: nil, mode: .underCursor, volumeCapable: [])
+            for: .brightnessUp, in: [only], cursor: nil, mode: .underCursor, volumeCapable: [], audioTarget: nil)
         XCTAssertEqual(target?.recordID.rawValue, "only")
     }
 
-    func testVolumeRoutesOnlyToDDCCapableDisplay() {
-        let ext = obs("ext", main: true)
-        let capable = MediaKeyTargetPolicy.target(
-            for: .volumeUp, in: [ext], cursor: nil, mode: .mainDisplay,
-            volumeCapable: [DisplayRecordID(rawValue: "ext")])
-        XCTAssertEqual(capable?.recordID.rawValue, "ext")
+    // MARK: - Volume (follows the default-audio display, ignoring mode/cursor)
+
+    func testVolumeRoutesToAudioTargetRegardlessOfMode() {
+        // Cursor + main are on the built-in, but audio plays through the external → drive the external.
+        let builtIn = obs("builtin", main: true, builtIn: true, x: 0, y: 0)
+        let ext = obs("ext", x: 1920, y: 0)
+        let target = MediaKeyTargetPolicy.target(
+            for: .volumeUp, in: [builtIn, ext],
+            cursor: DisplayOrigin(x: 100, y: 100), mode: .builtInAlways,
+            volumeCapable: [rid("ext")], audioTarget: rid("ext"))
+        XCTAssertEqual(target?.recordID.rawValue, "ext")
     }
 
-    func testVolumeOnNonCapableTargetPassesThrough() {
-        let builtIn = obs("builtin", main: true, builtIn: true)
+    func testVolumeIgnoresMainWhenAudioIsElsewhere() {
+        let mainExt = obs("main-ext", main: true, x: 0, y: 0)
+        let audioExt = obs("audio-ext", x: 1920, y: 0)
         let target = MediaKeyTargetPolicy.target(
-            for: .volumeUp, in: [builtIn], cursor: nil, mode: .mainDisplay, volumeCapable: [])
-        XCTAssertNil(target, "volume key with no DDC-audio-capable target should pass through (nil)")
+            for: .volumeDown, in: [mainExt, audioExt],
+            cursor: DisplayOrigin(x: 50, y: 50), mode: .mainDisplay,
+            volumeCapable: [rid("main-ext"), rid("audio-ext")], audioTarget: rid("audio-ext"))
+        XCTAssertEqual(target?.recordID.rawValue, "audio-ext")
+    }
+
+    func testVolumePassesThroughWhenNoAudioTarget() {
+        // Default output is not a display (e.g. speakers/AirPods) → nil, let macOS handle it.
+        let ext = obs("ext", main: true)
+        let target = MediaKeyTargetPolicy.target(
+            for: .volumeUp, in: [ext], cursor: nil, mode: .mainDisplay,
+            volumeCapable: [rid("ext")], audioTarget: nil)
+        XCTAssertNil(target)
+    }
+
+    func testVolumePassesThroughWhenAudioTargetNotVolumeCapable() {
+        let ext = obs("ext", main: true)
+        let target = MediaKeyTargetPolicy.target(
+            for: .volumeUp, in: [ext], cursor: nil, mode: .mainDisplay,
+            volumeCapable: [], audioTarget: rid("ext"))
+        XCTAssertNil(target, "audio display that can't take DDC volume should pass through")
+    }
+
+    func testVolumePassesThroughWhenAudioTargetInactive() {
+        let ext = obs("ext", active: false)
+        let other = obs("other", main: true)
+        let target = MediaKeyTargetPolicy.target(
+            for: .muteToggle, in: [ext, other], cursor: nil, mode: .mainDisplay,
+            volumeCapable: [rid("ext")], audioTarget: rid("ext"))
+        XCTAssertNil(target, "audio display that is inactive should pass through")
     }
 
     func testInactiveAndEmptyYieldNil() {
         XCTAssertNil(MediaKeyTargetPolicy.target(
-            for: .brightnessUp, in: [], cursor: nil, mode: .mainDisplay, volumeCapable: []))
+            for: .brightnessUp, in: [], cursor: nil, mode: .mainDisplay, volumeCapable: [], audioTarget: nil))
         let off = obs("off", active: false)
         XCTAssertNil(MediaKeyTargetPolicy.target(
-            for: .brightnessUp, in: [off], cursor: nil, mode: .mainDisplay, volumeCapable: []))
+            for: .brightnessUp, in: [off], cursor: nil, mode: .mainDisplay, volumeCapable: [], audioTarget: nil))
     }
 }

@@ -24,7 +24,10 @@ public enum MediaKeyAction: String, Hashable, Sendable, CaseIterable {
         }
     }
 
-    /// True for the volume/mute keys (which route over DDC audio, VCP `0x62`, on capable externals).
+    /// True for the volume/mute keys. Unlike brightness (which follows `MediaKeyTargetMode`), these
+    /// route to whichever display carries the system's *default audio output* — driving that monitor's
+    /// DDC volume (VCP `0x62`) only when the sound is actually coming out of it, and otherwise passing
+    /// through so macOS adjusts the real output device (speakers, AirPods, USB DAC) with its own HUD.
     public var isVolume: Bool {
         switch self {
         case .volumeUp, .volumeDown, .muteToggle: return true
@@ -77,40 +80,45 @@ public enum MediaKeyTargetMode: String, Hashable, Sendable, Codable, CaseIterabl
     case builtInAlways
 }
 
-/// Chooses the display a media key should drive (Batch-3 #1). Pure: given the displays, the cursor,
-/// the target mode, and which displays can take DDC volume, it returns the target observation — or
-/// nil to let the key pass through to macOS (e.g. a volume key with no DDC-audio-capable target, so
-/// the built-in's volume keys behave normally).
+/// Chooses the display a media key should drive (Batch-3 #1). Pure.
+///
+/// Brightness keys follow `mode` (under cursor / main / built-in). Volume/mute keys IGNORE `mode` and
+/// the cursor entirely: they route to `audioTarget` — the display carrying the system's default audio
+/// output — so the keys drive the DDC volume of whatever the sound is actually playing on. Returns nil
+/// to let the key pass through to macOS: for brightness when there's no active display, for volume when
+/// the audio route isn't a display, isn't active, or isn't DDC-volume-capable.
 public enum MediaKeyTargetPolicy {
     public static func target(
         for action: MediaKeyAction,
         in displays: [DisplayObservation],
         cursor: DisplayOrigin?,
         mode: MediaKeyTargetMode,
-        volumeCapable: Set<DisplayRecordID>
+        volumeCapable: Set<DisplayRecordID>,
+        audioTarget: DisplayRecordID?
     ) -> DisplayObservation? {
         let active = displays.filter { $0.isActive }
         guard !active.isEmpty else { return nil }
 
-        let base: DisplayObservation?
-        switch mode {
-        case .underCursor:
-            base = cursor.flatMap { point in active.first { contains($0, point) } }
-                ?? active.first { $0.isMain } ?? active.first
-        case .mainDisplay:
-            base = active.first { $0.isMain } ?? active.first
-        case .builtInAlways:
-            base = active.first { $0.displayClass == .builtIn }
-                ?? active.first { $0.isMain } ?? active.first
+        if action.isVolume {
+            // Volume follows the default audio output device, not the brightness target mode. Drive the
+            // monitor's DDC volume only when the audio routes through an active, DDC-volume-capable
+            // display; otherwise nil so the tap lets the key fall through to the real output device.
+            guard let audioTarget, volumeCapable.contains(audioTarget),
+                  let target = active.first(where: { $0.recordID == audioTarget })
+            else { return nil }
+            return target
         }
 
-        if action.isVolume {
-            // Volume/mute only make sense on a display that reports DDC audio; otherwise return nil so
-            // the tap lets the key fall through to system volume.
-            guard let base, volumeCapable.contains(base.recordID) else { return nil }
-            return base
+        switch mode {
+        case .underCursor:
+            return cursor.flatMap { point in active.first { contains($0, point) } }
+                ?? active.first { $0.isMain } ?? active.first
+        case .mainDisplay:
+            return active.first { $0.isMain } ?? active.first
+        case .builtInAlways:
+            return active.first { $0.displayClass == .builtIn }
+                ?? active.first { $0.isMain } ?? active.first
         }
-        return base
     }
 
     /// True if global point `p` lies within `display`'s bounds (origin + point size).
