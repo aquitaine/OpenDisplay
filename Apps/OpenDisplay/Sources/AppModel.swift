@@ -233,6 +233,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var favorites = FavoriteResolutions()
     private let favoritesStore: FavoritesStore?
 
+    /// Update-check state driving the menu's "Check for updates" row.
+    enum UpdateState: Equatable {
+        case idle
+        case checking
+        case upToDate
+        case available(version: String, url: String)
+    }
+    @Published private(set) var updateState: UpdateState = .idle
+
     /// Live "Keep these settings?" prompt for an arrangement-altering change (Issue 6), or nil when no
     /// revert window is open. Drives the countdown banner; the UI calls `confirmArrangementChange()` /
     /// `revertArrangementChange()`.
@@ -304,6 +313,7 @@ final class AppModel: ObservableObject {
             reconcileAdaptiveLoop()  // start adaptive brightness/warmth if enabled for this topology
             #endif
             autoDisconnectPolicy.seed(externalPresent: hasExternalDisplay)  // don't treat a pre-attached external as an arrival
+            await autoCheckForUpdatesIfDue()
             await writeBaselineCheckpoint()
             if let marker = Self.readRotationMarker() {
                 // A prior experimental rotation didn't confirm — restore that display's safe angle and
@@ -1779,6 +1789,46 @@ final class AppModel: ObservableObject {
         settings.preventDisplaySleepWithExternal = enabled
         persistSettings()
         reconcileDisplaySleepGuard()
+    }
+
+    func setUpdateCheckEnabled(_ enabled: Bool) {
+        guard settings.updateCheckEnabled != enabled else { return }
+        settings.updateCheckEnabled = enabled
+        persistSettings()
+    }
+
+    private static let lastUpdateCheckKey = "OpenDisplayLastUpdateCheck"
+
+    /// Runs the daily background update check when the toggle is on and one is due. Failures stay
+    /// silent (`idle`) — a background check must never surface an error.
+    func autoCheckForUpdatesIfDue() async {
+        guard settings.updateCheckEnabled else { return }
+        let last = UserDefaults.standard.object(forKey: Self.lastUpdateCheckKey) as? Date
+        guard UpdateCheckPolicy.shouldAutoCheck(lastCheck: last, now: Date()) else { return }
+        await checkForUpdates()
+    }
+
+    /// Fetches the latest release and publishes the outcome. An unusable answer (offline,
+    /// rate-limited, bad tag) shows "up to date" only for a user-initiated re-check via the menu —
+    /// here it just returns to `idle`.
+    func checkForUpdates() async {
+        guard updateState != .checking else { return }
+        updateState = .checking
+        let availability = await UpdateChecker.fetchAvailability()
+        UserDefaults.standard.set(Date(), forKey: Self.lastUpdateCheckKey)
+        switch availability {
+        case .available(let version, let url): updateState = .available(version: version, url: url)
+        case .upToDate: updateState = .upToDate
+        case nil: updateState = .idle
+        }
+    }
+
+    /// Opens the newest release's page (menu action for the "Update available" row).
+    func openUpdatePage() {
+        let url: String
+        if case .available(_, let releaseURL) = updateState { url = releaseURL }
+        else { url = UpdateChecker.releasesPage }
+        if let target = URL(string: url) { NSWorkspace.shared.open(target) }
     }
 
     /// Acquire or release the keep-awake assertion for the current (toggle, external-presence) state.

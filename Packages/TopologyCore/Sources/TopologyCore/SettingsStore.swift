@@ -70,6 +70,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// Learned brightness offsets (user's manual tweak relative to the built-in), keyed by
     /// `DisplayRecordID.rawValue`; survives relaunch so sync resumes at the user's preference.
     public var adaptiveBrightnessOffsetByDisplay: [String: Float]
+    /// When on, ask GitHub for the newest release at most once a day and surface it in the menu.
+    /// Manual "Check for updates" works regardless. Nothing is ever downloaded automatically.
+    public var updateCheckEnabled: Bool
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
@@ -95,7 +98,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         adaptiveFallbackNightLevel: Float = 0.35,
         adaptiveEveningPreset: Int = 4,
         adaptiveDayPresetByDisplay: [String: Int] = [:],
-        adaptiveBrightnessOffsetByDisplay: [String: Float] = [:]
+        adaptiveBrightnessOffsetByDisplay: [String: Float] = [:],
+        updateCheckEnabled: Bool = true
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
@@ -121,6 +125,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.adaptiveEveningPreset = adaptiveEveningPreset
         self.adaptiveDayPresetByDisplay = adaptiveDayPresetByDisplay
         self.adaptiveBrightnessOffsetByDisplay = adaptiveBrightnessOffsetByDisplay
+        self.updateCheckEnabled = updateCheckEnabled
     }
 
     public static let `default` = OpenDisplaySettings()
@@ -148,6 +153,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case adaptiveEveningPreset
         case adaptiveDayPresetByDisplay
         case adaptiveBrightnessOffsetByDisplay
+        case updateCheckEnabled
     }
 
     /// Tolerant decoder: every missing key falls back to its default and unknown keys are ignored,
@@ -221,6 +227,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         adaptiveBrightnessOffsetByDisplay = try container
             .decodeIfPresent([String: Float].self, forKey: .adaptiveBrightnessOffsetByDisplay)
             ?? defaults.adaptiveBrightnessOffsetByDisplay
+        updateCheckEnabled = try container.decodeIfPresent(Bool.self, forKey: .updateCheckEnabled)
+            ?? defaults.updateCheckEnabled
     }
 }
 
