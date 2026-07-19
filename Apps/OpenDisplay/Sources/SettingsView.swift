@@ -267,6 +267,18 @@ private struct HealthSection: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                Toggle(isOn: Binding(
+                    get: { model.settings.updateCheckEnabled },
+                    set: { model.setUpdateCheckEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Check for updates automatically")
+                        Text("Asks GitHub for the newest release at most once a day and shows it in the "
+                             + "menu. Nothing is downloaded or installed automatically, and the menu\u{2019}s "
+                             + "manual \u{201C}Check for updates\u{201D} works either way.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
 
                 Divider()
 
