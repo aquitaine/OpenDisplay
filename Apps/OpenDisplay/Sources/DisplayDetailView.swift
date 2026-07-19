@@ -211,8 +211,28 @@ private struct AppearanceCard: View {
     @EnvironmentObject private var model: AppModel
     let display: DisplayObservation
 
+    /// Displayed kelvin for the temperature slider (absent cache = neutral).
+    private var temperature: Float {
+        model.colorTemperature[display.recordID] ?? ColorTemperatureCurve.neutralKelvin
+    }
+
     var body: some View {
         ODCard(title: "Appearance") {
+            ODRow("Colour temperature") {
+                HStack(spacing: 8) {
+                    Image(systemName: "thermometer.sun").font(.system(size: 11)).foregroundStyle(.orange)
+                    Slider(value: Binding(get: { Double(temperature) },
+                                          set: { model.setColorTemperature(Float($0), for: display) }),
+                           in: Double(ColorTemperatureCurve.minKelvin)...Double(ColorTemperatureCurve.maxKelvin))
+                        .frame(width: 140)
+                    Image(systemName: "thermometer.snowflake").font(.system(size: 11)).foregroundStyle(.cyan)
+                    Text(model.colorTemperature[display.recordID] == nil
+                         ? "Native" : "\(Int(temperature)) K")
+                        .font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary)
+                        .frame(width: 48, alignment: .trailing)
+                }
+            }
+            ODDivider()
             ODRow("Rotation") {
                 if model.rotationWritable {
                     HStack(spacing: 6) {
