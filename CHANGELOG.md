@@ -5,6 +5,27 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.5.0] — 2026-07-20
+
+Launch-prep feature release: a real update check, dimming that can go darker than gamma
+alone, and a software colour-temperature control. 321 unit tests (up from 286).
+
+### Added
+- **Check for updates** — the menu row is live (it said "Soon"). A manual check asks GitHub
+  for the newest release and, when one exists, shows its version badge and links to the
+  release page. An automatic check runs at most once a day (default on, toggleable in
+  Settings → Health & Recovery). Nothing is ever downloaded or installed automatically.
+- **Overlay & combined dimming** — the Dimming card gains a method picker. *Gamma* is the
+  original table scale (0.15 floor); *Overlay* is a black, click-through window at
+  adjustable opacity; *Combined* stacks the overlay past the gamma floor — darker than
+  either method alone, and still never fully black. The menu bar (and this app's menu)
+  stay undimmed so the way back is always visible, overlays never appear in screenshots,
+  and they vanish with the app — an overlay dim can't outlive a crash.
+- **Colour temperature** — a warm/cool slider (2700–9300 K) in the Appearance card, applied
+  through the display's gamma table with attenuation-only channel gains (no highlight
+  clipping), snapping back to "Native" near 6500 K. Composes correctly with software
+  dimming and software brightness — each remembers the other.
+
 ## [0.4.1] — 2026-07-19
 
 Patch release: volume media keys now route by where your sound is actually playing.
