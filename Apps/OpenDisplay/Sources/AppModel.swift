@@ -228,6 +228,9 @@ final class AppModel: ObservableObject {
     /// Holds the "prevent display idle-sleep" power assertion while the toggle is on and an external
     /// display is present (Issue 3). Decision logic is the platform-independent `DisplaySleepGuard`.
     private let sleepGuard: DisplaySleepGuard
+    /// Black click-through overlay windows for the overlay/combined dimming methods. Process-bound —
+    /// every overlay disappears with the app, so quit teardown only has the gamma half to restore.
+    private let dimOverlay = DimOverlayController()
 
     /// Pinned favourite resolutions per display (Batch-2 #3), persisted to favorites.json.
     @Published private(set) var favorites = FavoriteResolutions()
@@ -544,11 +547,32 @@ final class AppModel: ObservableObject {
         await refresh()
     }
 
-    /// Sets a display's software (gamma) dim, 0.15...1 where 1 = no dim. Works on any display.
+    /// Sets a display's software dim, 1 (none) down toward 0, expressed through the configured
+    /// dimming method — gamma table, overlay window, or both. Works on any display.
     func setSoftwareDim(_ level: Float, for observation: DisplayObservation) {
         guard let cgID = observation.cgDisplayID else { return }
         softwareDim[observation.recordID] = level
-        observer.setGammaDim(level, for: cgID)
+        applyDim(level: level, cgID: cgID)
+    }
+
+    /// Expresses one dim level through the current method's gamma/overlay split.
+    private func applyDim(level: Float, cgID: CGDirectDisplayID) {
+        let split = DimmingComposer.split(method: settings.dimmingMethod, level: level)
+        observer.setGammaDim(split.gammaLevel, for: cgID)
+        dimOverlay.setAlpha(split.overlayAlpha, for: cgID)
+    }
+
+    /// Switches the dimming method and re-expresses every live dim through it, so the slider
+    /// positions keep meaning the same darkness. (A software-brightness fallback dim migrates too —
+    /// both layers read from the same per-display level.)
+    func setDimmingMethod(_ method: DimmingMethod) {
+        guard settings.dimmingMethod != method else { return }
+        settings.dimmingMethod = method
+        persistSettings()
+        for (id, level) in softwareDim where level < 1.0 && !blackedOut.contains(id) {
+            guard let cgID = displays.first(where: { $0.recordID == id })?.cgDisplayID else { continue }
+            applyDim(level: level, cgID: cgID)
+        }
     }
 
     /// Displays currently blacked out (gamma driven to zero — the panel stays logically connected so it
@@ -567,10 +591,11 @@ final class AppModel: ObservableObject {
         let id = observation.recordID
         if blackedOut.contains(id) {
             blackedOut.remove(id)
-            observer.setGammaDim(softwareDim[id] ?? 1.0, for: cgID)
+            applyDim(level: softwareDim[id] ?? 1.0, cgID: cgID)
         } else {
             blackedOut.insert(id)
             observer.setGammaDim(0.0, for: cgID)
+            dimOverlay.remove(for: cgID)  // gamma 0 is already fully black; restore recreates it
         }
     }
 
@@ -661,6 +686,7 @@ final class AppModel: ObservableObject {
         if !inputSource.keys.allSatisfy(ids.contains) { inputSource = inputSource.filter { ids.contains($0.key) } }
         if !colorProfileName.keys.allSatisfy(ids.contains) { colorProfileName = colorProfileName.filter { ids.contains($0.key) } }
         if !softwareDim.keys.allSatisfy(ids.contains) { softwareDim = softwareDim.filter { ids.contains($0.key) } }
+        dimOverlay.reconcile()  // drop overlays for departed displays, re-fit after mode/layout changes
         if !colorProfileControllable.keys.allSatisfy(ids.contains) { colorProfileControllable = colorProfileControllable.filter { ids.contains($0.key) } }
         if !blackedOut.allSatisfy(ids.contains) { blackedOut = blackedOut.filter(ids.contains) }
         #if !PUBLIC_API_ONLY
@@ -784,6 +810,7 @@ final class AppModel: ObservableObject {
                     // holds the panel at gamma 0 — a background refresh must not light it up.
                     if let dim = softwareDim[id], dim < 1.0, !blackedOut.contains(id) {
                         observer.setGammaDim(1.0, for: cgID)
+                        dimOverlay.remove(for: cgID)
                         softwareDim[id] = nil
                     }
                     brightness[id] = Float(reading.current) / Float(reading.max)
@@ -1093,7 +1120,7 @@ final class AppModel: ObservableObject {
     private func reapplySoftwareDim(for observation: DisplayObservation) {
         guard let cgID = observation.cgDisplayID, !blackedOut.contains(observation.recordID),
               let dim = softwareDim[observation.recordID], dim < 1.0 else { return }
-        observer.setGammaDim(dim, for: cgID)
+        applyDim(level: dim, cgID: cgID)
     }
 
     /// Current rotation of a display in degrees (0/90/180/270), read via public Core Graphics.
@@ -1913,6 +1940,7 @@ final class AppModel: ObservableObject {
         }
         CoreGraphicsProvider.restoreGamma()
         softwareDim.removeAll()
+        dimOverlay.removeAll()
         sleepGuard.releaseAll()
     }
 
