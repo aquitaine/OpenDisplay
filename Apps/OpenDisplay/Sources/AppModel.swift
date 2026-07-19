@@ -552,14 +552,40 @@ final class AppModel: ObservableObject {
     func setSoftwareDim(_ level: Float, for observation: DisplayObservation) {
         guard let cgID = observation.cgDisplayID else { return }
         softwareDim[observation.recordID] = level
-        applyDim(level: level, cgID: cgID)
+        applyDim(level: level, id: observation.recordID, cgID: cgID)
     }
 
     /// Expresses one dim level through the current method's gamma/overlay split.
-    private func applyDim(level: Float, cgID: CGDirectDisplayID) {
+    private func applyDim(level: Float, id: DisplayRecordID, cgID: CGDirectDisplayID) {
         let split = DimmingComposer.split(method: settings.dimmingMethod, level: level)
-        observer.setGammaDim(split.gammaLevel, for: cgID)
+        writeGamma(level: split.gammaLevel, id: id, cgID: cgID)
         dimOverlay.setAlpha(split.overlayAlpha, for: cgID)
+    }
+
+    /// Per-display software colour temperature in kelvin; absent = neutral (calibration untouched).
+    /// Session-only, like the software dim — `restoreGamma` on quit clears both.
+    @Published private(set) var colorTemperature: [DisplayRecordID: Float] = [:]
+
+    /// Sets the display's software colour temperature and re-expresses the gamma slot, which the
+    /// warmth gains share with the dim scale — one formula per display, so both go in together.
+    func setColorTemperature(_ kelvin: Float, for observation: DisplayObservation) {
+        guard let cgID = observation.cgDisplayID else { return }
+        let id = observation.recordID
+        // Snap to native near the neutral point so a slider drag can actually land on "untouched".
+        colorTemperature[id] = abs(kelvin - ColorTemperatureCurve.neutralKelvin) < 100 ? nil : kelvin
+        guard !blackedOut.contains(id) else { return }  // applied when the blackout lifts
+        let split = DimmingComposer.split(method: settings.dimmingMethod, level: softwareDim[id] ?? 1)
+        writeGamma(level: split.gammaLevel, id: id, cgID: cgID)
+    }
+
+    /// The one funnel for gamma writes: dim scale × the display's colour-temperature gains. Direct
+    /// `setGammaDim` calls would silently clear an active warmth — only Black Out (which wants the
+    /// neutral floor) bypasses this.
+    private func writeGamma(level: Float, id: DisplayRecordID, cgID: CGDirectDisplayID) {
+        let gains = ColorTemperatureCurve.gains(
+            kelvin: colorTemperature[id] ?? ColorTemperatureCurve.neutralKelvin)
+        observer.setGammaAdjustment(
+            dim: level, red: gains.red, green: gains.green, blue: gains.blue, for: cgID)
     }
 
     /// Switches the dimming method and re-expresses every live dim through it, so the slider
@@ -571,7 +597,7 @@ final class AppModel: ObservableObject {
         persistSettings()
         for (id, level) in softwareDim where level < 1.0 && !blackedOut.contains(id) {
             guard let cgID = displays.first(where: { $0.recordID == id })?.cgDisplayID else { continue }
-            applyDim(level: level, cgID: cgID)
+            applyDim(level: level, id: id, cgID: cgID)
         }
     }
 
@@ -591,7 +617,7 @@ final class AppModel: ObservableObject {
         let id = observation.recordID
         if blackedOut.contains(id) {
             blackedOut.remove(id)
-            applyDim(level: softwareDim[id] ?? 1.0, cgID: cgID)
+            applyDim(level: softwareDim[id] ?? 1.0, id: id, cgID: cgID)
         } else {
             blackedOut.insert(id)
             observer.setGammaDim(0.0, for: cgID)
@@ -686,6 +712,9 @@ final class AppModel: ObservableObject {
         if !inputSource.keys.allSatisfy(ids.contains) { inputSource = inputSource.filter { ids.contains($0.key) } }
         if !colorProfileName.keys.allSatisfy(ids.contains) { colorProfileName = colorProfileName.filter { ids.contains($0.key) } }
         if !softwareDim.keys.allSatisfy(ids.contains) { softwareDim = softwareDim.filter { ids.contains($0.key) } }
+        if !colorTemperature.keys.allSatisfy(ids.contains) {
+            colorTemperature = colorTemperature.filter { ids.contains($0.key) }
+        }
         dimOverlay.reconcile()  // drop overlays for departed displays, re-fit after mode/layout changes
         if !colorProfileControllable.keys.allSatisfy(ids.contains) { colorProfileControllable = colorProfileControllable.filter { ids.contains($0.key) } }
         if !blackedOut.allSatisfy(ids.contains) { blackedOut = blackedOut.filter(ids.contains) }
@@ -809,7 +838,7 @@ final class AppModel: ObservableObject {
                     // dark no matter where the (now hardware) slider sits. Never while Black Out
                     // holds the panel at gamma 0 — a background refresh must not light it up.
                     if let dim = softwareDim[id], dim < 1.0, !blackedOut.contains(id) {
-                        observer.setGammaDim(1.0, for: cgID)
+                        writeGamma(level: 1.0, id: id, cgID: cgID)  // keep any warmth, clear the dim
                         dimOverlay.remove(for: cgID)
                         softwareDim[id] = nil
                     }
@@ -869,7 +898,7 @@ final class AppModel: ObservableObject {
         case .software:
             let gamma = max(0.15, value)
             softwareDim[id] = gamma
-            observer.setGammaDim(gamma, for: cgID)
+            writeGamma(level: gamma, id: id, cgID: cgID)  // brightness emulation keeps the warmth
         }
         presentOSD(kind: .brightness, value: value, for: observation)  // Batch-3 #4
     }
@@ -1120,7 +1149,7 @@ final class AppModel: ObservableObject {
     private func reapplySoftwareDim(for observation: DisplayObservation) {
         guard let cgID = observation.cgDisplayID, !blackedOut.contains(observation.recordID),
               let dim = softwareDim[observation.recordID], dim < 1.0 else { return }
-        applyDim(level: dim, cgID: cgID)
+        applyDim(level: dim, id: observation.recordID, cgID: cgID)
     }
 
     /// Current rotation of a display in degrees (0/90/180/270), read via public Core Graphics.

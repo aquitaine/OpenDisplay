@@ -163,8 +163,21 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
     /// dim). Works on any display — including externals without DDC and below the hardware minimum.
     /// Floored so the screen can never go fully black. Public Core Graphics (CGSetDisplayTransferByFormula).
     public nonisolated func setGammaDim(_ level: Float, for displayID: CGDirectDisplayID) {
-        let scale = CGGammaValue(max(0.15, min(1, level)))
-        _ = CGSetDisplayTransferByFormula(displayID, 0, scale, 1, 0, scale, 1, 0, scale, 1)
+        setGammaAdjustment(dim: level, red: 1, green: 1, blue: 1, for: displayID)
+    }
+
+    /// The combined software gamma write: one dim scale times per-channel colour-temperature gains
+    /// (each 0...1). Dim and warmth share the single `CGSetDisplayTransferByFormula` slot per
+    /// display, so every gamma-touching path must come through here (or `setGammaDim`, its
+    /// neutral-colour wrapper) — separate calls would silently overwrite each other.
+    public nonisolated func setGammaAdjustment(
+        dim: Float, red: Float, green: Float, blue: Float, for displayID: CGDirectDisplayID
+    ) {
+        let scale = CGGammaValue(max(0.15, min(1, dim)))
+        let r = scale * CGGammaValue(min(max(red, 0), 1))
+        let g = scale * CGGammaValue(min(max(green, 0), 1))
+        let b = scale * CGGammaValue(min(max(blue, 0), 1))
+        _ = CGSetDisplayTransferByFormula(displayID, 0, r, 1, 0, g, 1, 0, b, 1)
     }
 
     /// Restores every display's gamma to its ColorSync calibration, clearing any software dim. Call
