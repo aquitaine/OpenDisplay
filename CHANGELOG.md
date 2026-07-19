@@ -5,6 +5,20 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.4.1] — 2026-07-19
+
+Patch release: volume media keys now route by where your sound is actually playing.
+
+### Fixed
+- **Volume/mute keys follow the current sound output device** instead of the media-key
+  target mode. When macOS sound output is a monitor with DDC audio, the keys drive that
+  monitor's hardware volume (with the OSD); when sound plays anywhere else — built-in
+  speakers, headphones, AirPods — the keys pass through to macOS untouched. Previously,
+  with the target mode pointed at a DDC monitor, the keys could change the monitor's
+  volume while audio played from the Mac's speakers. Brightness keys are unchanged and
+  still follow the configured target mode; the Settings picker is relabelled to make the
+  split explicit.
+
 ## [0.4.0] — 2026-07-03
 
 Fourth developer preview: Adaptive Display brings macOS-grade brightness and warmth
