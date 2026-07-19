@@ -6,7 +6,11 @@ menu bar, your keyboard's **brightness keys**, a CLI, or Shortcuts. Plus **auto-
 that follows your Mac's ambient light sensor. A free, open alternative to **BetterDisplay**,
 **Lunar**, and **MonitorControl**.
 
-<!-- HERO: drop a menu-bar / Adaptive-display screenshot here, e.g. ![OpenDisplay](docs/assets/hero.png) -->
+<p align="center">
+  <img src="Docs/images/menubar.png" width="330" alt="OpenDisplay menu-bar popover: per-display cards with resolution and refresh rate, a managed-offline display with one-click reconnect, and tools" />
+  &nbsp;
+  <img src="Docs/images/settings.png" width="430" alt="OpenDisplay settings: resolution and favourites, rotation and colour, and DDC/CI hardware controls — contrast, input source, and panel power" />
+</p>
 
 ## Install
 
@@ -49,7 +53,9 @@ no Dock icon.
 - **Keyboard media keys** (opt-in): your Mac's hardware brightness keys change the
   external monitor's *real backlight* over DDC — macOS-style steps (⇧⌥ for fine
   control), a native-looking on-screen HUD, and a configurable target (display under
-  cursor / main display / built-in). Volume keys drive DDC audio on monitors with speakers.
+  cursor / main display / built-in). Volume keys follow the **current sound output
+  device**: when sound is routed to a monitor with DDC audio they drive its hardware
+  volume; otherwise they pass through to macOS untouched.
 - **Hardware controls** over DDC/CI: contrast, volume, input source, colour preset,
   **sharpness, and RGB gain** — sliders appear automatically when the monitor answers for
   them, and any other MCCS feature is reachable through the CLI's raw `vcp` command.
