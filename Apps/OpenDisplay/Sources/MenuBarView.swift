@@ -87,16 +87,15 @@ struct MenuBarView: View {
                 ))
                 Divider()
                 Button("About OpenDisplay") {
-                    NSApp.activate(ignoringOtherApps: true)
-                    NSApp.orderFrontStandardAboutPanel(nil)
+                    NotificationCenter.default.post(name: .openDisplayShowAbout, object: nil)
                 }
                 Divider()
                 Button("Quit OpenDisplay") { NSApp.terminate(nil) }
             } label: {
                 Image(systemName: "ellipsis.circle").font(.system(size: 15))
             }
-            .buttonStyle(.plain).foregroundStyle(.secondary)
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .menuStyle(.button).buttonStyle(.plain).foregroundStyle(.secondary)
+            .menuIndicator(.hidden).fixedSize()
             .accessibilityLabel("More options")
         }
         .padding(.horizontal, 6).padding(.top, 2).padding(.bottom, 2)
