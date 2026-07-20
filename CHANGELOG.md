@@ -5,6 +5,23 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.5.1] — 2026-07-21
+
+Patch release: a real About window and keyboard-accessibility fixes in the menu pop-out.
+
+### Added
+- **About window** — "About OpenDisplay" now opens a proper window instead of the bare
+  system panel: the running version and build (selectable, for bug reports), a Check for
+  Updates button, and links to the website, release notes, issue tracker, and license.
+  Built with semantic fonts and VoiceOver labels.
+
+### Fixed
+- **No more surprise focus ring** — the menu pop-out no longer opens with a focus ring
+  already drawn around the gear button. Keyboard focus is still one Tab away.
+- **Tab now cycles forward through the whole pop-out** — forward Tab used to jump from
+  the gear to the ··· button and stop there; only Shift-Tab could reach everything. Both
+  directions now traverse every control and wrap around.
+
 ## [0.5.0] — 2026-07-20
 
 Launch-prep feature release: a real update check, dimming that can go darker than gamma
