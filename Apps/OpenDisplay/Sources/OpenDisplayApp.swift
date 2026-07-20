@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private let popover = NSPopover()
     private var settingsWindow: NSWindow?
+    private var aboutWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         popover.behavior = .transient
@@ -48,6 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // that window, not SwiftUI) so it reliably appears on the screen the user is looking at.
         NotificationCenter.default.addObserver(
             self, selector: #selector(showSettings), name: .openDisplayShowSettings, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(showAbout), name: .openDisplayShowAbout, object: nil)
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.image = NSImage(systemSymbolName: "display", accessibilityDescription: "OpenDisplay")
@@ -62,7 +65,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(sender)
         } else {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
+            guard let window = popover.contentViewController?.view.window else { return }
+            window.makeKey()
+            // AppKit hands initial key focus to the first control (the gear button), which paints an
+            // accent focus ring the moment the pop-out opens. Clear it — Tab still reaches every
+            // control for keyboard users; the ring just doesn't appear until they ask for it.
+            DispatchQueue.main.async { window.makeFirstResponder(nil) }
         }
     }
 
@@ -86,6 +94,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             created.isReleasedWhenClosed = false
             created.setContentSize(NSSize(width: 720, height: 520))
             settingsWindow = created
+            window = created
+        }
+        if let screen = NSScreen.screens.first(where: {
+            NSMouseInRect(NSEvent.mouseLocation, $0.frame, false)
+        }) ?? NSScreen.main {
+            let visible = screen.visibleFrame
+            let size = window.frame.size
+            window.setFrameOrigin(NSPoint(x: visible.midX - size.width / 2,
+                                          y: visible.midY - size.height / 2))
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    /// Opens (or re-focuses) the custom About window (`AboutView`) — same ownership story as
+    /// Settings: an AppKit window the delegate places on the screen the user is looking at.
+    @objc private func showAbout() {
+        dismissPopover()
+        let window: NSWindow
+        if let existing = aboutWindow {
+            window = existing
+        } else {
+            let hosting = NSHostingController(rootView: AboutView().environmentObject(model))
+            let created = NSWindow(contentViewController: hosting)
+            created.title = "About OpenDisplay"
+            created.styleMask = [.titled, .closable]
+            created.isReleasedWhenClosed = false
+            aboutWindow = created
             window = created
         }
         if let screen = NSScreen.screens.first(where: {
@@ -127,5 +163,7 @@ extension Notification.Name {
     /// Posted by the menu's gear / "Displays & arrangement…" rows to ask the delegate to open the
     /// Settings window (AppKit-owned, so it lands on the screen the user clicked from).
     static let openDisplayShowSettings = Notification.Name("OpenDisplayShowSettings")
+    /// Posted by the menu's "About OpenDisplay" item; the delegate owns the About window.
+    static let openDisplayShowAbout = Notification.Name("OpenDisplayShowAbout")
 }
 #endif
