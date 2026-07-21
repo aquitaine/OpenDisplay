@@ -5,10 +5,12 @@ import OpenDisplayDesignSystem
 import SwiftUI
 import TopologyCore
 
-/// Settings window. A sidebar (Displays · Arrange · Scenes · Health & Recovery) replaces the old
-/// 3-tab shell: "Displays" is now a selection list feeding a per-display detail pane (so the topology
-/// isn't duplicated with the menu bar), "Arrange" is promoted out of Scenes into its own item, and
-/// diagnostics/recovery/Labs are unified under "Health & Recovery". See `Docs/InterfaceRedesign.md`.
+/// Settings window. A sidebar (Displays · Arrange · Scenes · Health & Recovery · About) replaces the
+/// old 3-tab shell: "Displays" is now a selection list feeding a per-display detail pane (so the
+/// topology isn't duplicated with the menu bar), "Arrange" is promoted out of Scenes into its own
+/// item, and diagnostics/recovery/Labs are unified under "Health & Recovery". "About" sits directly
+/// below Health & Recovery and mirrors the standalone About window (`AboutView`) as an inline card.
+/// See `Docs/InterfaceRedesign.md`.
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var section: SettingsSection? = .displays
@@ -25,6 +27,7 @@ struct SettingsView: View {
             case .arrange: ArrangeSection()
             case .scenes: ScenesSection()
             case .health: HealthSection()
+            case .about: AboutSection()
             }
         }
         .frame(minWidth: 720, idealWidth: 720, minHeight: 480, idealHeight: 520)
@@ -41,7 +44,7 @@ struct SettingsView: View {
 }
 
 enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
-    case displays, arrange, scenes, health
+    case displays, arrange, scenes, health, about
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -49,6 +52,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .arrange: return "Arrange"
         case .scenes: return "Scenes"
         case .health: return "Health & Recovery"
+        case .about: return "About"
         }
     }
     var icon: String {
@@ -57,6 +61,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .arrange: return "rectangle.3.group"
         case .scenes: return "square.stack.3d.up"
         case .health: return "stethoscope"
+        case .about: return "info.circle"
         }
     }
 }
@@ -497,6 +502,68 @@ private struct HealthSection: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .navigationTitle("Health & Recovery")
+    }
+}
+
+// MARK: - About (mirrors the standalone About window as an inline Settings card)
+
+private struct AboutSection: View {
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: ODSpacing.md) {
+                ODCard {
+                    AppIdentityRow()
+                    ODDivider()
+                    UpdateCheckRow()
+                    ForEach(AboutView.projectLinks) { link in
+                        ODDivider()
+                        ProjectLinkRow(link: link)
+                    }
+                }
+            }
+            .padding(ODSpacing.lg)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .navigationTitle("About")
+    }
+}
+
+/// App icon, name, and running version/build — the same bundle-info source `AboutView` reads.
+private struct AppIdentityRow: View {
+    var body: some View {
+        ODRow("OpenDisplay", secondary: "Version \(AboutView.version) (build \(AboutView.build))") {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable().frame(width: 28, height: 28)
+                .accessibilityHidden(true)
+        } trailing: {
+            EmptyView()
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The check-for-updates affordance, reusing the same `UpdateCheckStatusView` the About window shows.
+private struct UpdateCheckRow: View {
+    var body: some View {
+        ODRow("Updates") {
+            EmptyView()
+        } trailing: {
+            UpdateCheckStatusView()
+        }
+    }
+}
+
+/// One project link (GitHub, release notes, issues, license) shown as a Settings row.
+private struct ProjectLinkRow: View {
+    let link: AboutView.AboutLink
+
+    var body: some View {
+        ODRow(link.title, action: { NSWorkspace.shared.open(link.url) }) {
+            ODGlyphTile(link.systemImage)
+        } trailing: {
+            Image(systemName: "arrow.up.right").foregroundStyle(.secondary)
+        }
+        .accessibilityHint("Opens in your browser")
     }
 }
 
