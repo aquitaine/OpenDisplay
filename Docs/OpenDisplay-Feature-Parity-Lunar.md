@@ -1,0 +1,79 @@
+# OpenDisplay → Lunar Feature Parity Map
+
+An inventory of Lunar's marketed feature surface (lunar.fyi, as of July 2026), mapped against
+OpenDisplay at v0.5.1. Companion to `OpenDisplay-Feature-Parity-Map.md` (the BetterDisplay map);
+same clean-room rules apply.
+
+Source: lunar.fyi feature pages. OpenDisplay status is taken from the CHANGELOG and a repo grep,
+not marketing copy.
+
+> **Clean-room reminder:** this is a map of *capabilities to match*, not Lunar's code, UI, assets,
+> or copy. Everything below should be built from public docs + first principles.
+
+---
+
+## Scorecard
+
+Of the ~18 features Lunar markets: **13 matched · 2 partial · 4 gaps** (plus two niche items we
+deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
+
+## Matched (13)
+
+| Lunar feature | Lunar tier | OpenDisplay |
+|---|---|---|
+| DDC control (brightness/contrast/volume/input/power) | Free | ✅ Plus sharpness, RGB gain, raw VCP via CLI |
+| Apple Silicon hardware control (I²C) | Free | ✅ Core of the app |
+| Brightness keys → external monitors + OSD | Free | ✅ ⇧⌥ fine steps, configurable target (0.3.0) |
+| Volume keys → monitor hardware volume | Free | ✅ Routes by actual sound-output device (0.4.1) |
+| Sync Mode (adaptive brightness from built-in) | **Pro** | ✅ Adaptive Display, free (0.4.0) |
+| Sub-zero dimming (below hardware 0%) | Free | ✅ Gamma/overlay/combined (0.5.0) goes darker than gamma-only |
+| Gamma fallback when DDC fails | Free | ✅ |
+| BlackOut (hotkey display off) | **Pro** | ✅ Plus safe logical disconnect, always-one-display guarantee, rescue app |
+| Auto BlackOut (built-in off when external connects) | **Pro** | ✅ Auto-disconnect built-in, opt-in (0.2.0) |
+| macOS Shortcuts | **Pro** | ✅ Free |
+| CLI | Free | ✅ list/set/ddc/scene/diagnose/recover… |
+| Multi-monitor support | Free | ✅ EDID-identity matching (correct on docks/twin monitors) |
+| Colour warmth | — | ✅ Night-Shift-following (0.4.0) + manual 2700–9300 K slider (0.5.0) — Lunar doesn't headline this |
+
+## Partial (2)
+
+| Lunar feature | Lunar tier | OpenDisplay | Gap |
+|---|---|---|---|
+| Sensor Mode (ambient-light-driven brightness) | **Pro** | 🟡 Reads the built-in ALS directly, even with the panel off (0.4.0) | No *external* wireless/network sensor (Mac-mini-without-a-MacBook case) |
+| Scheduling | **Pro** | 🟡 Schedule-curve fallback inside Adaptive Display (lid closed) | No user-facing Clock Mode (see todo below) |
+
+## Todos (7) — filed as issues, ordered by value-per-effort
+
+1. **FaceLight** — video-call fill light: max DDC brightness + warm-white click-through overlay on
+   one hotkey. Cheapest win: composes the 0.5.0 overlay system with the colour-temperature gains.
+   `low` · area:controls
+2. **Clock Mode** — user-defined brightness/contrast schedules with time / sunrise / noon / sunset
+   anchors, per-anchor offsets, and gradual transitions. The Adaptive Display schedule fallback is
+   the starting point; sunrise/sunset needs a solar-position calculation. `medium` · area:controls
+3. **Location Mode** — brightness follows sun elevation (good for natural-light rooms, no sensor
+   needed). Falls out almost free once the solar math from Clock Mode exists. `low after Clock Mode`
+   · area:controls
+4. **Input-switch hotkeys** — global hotkeys per input source ("jump to HDMI 2"). Rides the
+   configurable global-hotkey registry (Batch 2, Issue 4) and existing VCP 0x60 switching. `low` ·
+   area:controls
+5. **App Presets** — per-app brightness/preset switching (frontmost-app tracking → apply preset,
+   restore on switch away). `medium` · area:automation
+6. **CLI extras** — `lux` (ambient-light readout), `listen` (brightness/config event stream),
+   `lid` (lid state). Thin CLI wrappers over sensor + event code that already exists. `low` ·
+   area:automation
+7. **XDR Brightness unlock** (past 500 nits on XDR panels) — already tracked as the BetterDisplay
+   map's Tier 5 (XDR/HDR upscaling). Highest risk: private APIs, thermal concerns. Last or never.
+   `very high, private API` · area:controls
+
+## Deliberately skipped
+
+- **DisplayLink / network DDC via a Raspberry Pi relay** — very niche, hardware-dependent.
+- **External network ambient light sensors** — same; revisit only if headless-Mac users ask.
+
+## Where OpenDisplay already leads Lunar
+
+- Resolution / refresh / HiDPI switching, mirroring, layout canvas — Lunar doesn't do modes.
+- Scenes, ICC profiles, rotation (Labs).
+- The safety model: audited transactions, checkpoints, auto-revert, always-one-display-active,
+  standalone rescue app.
+- Free and GPL — Lunar's Free tier caps Manual Mode at 100 adjustments/day; OpenDisplay has no caps.
