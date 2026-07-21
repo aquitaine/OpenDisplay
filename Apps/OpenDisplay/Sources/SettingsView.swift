@@ -228,6 +228,10 @@ private struct HealthSection: View {
 
                 Divider()
 
+                InputHotkeySection()
+
+                Divider()
+
                 Text("Behavior").font(.title3)
                 Toggle(isOn: Binding(
                     get: { model.settings.preventDisplaySleepWithExternal },

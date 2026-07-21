@@ -113,7 +113,7 @@ struct OSDHUDView: View {
             Image(systemName: content.glyph)
                 .font(.system(size: 78, weight: .regular))
                 .frame(height: 90)
-            segments(width: 9, height: 9, spacing: 3)
+            levelIndicator(segmentWidth: 9, segmentHeight: 9, segmentSpacing: 3)
         }
         .padding(24)
         .frame(width: 200, height: 200)
@@ -124,11 +124,23 @@ struct OSDHUDView: View {
     private var minimalBody: some View {
         HStack(spacing: 12) {
             Image(systemName: content.glyph).font(.system(size: 18)).frame(width: 22)
-            segments(width: 8, height: 8, spacing: 3)
+            levelIndicator(segmentWidth: 8, segmentHeight: 8, segmentSpacing: 3)
         }
         .padding(.horizontal, 16)
         .frame(width: 240, height: 48)
         .background(.regularMaterial, in: Capsule())
+    }
+
+    /// The segmented level bar for brightness/volume/mute, or the switched-to input's name for
+    /// `.input` — an input has no meaningful 0...1 level, so it gets a text confirmation instead.
+    private func levelIndicator(segmentWidth: CGFloat, segmentHeight: CGFloat, segmentSpacing: CGFloat) -> some View {
+        Group {
+            if content.kind == .input {
+                Text(content.label ?? "").font(.system(size: 15, weight: .medium)).lineLimit(1)
+            } else {
+                segments(width: segmentWidth, height: segmentHeight, spacing: segmentSpacing)
+            }
+        }
     }
 
     private func segments(width: CGFloat, height: CGFloat, spacing: CGFloat) -> some View {

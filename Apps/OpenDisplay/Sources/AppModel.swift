@@ -1085,6 +1085,42 @@ final class AppModel: ObservableObject {
     }
     #endif
 
+    /// Fires an input-switch hotkey (todo 4: Lunar's "Input Hotkeys"). Resolves the bound display by
+    /// its persistent identity, then writes the input code through the same DDC feature/controller
+    /// `setInputSource` uses — hotkeys get no separate switching implementation. No-ops with a failure
+    /// notification when the display is offline or the panel rejects the write; confirms success with
+    /// the OSD, exactly like every other in-app input switch.
+    func switchInputByHotkey(_ entry: InputSwitchBinding) async {
+        #if !PUBLIC_API_ONLY
+        guard let observation = displays.first(where: { $0.recordID == entry.displayID }) else {
+            await notifyInputSwitchFailed(entry.displayID, reason: "is offline")
+            return
+        }
+        guard let controller = await ddcController(for: observation) else {
+            await notifyInputSwitchFailed(entry.displayID, reason: "is offline")
+            return
+        }
+        guard await controller.write(.inputSource, entry.inputCode) else {
+            await notifyInputSwitchFailed(entry.displayID, reason: "rejected the input switch")
+            return
+        }
+        inputSource[entry.displayID] = entry.inputCode
+        presentInputSwitchOSD(inputName: inputName(entry.inputCode), for: observation)
+        #endif
+    }
+
+    #if !PUBLIC_API_ONLY
+    /// Posts the "couldn't switch" notification (Batch-2 #5's delivery path) for a hotkey target
+    /// that's offline or NAKed the write. Named from the persistent registry, not `records`, since an
+    /// offline display has no live observation to read a name from.
+    private func notifyInputSwitchFailed(_ displayID: DisplayRecordID, reason: String) async {
+        let name = await registry?.record(for: displayID)?.displayName ?? displayID.rawValue
+        NotificationDelivery.post(NotificationPolicy.DisplayNotification(
+            title: "Input switch failed", body: "\(name) \(reason)."
+        ))
+    }
+    #endif
+
     /// Sends a DDC power-mode command (VCP 0xD6) to an external display (Issue 1). Best-effort and
     /// fire-and-forget: the panel may NAK or ignore the write, and many displays cannot be woken back
     /// On over DDC once powered Off — none of that is treated as an error. No-op on the built-in and in
@@ -1990,6 +2026,17 @@ final class AppModel: ObservableObject {
             }
             nextID += 1
         }
+        for entry in registry.inputSwitchBindings {
+            if let hotkey = GlobalHotKey(keyCode: entry.binding.keyCode, modifiers: entry.binding.modifiers,
+                                         id: nextID, action: inputSwitchHotkeyHandler(for: entry)) {
+                hotKeys.append(hotkey)
+            }
+            nextID += 1
+        }
+    }
+
+    private func inputSwitchHotkeyHandler(for entry: InputSwitchBinding) -> () -> Void {
+        { [weak self] in Task { await self?.switchInputByHotkey(entry) } }
     }
 
     private func hotkeyHandler(for action: HotkeyAction) -> () -> Void {
@@ -2008,6 +2055,31 @@ final class AppModel: ObservableObject {
         case .brightnessDown:
             return { [weak self] in Task { await self?.adjustMainBrightness(by: -0.1) } }
         }
+    }
+
+    /// Adds (or replaces, matching by id) an input-switch hotkey binding (todo 4), persists it, and
+    /// re-registers every hotkey immediately so the new chord takes effect without a relaunch.
+    func addInputSwitchHotkey(_ entry: InputSwitchBinding) {
+        var updatedRegistry = settings.hotkeyShortcuts
+        updatedRegistry.addInputSwitchBinding(entry)
+        settings.hotkeyShortcuts = updatedRegistry
+        persistSettings()
+        registerHotkeys()
+    }
+
+    /// Removes an input-switch hotkey binding, persists, and re-registers.
+    func removeInputSwitchHotkey(id: String) {
+        var updatedRegistry = settings.hotkeyShortcuts
+        updatedRegistry.removeInputSwitchBinding(id: id)
+        settings.hotkeyShortcuts = updatedRegistry
+        persistSettings()
+        registerHotkeys()
+    }
+
+    /// True if `combo` is already claimed by any registered hotkey (fixed action or input-switch)
+    /// other than `excludingInputSwitchID` — the settings UI's pre-save conflict check.
+    func inputSwitchHotkeyConflicts(_ combo: KeyBinding, excludingInputSwitchID: String?) -> Bool {
+        settings.hotkeyShortcuts.inputSwitchBindingConflicts(combo, excludingInputSwitchID: excludingInputSwitchID)
     }
 
     /// Makes the next active display the main display (wraps around).
@@ -2042,6 +2114,17 @@ final class AppModel: ObservableObject {
                                    displayID: observation.recordID.rawValue,
                                    displayName: displayName(for: observation), source: source)
         }
+    }
+
+    /// Confirms a hotkey-driven input switch with the OSD HUD (todo 4) — the same on-screen
+    /// confirmation brightness/volume changes get, so a KVM-style input jump is never silent. Not
+    /// broadcast: the external/notch HUD schema (Batch-3 #6) only understands the level-based kinds
+    /// today.
+    private func presentInputSwitchOSD(inputName: String, for observation: DisplayObservation) {
+        guard settings.osdEnabled, settings.osdStyle != .external else { return }
+        let content = OSDContent(kind: .input, value: 0, label: inputName)
+        osdHUD.present(content, cgDisplayID: observation.cgDisplayID,
+                       style: settings.osdStyle, position: settings.osdPosition)
     }
 
     /// Handle a captured media key (Batch-3 #1/#3). Resolves the target display via the pure
