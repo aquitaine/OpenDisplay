@@ -118,6 +118,30 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.load().clockScheduleEntries.first, entry)
     }
 
+    func testLocationModeFieldDefaultsOffAndRoundTrips() throws {
+        // Location Mode (Issue #31) reuses `clockManualLocation`; only its own toggle is new.
+        XCTAssertFalse(OpenDisplaySettings.default.adaptiveLocationModeEnabled)
+        let store = SettingsStore(directory: directory)
+        let settings = OpenDisplaySettings(
+            adaptiveLocationModeEnabled: true,
+            clockManualLocation: GeoCoordinate(latitude: 40.7128, longitude: -74.0060))
+        try store.save(settings)
+        let loaded = store.load()
+        XCTAssertTrue(loaded.adaptiveLocationModeEnabled)
+        XCTAssertEqual(loaded.clockManualLocation, settings.clockManualLocation)
+    }
+
+    func testPreLocationModeSettingsFileDecodesToLocationModeDefaultOff() throws {
+        // A settings file from before Location Mode existed loads with the user's values intact and
+        // the new field defaulting off — never a wholesale fall back to .default.
+        let json = #"{"persistencePolicy":"persistentOffline","clockScheduleEnabled":true}"#
+        try Data(json.utf8).write(to: directory.appendingPathComponent("settings.json"))
+        let loaded = SettingsStore(directory: directory).load()
+        XCTAssertEqual(loaded.persistencePolicy, .persistentOffline)
+        XCTAssertTrue(loaded.clockScheduleEnabled)
+        XCTAssertFalse(loaded.adaptiveLocationModeEnabled)
+    }
+
     func testPreClockSettingsFileDecodesToClockDefaults() throws {
         // A settings file from before Clock Mode existed loads with the user's values intact and the
         // clock fields at their defaults — never a wholesale fall back to .default.

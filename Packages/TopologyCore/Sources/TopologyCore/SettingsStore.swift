@@ -76,6 +76,12 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// Learned brightness offsets (user's manual tweak relative to the built-in), keyed by
     /// `DisplayRecordID.rawValue`; survives relaunch so sync resumes at the user's preference.
     public var adaptiveBrightnessOffsetByDisplay: [String: Float]
+    /// Adaptive Display (Labs) — Location Mode (Issue #31): drive brightness from the sun's
+    /// elevation at `clockManualLocation`, a better lid-closed fallback than the flat schedule.
+    /// Ranks below the built-in mirror and the ambient sensor (both outrank it when available) but
+    /// above the flat day/night schedule; Clock Mode's `clockScheduleEnabled` still outranks all of
+    /// them. Default off. No location configured ⇒ degrades to the flat schedule like today.
+    public var adaptiveLocationModeEnabled: Bool
     /// Clock Mode (Issue #30): apply a user-authored brightness schedule to external displays. Each
     /// entry is time- or solar-anchored with a per-anchor minute offset and a transition style.
     /// Default off. When on, Clock Mode's scheduled brightness takes precedence over Adaptive
@@ -84,9 +90,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     public var clockScheduleEnabled: Bool
     /// The Clock Mode schedule entries applied to every external display (shared schedule).
     public var clockScheduleEntries: [ClockScheduleEntry]
-    /// Manual location for solar anchors (sunrise/noon/sunset), the fallback when CoreLocation is
-    /// unavailable. Nil ⇒ solar-anchored entries are skipped until a location is provided; time
-    /// anchors always work.
+    /// Manual location for solar anchors (sunrise/noon/sunset) and for Location Mode's elevation
+    /// curve, the fallback when CoreLocation is unavailable. Nil ⇒ solar-anchored schedule entries
+    /// are skipped and Location Mode degrades to the flat schedule; time anchors always work.
     public var clockManualLocation: GeoCoordinate?
     /// When on, ask GitHub for the newest release at most once a day and surface it in the menu.
     /// Manual "Check for updates" works regardless. Nothing is ever downloaded automatically.
@@ -120,6 +126,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         adaptiveEveningPreset: Int = 4,
         adaptiveDayPresetByDisplay: [String: Int] = [:],
         adaptiveBrightnessOffsetByDisplay: [String: Float] = [:],
+        adaptiveLocationModeEnabled: Bool = false,
         clockScheduleEnabled: Bool = false,
         clockScheduleEntries: [ClockScheduleEntry] = [],
         clockManualLocation: GeoCoordinate? = nil,
@@ -151,6 +158,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.adaptiveEveningPreset = adaptiveEveningPreset
         self.adaptiveDayPresetByDisplay = adaptiveDayPresetByDisplay
         self.adaptiveBrightnessOffsetByDisplay = adaptiveBrightnessOffsetByDisplay
+        self.adaptiveLocationModeEnabled = adaptiveLocationModeEnabled
         self.clockScheduleEnabled = clockScheduleEnabled
         self.clockScheduleEntries = clockScheduleEntries
         self.clockManualLocation = clockManualLocation
@@ -184,6 +192,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case adaptiveEveningPreset
         case adaptiveDayPresetByDisplay
         case adaptiveBrightnessOffsetByDisplay
+        case adaptiveLocationModeEnabled
         case clockScheduleEnabled
         case clockScheduleEntries
         case clockManualLocation
@@ -265,6 +274,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         adaptiveBrightnessOffsetByDisplay = try container
             .decodeIfPresent([String: Float].self, forKey: .adaptiveBrightnessOffsetByDisplay)
             ?? defaults.adaptiveBrightnessOffsetByDisplay
+        adaptiveLocationModeEnabled = try container
+            .decodeIfPresent(Bool.self, forKey: .adaptiveLocationModeEnabled)
+            ?? defaults.adaptiveLocationModeEnabled
         clockScheduleEnabled = try container
             .decodeIfPresent(Bool.self, forKey: .clockScheduleEnabled)
             ?? defaults.clockScheduleEnabled
