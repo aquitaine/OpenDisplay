@@ -213,6 +213,8 @@ final class AppModel: ObservableObject {
     private var adaptiveLoop: Task<Void, Never>?
     private let nightShift = NightShiftStatusReader()
     private let ambientLight = AmbientLightReader()
+    /// Clock Mode (Issue #30): one-shot Core Location helper for the "Use current location" button.
+    private let clockLocationProvider = ClockLocationProvider()
     /// EMA-smoothed ambient lux (α=0.4 toward the newest sample) so a hand shadow over the sensor
     /// doesn't ripple into DDC writes; nil when the sensor is unreadable (lid closed).
     private var ambientLuxEMA: Double?
@@ -1326,7 +1328,9 @@ final class AppModel: ObservableObject {
     /// 5s cadence: one cheap DisplayServices IPC per tick; slower would visibly lag the built-in
     /// panel animating right next to the external, faster buys nothing through the 0.02 hysteresis.
     func reconcileAdaptiveLoop() {
-        let wantRunning = (settings.adaptiveBrightnessSyncEnabled || settings.adaptiveWarmthEnabled)
+        let anyModeOn = settings.adaptiveBrightnessSyncEnabled || settings.adaptiveWarmthEnabled
+            || settings.clockScheduleEnabled
+        let wantRunning = anyModeOn
             && displays.contains { $0.isActive && $0.displayClass != .builtIn }
         if wantRunning {
             guard adaptiveLoop == nil else { return }
@@ -1350,11 +1354,21 @@ final class AppModel: ObservableObject {
         let config = settings.adaptiveConfig
         let syncOn = settings.adaptiveBrightnessSyncEnabled
         let warmthOn = settings.adaptiveWarmthEnabled
-        guard syncOn || warmthOn else { return }
+        let clockOn = settings.clockScheduleEnabled && !settings.clockScheduleEntries.isEmpty
+        guard syncOn || warmthOn || clockOn else { return }
+
+        let now = Date()
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: now)
+        let minuteOfDay = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
+        // Clock Mode target for this tick (nil when disabled, no entries, or only solar entries
+        // with no location). When present it governs brightness AND takes precedence over the
+        // built-in mirror, so the mirror sampling is skipped entirely.
+        let clockTarget = clockOn ? clockScheduleBrightness(atMinute: minuteOfDay, on: now) : nil
+        let mirrorActive = syncOn && clockTarget == nil
 
         let builtInObs = displays.first { $0.displayClass == .builtIn && $0.isActive }
         var builtInSample: Float?
-        if syncOn, let builtIn = builtInObs, let builtInCG = builtIn.cgDisplayID {
+        if mirrorActive, let builtIn = builtInObs, let builtInCG = builtIn.cgDisplayID {
             let control = brightnessControl
             builtInSample = await Task.detached(priority: .utility) { control.brightness(for: builtInCG) }.value
             // Keep the built-in's own slider live too — macOS auto-brightness moves it under us.
@@ -1362,7 +1376,7 @@ final class AppModel: ObservableObject {
                 brightness[builtIn.recordID] = sample
             }
         }
-        if syncOn, builtInObs == nil {
+        if mirrorActive, builtInObs == nil {
             // Built-in off: read the ambient light sensor directly (lid-open-display-off setups —
             // the sensor keeps reporting even though macOS drives no panel from it). EMA-smoothed;
             // an unreadable sensor (lid actually closed) clears it → schedule mode.
@@ -1380,9 +1394,6 @@ final class AppModel: ObservableObject {
             let reader = nightShift
             nightShiftActive = await Task.detached(priority: .utility) { reader.isActive() }.value
         }
-        let now = Date()
-        let comps = Calendar.current.dateComponents([.hour, .minute], from: now)
-        let minuteOfDay = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
 
         for observation in displays where observation.displayClass != .builtIn && observation.isActive {
             guard let cgID = observation.cgDisplayID else { continue }
@@ -1402,7 +1413,8 @@ final class AppModel: ObservableObject {
                 currentPreset: colorPreset[id],
                 dayPreset: settings.adaptiveDayPresetByDisplay[id.rawValue],
                 nightShiftActive: nightShiftActive,
-                brightnessSyncEnabled: syncOn, warmthEnabled: warmthOn)
+                brightnessSyncEnabled: mirrorActive || clockTarget != nil, warmthEnabled: warmthOn,
+                scheduleOverride: clockTarget)
             let decision = AdaptiveDisplayPolicy.evaluate(input, config: config, state: state)
 
             if let dayPreset = decision.rememberDayPreset {
@@ -1428,6 +1440,17 @@ final class AppModel: ObservableObject {
     private func seededAdaptiveState(for id: DisplayRecordID) -> AdaptiveDisplayPolicy.DisplayState {
         AdaptiveDisplayPolicy.DisplayState(
             brightnessOffset: settings.adaptiveBrightnessOffsetByDisplay[id.rawValue] ?? 0)
+    }
+
+    /// The Clock Mode brightness owed at `minute` on `date`, resolving solar anchors from the
+    /// configured location. Nil when the schedule can't govern (no entries, or only solar anchors
+    /// with no location) — Clock Mode then does nothing and any other mode governs.
+    private func clockScheduleBrightness(atMinute minute: Int, on date: Date) -> Float? {
+        let solar = settings.clockManualLocation.map {
+            SolarCalculator.events(on: date, in: .current, coordinate: $0)
+        }
+        return ClockSchedulePolicy.brightness(atMinute: minute,
+                                              entries: settings.clockScheduleEntries, solar: solar)
     }
 
     /// OSD-silent adaptive brightness apply: cache + coalesced DDC write, NO OSD flash and NO
@@ -1477,20 +1500,24 @@ final class AppModel: ObservableObject {
     /// The manual-brightness note for `setBrightness`'s hardware branch (user slider/media keys on
     /// a synced external): learn the offset in sync mode, anchor the adoption in schedule mode.
     private func noteManualBrightnessForAdaptive(_ value: Float, id: DisplayRecordID) {
-        guard settings.adaptiveBrightnessSyncEnabled else { return }
-        let builtIn = displays.first { $0.displayClass == .builtIn && $0.isActive }
-        let comps = Calendar.current.dateComponents([.hour, .minute], from: Date())
+        let clockOn = settings.clockScheduleEnabled && !settings.clockScheduleEntries.isEmpty
+        guard settings.adaptiveBrightnessSyncEnabled || clockOn else { return }
+        let now = Date()
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: now)
         let minute = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
-        // The offset-teaching reference is whatever adaptive is currently following: the built-in's
-        // level in sync mode, the light-sensor curve in ambient mode, nothing in schedule mode.
-        let reference: Float? = builtIn.flatMap { brightness[$0.recordID] }
-            ?? ambientLuxEMA.map(AdaptiveDisplayPolicy.ambientLevel(forLux:))
+        let clockTarget = clockOn ? clockScheduleBrightness(atMinute: minute, on: now) : nil
+        // The offset-teaching reference is whatever brightness is currently following: nothing when
+        // Clock Mode governs (schedule-like adoption), else the built-in's level in sync mode or the
+        // light-sensor curve in ambient mode. The adoption anchor is the governing schedule target.
+        let builtIn = displays.first { $0.displayClass == .builtIn && $0.isActive }
+        let reference: Float? = clockTarget != nil
+            ? nil
+            : builtIn.flatMap { brightness[$0.recordID] }
+                ?? ambientLuxEMA.map(AdaptiveDisplayPolicy.ambientLevel(forLux:))
+        let scheduleTarget = clockTarget
+            ?? AdaptiveDisplayPolicy.scheduleLevel(atMinute: minute, config: settings.adaptiveConfig)
         adaptiveStates[id] = AdaptiveDisplayPolicy.noteManualBrightness(
-            value,
-            reference: reference,
-            scheduleTarget: AdaptiveDisplayPolicy.scheduleLevel(atMinute: minute,
-                                                                config: settings.adaptiveConfig),
-            at: Date(),
+            value, reference: reference, scheduleTarget: scheduleTarget, at: now,
             state: adaptiveStates[id] ?? seededAdaptiveState(for: id))
     }
 
@@ -1498,12 +1525,21 @@ final class AppModel: ObservableObject {
     /// this display (built-in, features off, or no hardware brightness).
     func adaptiveStatusLine(for observation: DisplayObservation) -> String? {
         guard observation.displayClass != .builtIn,
-              settings.adaptiveBrightnessSyncEnabled || settings.adaptiveWarmthEnabled,
+              settings.adaptiveBrightnessSyncEnabled || settings.adaptiveWarmthEnabled
+                || settings.clockScheduleEnabled,
               brightnessMethod[observation.recordID] == .hardware else { return nil }
         let id = observation.recordID
         let state = adaptiveStates[id]
         var parts: [String] = []
-        if settings.adaptiveBrightnessSyncEnabled {
+        let now = Date()
+        let comps = Calendar.current.dateComponents([.hour, .minute], from: now)
+        let minuteOfDay = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
+        let clockOn = settings.clockScheduleEnabled && !settings.clockScheduleEntries.isEmpty
+        let clockTarget = clockOn ? clockScheduleBrightness(atMinute: minuteOfDay, on: now) : nil
+        if let clockTarget {
+            // Clock Mode governs brightness and outranks the adaptive mirror.
+            parts.append("clock \(Int((clockTarget * 100).rounded()))%")
+        } else if settings.adaptiveBrightnessSyncEnabled {
             if let manualAt = state?.manualBrightnessAt,
                Date() < manualAt.addingTimeInterval(settings.adaptiveConfig.manualCooldown) {
                 parts.append("brightness paused (manual)")
@@ -1520,7 +1556,10 @@ final class AppModel: ObservableObject {
         if settings.adaptiveWarmthEnabled {
             parts.append(state?.warmthPhase == .evening ? "evening warmth active" : "day colour")
         }
-        return "Adaptive: " + parts.joined(separator: " · ")
+        guard !parts.isEmpty else { return nil }
+        let usesAdaptive = settings.adaptiveBrightnessSyncEnabled || settings.adaptiveWarmthEnabled
+        let prefix = usesAdaptive ? "Adaptive: " : "Clock Mode: "
+        return prefix + parts.joined(separator: " · ")
     }
 
     func setAdaptiveBrightnessSyncEnabled(_ enabled: Bool) {
@@ -1565,6 +1604,50 @@ final class AppModel: ObservableObject {
         settings.adaptiveNightStartMinute = night
         settings.adaptiveTransitionMinutes = ramp
         persistSettings()
+    }
+
+    // MARK: - Clock Mode (Issue #30): user-authored brightness schedule
+
+    func setClockScheduleEnabled(_ enabled: Bool) {
+        guard settings.clockScheduleEnabled != enabled else { return }
+        settings.clockScheduleEnabled = enabled
+        persistSettings()
+        reconcileAdaptiveLoop()
+    }
+
+    /// Inserts a new schedule entry or replaces the one with a matching id, then re-sorts by fire
+    /// time for a stable list order in the editor.
+    func upsertClockScheduleEntry(_ entry: ClockScheduleEntry) {
+        if let index = settings.clockScheduleEntries.firstIndex(where: { $0.id == entry.id }) {
+            settings.clockScheduleEntries[index] = entry
+        } else {
+            settings.clockScheduleEntries.append(entry)
+        }
+        settings.clockScheduleEntries.sort { $0.timeMinute < $1.timeMinute }
+        persistSettings()
+        reconcileAdaptiveLoop()
+    }
+
+    func deleteClockScheduleEntry(_ entry: ClockScheduleEntry) {
+        guard let index = settings.clockScheduleEntries.firstIndex(where: { $0.id == entry.id }) else { return }
+        settings.clockScheduleEntries.remove(at: index)
+        persistSettings()
+        reconcileAdaptiveLoop()
+    }
+
+    func setClockManualLocation(_ coordinate: GeoCoordinate?) {
+        guard settings.clockManualLocation != coordinate else { return }
+        settings.clockManualLocation = coordinate
+        persistSettings()
+    }
+
+    /// Best-effort one-shot Core Location fetch that fills the manual latitude/longitude. On denial
+    /// or failure nothing changes and the user enters coordinates by hand.
+    func useCurrentLocationForClock() {
+        clockLocationProvider.requestOnce { [weak self] coordinate in
+            guard let self, let coordinate else { return }
+            self.setClockManualLocation(coordinate)
+        }
     }
     #endif
 

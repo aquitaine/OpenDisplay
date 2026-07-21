@@ -19,6 +19,11 @@
 	<!-- Menu-bar agent: no Dock icon (PRD UX-001). -->
 	<key>LSUIElement</key>
 	<true/>
+	<!-- Clock Mode (Issue 30): optional one-shot location lookup to auto-fill the sunrise/sunset
+	     latitude & longitude. Only requested when the user taps "Use current location"; a manual
+	     entry is always available instead. -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>OpenDisplay uses your location once to calculate local sunrise, noon, and sunset times for Clock Mode brightness schedules. You can also enter your coordinates manually.</string>
 	<!-- opendisplay:// URL-scheme automation (Issue 4). Routes onto the same safety-checked,
 	     audited CommandGateway as the CLI and App Intents; only non-destructive recovery
 	     commands auto-run, arrangement-altering ones require in-app confirmation. -->

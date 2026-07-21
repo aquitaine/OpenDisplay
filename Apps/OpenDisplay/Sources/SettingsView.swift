@@ -464,6 +464,9 @@ private struct HealthSection: View {
                 }
 
                 Divider()
+                ClockModeCard()
+
+                Divider()
 
                 Text("Labs").font(.title3)
                 Toggle(isOn: $model.experimentalRotationEnabled) {
@@ -576,6 +579,194 @@ private struct DisplayTile: View {
             )
     }
 }
+
+#if !PUBLIC_API_ONLY
+// MARK: - Clock Mode (Issue 30)
+
+/// Clock Mode editor: enable the schedule, manage time/solar-anchored brightness points, and set the
+/// location that solar anchors resolve against. Precedence note is shown inline so the user knows
+/// Clock Mode outranks Adaptive brightness sync when both are on.
+private struct ClockModeCard: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: ODSpacing.sm) {
+            Text("Clock Mode").font(.title3)
+            Toggle(isOn: Binding(
+                get: { model.settings.clockScheduleEnabled },
+                set: { model.setClockScheduleEnabled($0) }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Follow a brightness schedule")
+                    Text("Sets external-display brightness at times you choose \u{2014} fixed clock "
+                         + "times or solar anchors (sunrise, solar noon, sunset) with a per-anchor "
+                         + "offset \u{2014} gliding between points. Changes are silent (no HUD). When "
+                         + "Adaptive brightness sync is also on, this explicit schedule wins.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if model.settings.clockScheduleEnabled {
+                ClockScheduleList()
+                ClockLocationRow()
+            }
+        }
+    }
+}
+
+private struct ClockScheduleList: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: ODSpacing.sm) {
+            if model.settings.clockScheduleEntries.isEmpty {
+                Text("No schedule points yet. Add one below \u{2014} for example \u{201C}70% thirty "
+                     + "minutes before sunrise\u{201D}.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ODCard {
+                    ForEach(Array(model.settings.clockScheduleEntries.enumerated()),
+                            id: \.element.id) { index, entry in
+                        if index > 0 { ODDivider() }
+                        ClockScheduleEntryRow(entry: entry)
+                    }
+                }
+            }
+            Button {
+                model.upsertClockScheduleEntry(
+                    ClockScheduleEntry(anchor: .time, timeMinute: 8 * 60, brightness: 0.7,
+                                       transition: .ramp))
+            } label: {
+                Label("Add schedule point", systemImage: "plus")
+            }
+            .controlSize(.small)
+        }
+    }
+}
+
+private struct ClockScheduleEntryRow: View {
+    @EnvironmentObject private var model: AppModel
+    let entry: ClockScheduleEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: ODSpacing.sm) {
+                Picker("", selection: anchorBinding) {
+                    Text("Time").tag(ScheduleAnchor.time)
+                    Text("Sunrise").tag(ScheduleAnchor.sunrise)
+                    Text("Solar noon").tag(ScheduleAnchor.solarNoon)
+                    Text("Sunset").tag(ScheduleAnchor.sunset)
+                }
+                .labelsHidden().fixedSize()
+
+                if entry.anchor == .time {
+                    DatePicker("", selection: hourMinuteBinding, displayedComponents: .hourAndMinute)
+                        .labelsHidden().fixedSize()
+                } else {
+                    Stepper(offsetLabel, value: offsetBinding, in: -180...180, step: 5)
+                        .fixedSize()
+                }
+                Spacer()
+                Button(role: .destructive) {
+                    model.deleteClockScheduleEntry(entry)
+                } label: { Image(systemName: "trash") }
+                    .buttonStyle(.borderless)
+            }
+            HStack(spacing: ODSpacing.sm) {
+                Stepper("Brightness: \(Int((entry.brightness * 100).rounded()))%",
+                        value: brightnessBinding, in: 0...1, step: 0.05)
+                    .fixedSize()
+                Picker("", selection: transitionBinding) {
+                    Text("Instant").tag(ScheduleTransition.instant)
+                    Text("30-min ramp").tag(ScheduleTransition.ramp)
+                    Text("Continuous").tag(ScheduleTransition.continuous)
+                }
+                .labelsHidden().fixedSize()
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var offsetLabel: String {
+        let minutes = entry.offsetMinutes
+        if minutes == 0 { return "at the anchor" }
+        return minutes < 0 ? "\(-minutes) min before" : "\(minutes) min after"
+    }
+
+    private var anchorBinding: Binding<ScheduleAnchor> {
+        Binding(get: { entry.anchor }, set: { updated in updating { $0.anchor = updated } })
+    }
+    private var transitionBinding: Binding<ScheduleTransition> {
+        Binding(get: { entry.transition }, set: { updated in updating { $0.transition = updated } })
+    }
+    private var offsetBinding: Binding<Int> {
+        Binding(get: { entry.offsetMinutes }, set: { updated in updating { $0.offsetMinutes = updated } })
+    }
+    private var brightnessBinding: Binding<Double> {
+        Binding(get: { Double(entry.brightness) },
+                set: { updated in updating { $0.brightness = Float(updated) } })
+    }
+    private var hourMinuteBinding: Binding<Date> {
+        Binding(
+            get: {
+                let base = Calendar.current.startOfDay(for: Date(timeIntervalSinceReferenceDate: 0))
+                return Calendar.current.date(byAdding: .minute, value: entry.timeMinute, to: base) ?? base
+            },
+            set: { date in
+                let comps = Calendar.current.dateComponents([.hour, .minute], from: date)
+                updating { $0.timeMinute = (comps.hour ?? 0) * 60 + (comps.minute ?? 0) }
+            })
+    }
+
+    private func updating(_ transform: (inout ClockScheduleEntry) -> Void) {
+        var copy = entry
+        transform(&copy)
+        model.upsertClockScheduleEntry(copy)
+    }
+}
+
+private struct ClockLocationRow: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: ODSpacing.sm) {
+                TextField("Latitude", value: latitudeBinding, format: .number)
+                    .textFieldStyle(.roundedBorder).frame(width: 100)
+                TextField("Longitude", value: longitudeBinding, format: .number)
+                    .textFieldStyle(.roundedBorder).frame(width: 100)
+                Button("Use current location") { model.useCurrentLocationForClock() }
+                    .controlSize(.small)
+            }
+            Text(locationCaption).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var locationCaption: String {
+        if model.settings.clockManualLocation == nil {
+            return "Sunrise / noon / sunset anchors need a location. Time anchors work without one."
+        }
+        return "Solar anchors use this location. \u{201C}Use current location\u{201D} fills it "
+            + "from Core Location."
+    }
+
+    private var latitudeBinding: Binding<Double> {
+        Binding(
+            get: { model.settings.clockManualLocation?.latitude ?? 0 },
+            set: { newLatitude in
+                let longitude = model.settings.clockManualLocation?.longitude ?? 0
+                model.setClockManualLocation(GeoCoordinate(latitude: newLatitude, longitude: longitude))
+            })
+    }
+    private var longitudeBinding: Binding<Double> {
+        Binding(
+            get: { model.settings.clockManualLocation?.longitude ?? 0 },
+            set: { newLongitude in
+                let latitude = model.settings.clockManualLocation?.latitude ?? 0
+                model.setClockManualLocation(GeoCoordinate(latitude: latitude, longitude: newLongitude))
+            })
+    }
+}
+#endif
 
 /// Opens System Settings → Privacy & Security → Accessibility so the user can grant the permission the
 /// media-key tap needs (Batch-3 #3/#5).

@@ -76,6 +76,18 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// Learned brightness offsets (user's manual tweak relative to the built-in), keyed by
     /// `DisplayRecordID.rawValue`; survives relaunch so sync resumes at the user's preference.
     public var adaptiveBrightnessOffsetByDisplay: [String: Float]
+    /// Clock Mode (Issue #30): apply a user-authored brightness schedule to external displays. Each
+    /// entry is time- or solar-anchored with a per-anchor minute offset and a transition style.
+    /// Default off. When on, Clock Mode's scheduled brightness takes precedence over Adaptive
+    /// Display's built-in mirror (an explicit schedule outranks the inferred sync); Adaptive warmth
+    /// is orthogonal and unaffected.
+    public var clockScheduleEnabled: Bool
+    /// The Clock Mode schedule entries applied to every external display (shared schedule).
+    public var clockScheduleEntries: [ClockScheduleEntry]
+    /// Manual location for solar anchors (sunrise/noon/sunset), the fallback when CoreLocation is
+    /// unavailable. Nil ⇒ solar-anchored entries are skipped until a location is provided; time
+    /// anchors always work.
+    public var clockManualLocation: GeoCoordinate?
     /// When on, ask GitHub for the newest release at most once a day and surface it in the menu.
     /// Manual "Check for updates" works regardless. Nothing is ever downloaded automatically.
     public var updateCheckEnabled: Bool
@@ -108,6 +120,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         adaptiveEveningPreset: Int = 4,
         adaptiveDayPresetByDisplay: [String: Int] = [:],
         adaptiveBrightnessOffsetByDisplay: [String: Float] = [:],
+        clockScheduleEnabled: Bool = false,
+        clockScheduleEntries: [ClockScheduleEntry] = [],
+        clockManualLocation: GeoCoordinate? = nil,
         updateCheckEnabled: Bool = true,
         dimmingMethod: DimmingMethod = .gamma
     ) {
@@ -136,6 +151,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.adaptiveEveningPreset = adaptiveEveningPreset
         self.adaptiveDayPresetByDisplay = adaptiveDayPresetByDisplay
         self.adaptiveBrightnessOffsetByDisplay = adaptiveBrightnessOffsetByDisplay
+        self.clockScheduleEnabled = clockScheduleEnabled
+        self.clockScheduleEntries = clockScheduleEntries
+        self.clockManualLocation = clockManualLocation
         self.updateCheckEnabled = updateCheckEnabled
         self.dimmingMethod = dimmingMethod
     }
@@ -166,6 +184,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case adaptiveEveningPreset
         case adaptiveDayPresetByDisplay
         case adaptiveBrightnessOffsetByDisplay
+        case clockScheduleEnabled
+        case clockScheduleEntries
+        case clockManualLocation
         case updateCheckEnabled
         case dimmingMethod
     }
@@ -244,6 +265,15 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         adaptiveBrightnessOffsetByDisplay = try container
             .decodeIfPresent([String: Float].self, forKey: .adaptiveBrightnessOffsetByDisplay)
             ?? defaults.adaptiveBrightnessOffsetByDisplay
+        clockScheduleEnabled = try container
+            .decodeIfPresent(Bool.self, forKey: .clockScheduleEnabled)
+            ?? defaults.clockScheduleEnabled
+        clockScheduleEntries = try container
+            .decodeIfPresent([ClockScheduleEntry].self, forKey: .clockScheduleEntries)
+            ?? defaults.clockScheduleEntries
+        clockManualLocation = try container
+            .decodeIfPresent(GeoCoordinate.self, forKey: .clockManualLocation)
+            ?? defaults.clockManualLocation
         updateCheckEnabled = try container.decodeIfPresent(Bool.self, forKey: .updateCheckEnabled)
             ?? defaults.updateCheckEnabled
         dimmingMethod = try container.decodeIfPresent(DimmingMethod.self, forKey: .dimmingMethod)

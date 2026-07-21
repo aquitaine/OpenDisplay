@@ -12,12 +12,12 @@ final class AdaptiveDisplayPolicyTests: XCTestCase {
                        minute: Int, builtInPresent: Bool = true, builtIn: Float? = nil,
                        lux: Double? = nil, asleep: Bool = false, currentPreset: Int? = nil,
                        dayPreset: Int? = nil, nightShift: Bool? = nil, sync: Bool = false,
-                       warmth: Bool = false) -> Policy.Input {
+                       warmth: Bool = false, scheduleOverride: Float? = nil) -> Policy.Input {
         Policy.Input(now: now, minuteOfDay: minute, builtInPresent: builtInPresent,
                      builtInBrightness: builtIn, ambientLux: lux, displayAsleep: asleep,
                      currentPreset: currentPreset, dayPreset: dayPreset,
                      nightShiftActive: nightShift, brightnessSyncEnabled: sync,
-                     warmthEnabled: warmth)
+                     warmthEnabled: warmth, scheduleOverride: scheduleOverride)
     }
 
     // MARK: - Schedule curve
@@ -240,6 +240,45 @@ final class AdaptiveDisplayPolicyTests: XCTestCase {
             input(now: manualAt.addingTimeInterval(30000), minute: 1150, builtInPresent: false, sync: true),
             config: config, state: state)
         XCTAssertNotNil(decision.brightnessWrite)
+        XCTAssertNil(decision.state.manualScheduleAnchor)
+    }
+
+    // MARK: - Clock Mode precedence (scheduleOverride)
+
+    func testScheduleOverrideOutranksBuiltInMirror() {
+        // Clock Mode governs (override 0.45) even though the built-in is present and bright — the
+        // explicit user schedule wins over the inferred mirror.
+        let decision = Policy.evaluate(
+            input(minute: noon, builtIn: 0.9, sync: true, scheduleOverride: 0.45),
+            config: config, state: Policy.DisplayState())
+        XCTAssertEqual(decision.brightnessWrite ?? -1, 0.45, accuracy: 0.0001)
+    }
+
+    func testScheduleOverrideOutranksAmbientCurve() {
+        let decision = Policy.evaluate(
+            input(minute: noon, builtInPresent: false, lux: 5000, sync: true, scheduleOverride: 0.6),
+            config: config, state: Policy.DisplayState())
+        XCTAssertEqual(decision.brightnessWrite ?? -1, 0.6, accuracy: 0.0001)
+    }
+
+    func testScheduleOverrideHonoursManualAdoptionAnchor() {
+        let manualAt = Date(timeIntervalSinceReferenceDate: 0)
+        // User dials to 0.5 while Clock Mode target is 0.8 (schedule-mode adoption: no reference).
+        let state = Policy.noteManualBrightness(0.5, reference: nil, scheduleTarget: 0.8,
+                                                at: manualAt, state: Policy.DisplayState())
+        // Long after cooldown, the Clock target is still 0.8 → hold the user's level, no write.
+        var decision = Policy.evaluate(
+            input(now: manualAt.addingTimeInterval(7200), minute: noon, builtInPresent: false,
+                  sync: true, scheduleOverride: 0.8),
+            config: config, state: state)
+        XCTAssertNil(decision.brightnessWrite)
+
+        // The Clock target moves to 0.3 → adoption ends and adaptive resumes writing.
+        decision = Policy.evaluate(
+            input(now: manualAt.addingTimeInterval(7300), minute: noon, builtInPresent: false,
+                  sync: true, scheduleOverride: 0.3),
+            config: config, state: decision.state)
+        XCTAssertEqual(decision.brightnessWrite ?? -1, 0.3, accuracy: 0.0001)
         XCTAssertNil(decision.state.manualScheduleAnchor)
     }
 

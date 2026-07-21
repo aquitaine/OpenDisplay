@@ -14,10 +14,10 @@ not marketing copy.
 
 ## Scorecard
 
-Of the ~18 features Lunar markets: **13 matched · 2 partial · 4 gaps** (plus two niche items we
+Of the ~18 features Lunar markets: **14 matched · 1 partial · 4 gaps** (plus two niche items we
 deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
 
-## Matched (13)
+## Matched (14)
 
 | Lunar feature | Lunar tier | OpenDisplay |
 |---|---|---|
@@ -34,25 +34,27 @@ deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
 | CLI | Free | ✅ list/set/ddc/scene/diagnose/recover… |
 | Multi-monitor support | Free | ✅ EDID-identity matching (correct on docks/twin monitors) |
 | Colour warmth | — | ✅ Night-Shift-following (0.4.0) + manual 2700–9300 K slider (0.5.0) — Lunar doesn't headline this |
+| Clock Mode (scheduled brightness) | **Pro** | ✅ First-class Clock Mode (0.6.0): time/sunrise/noon/sunset anchors, per-anchor offsets, instant/ramp/continuous transitions, NOAA solar math |
 
-## Partial (2)
+## Partial (1)
 
 | Lunar feature | Lunar tier | OpenDisplay | Gap |
 |---|---|---|---|
 | Sensor Mode (ambient-light-driven brightness) | **Pro** | 🟡 Reads the built-in ALS directly, even with the panel off (0.4.0) | No *external* wireless/network sensor (Mac-mini-without-a-MacBook case) |
-| Scheduling | **Pro** | 🟡 Schedule-curve fallback inside Adaptive Display (lid closed) | No user-facing Clock Mode (see todo below) |
 
-## Todos (7) — filed as issues, ordered by value-per-effort
+## Todos (6 open · 1 shipped) — filed as issues, ordered by value-per-effort
 
 1. **FaceLight** — video-call fill light: max DDC brightness + warm-white click-through overlay on
    one hotkey. Cheapest win: composes the 0.5.0 overlay system with the colour-temperature gains.
    `low` · area:controls
-2. **Clock Mode** — user-defined brightness/contrast schedules with time / sunrise / noon / sunset
-   anchors, per-anchor offsets, and gradual transitions. The Adaptive Display schedule fallback is
-   the starting point; sunrise/sunset needs a solar-position calculation. `medium` · area:controls
+2. ~~**Clock Mode**~~ — ✅ **Shipped (0.6.0, Issue #30).** User-defined brightness schedules with
+   time / sunrise / noon / sunset anchors, per-anchor offsets, and instant/ramp/continuous
+   transitions, on public-domain NOAA solar math. Precedence: an explicit Clock Mode schedule
+   outranks Adaptive Display's built-in mirror. Contrast scheduling deferred (needs a silent DDC
+   contrast pipeline). `medium` · area:controls
 3. **Location Mode** — brightness follows sun elevation (good for natural-light rooms, no sensor
-   needed). Falls out almost free once the solar math from Clock Mode exists. `low after Clock Mode`
-   · area:controls
+   needed). Falls out almost free now that the solar math from Clock Mode exists
+   (`SolarCalculator`). `low after Clock Mode` · area:controls
 4. **Input-switch hotkeys** — global hotkeys per input source ("jump to HDMI 2"). Rides the
    configurable global-hotkey registry (Batch 2, Issue 4) and existing VCP 0x60 switching. `low` ·
    area:controls
