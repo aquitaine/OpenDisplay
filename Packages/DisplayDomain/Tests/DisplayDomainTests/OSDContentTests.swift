@@ -28,5 +28,12 @@ final class OSDContentTests: XCTestCase {
         XCTAssertEqual(OSDContent(kind: .volume, value: 0).glyph, "speaker.slash")
         XCTAssertEqual(OSDContent(kind: .volume, value: 0.2).glyph, "speaker.wave.1")
         XCTAssertEqual(OSDContent(kind: .volume, value: 0.8).glyph, "speaker.wave.2")
+        XCTAssertEqual(OSDContent(kind: .input, value: 0).glyph, "arrow.triangle.swap")
+    }
+
+    func testInputKindCarriesALabel() {
+        let content = OSDContent(kind: .input, value: 0, label: "HDMI 2")
+        XCTAssertEqual(content.label, "HDMI 2")
+        XCTAssertNil(OSDContent(kind: .brightness, value: 0.5).label)
     }
 }

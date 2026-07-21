@@ -7,18 +7,25 @@ public struct OSDContent: Hashable, Sendable {
         case brightness
         case volume
         case mute
+        /// A DDC input-source switch (Lunar-parity todo 4). Shown as a text label rather than a
+        /// filled-segment bar, since an input has no meaningful 0...1 level.
+        case input
     }
 
     /// Number of segments in the native-style bar.
     public static let segmentCount = 16
 
     public var kind: Kind
-    /// Normalized level, always clamped to 0...1.
+    /// Normalized level, always clamped to 0...1. Unused (0) for `.input`.
     public var value: Float
+    /// The text shown in place of the segment bar for `.input` (e.g. "HDMI 2"); nil for every other
+    /// kind.
+    public var label: String?
 
-    public init(kind: Kind, value: Float) {
+    public init(kind: Kind, value: Float, label: String? = nil) {
         self.kind = kind
         self.value = max(0, min(1, value))
+        self.label = label
     }
 
     /// Filled segments (0...16) for the bar, rounded to the nearest segment.
@@ -38,6 +45,7 @@ public struct OSDContent: Hashable, Sendable {
         case .volume:
             if value <= 0 { return "speaker.slash" }
             return value < 0.5 ? "speaker.wave.1" : "speaker.wave.2"
+        case .input: return "arrow.triangle.swap"
         }
     }
 }
