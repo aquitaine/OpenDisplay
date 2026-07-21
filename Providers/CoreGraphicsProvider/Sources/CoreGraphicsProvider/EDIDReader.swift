@@ -21,9 +21,14 @@ public enum EDIDReader {
                 return hit
             }
         }
-        // Fall back: a single candidate is unambiguous; otherwise pick by built-in vs first external.
+        // Fall back: a single candidate is unambiguous. Otherwise honour built-in vs external —
+        // the built-in panel's EDID carries Apple's PNP id ("APP"), so an external request must
+        // skip those (tree order puts the built-in first, which would hand back the laptop
+        // panel's identity); a built-in request prefers them. Tree order breaks remaining ties.
         if candidates.count == 1 { return candidates[0] }
-        return candidates.first
+        let wantBuiltIn = CGDisplayIsBuiltin(cgID) != 0
+        return candidates.first { (EDID.parse($0)?.manufacturerID == "APP") == wantBuiltIn }
+            ?? candidates.first
     }
 
     /// Every EDID-shaped Data property found by walking the whole IORegistry service plane (the EDID

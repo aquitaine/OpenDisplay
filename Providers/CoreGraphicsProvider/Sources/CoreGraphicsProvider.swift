@@ -453,15 +453,20 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
     }
 
     /// A compact fingerprint of the structural topology used to decide when to advance the
-    /// generation: which displays are online, active, main, mirrored, and where/how big they are.
+    /// generation: which displays are online, active, main, mirrored, where/how big they are, and
+    /// their rotation + refresh rate. Rotation and refresh matter because they can change while
+    /// bounds stay identical (180° flip, refresh-only mode switch) — omitting them left the
+    /// generation stuck, so `awaitStableGeneration` sat out its full timeout after such a change.
     private func topologySignature(of ids: [CGDirectDisplayID]) -> String {
         ids.sorted().map { id in
             let b = CGDisplayBounds(id)
             let active = CGDisplayIsActive(id) != 0 ? 1 : 0
             let main = CGDisplayIsMain(id) != 0 ? 1 : 0
             let mirror = CGDisplayMirrorsDisplay(id)
+            let rotation = Int(CGDisplayRotation(id).rounded())
+            let refresh = Int(((CGDisplayCopyDisplayMode(id)?.refreshRate ?? 0) * 10).rounded())
             return "\(id):\(active):\(main):\(Int(b.origin.x)),\(Int(b.origin.y)):"
-                + "\(Int(b.size.width))x\(Int(b.size.height)):\(mirror)"
+                + "\(Int(b.size.width))x\(Int(b.size.height)):\(mirror):\(rotation):\(refresh)"
         }
         .joined(separator: "|")
     }
