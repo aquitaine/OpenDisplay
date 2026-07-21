@@ -36,6 +36,11 @@ no Dock icon.
 - **Clock Mode** — schedule brightness against fixed times or **sunrise / noon / sunset**
   (with offsets, so "70% half an hour before sunset" just works), stepped, ramped, or
   glided continuously between points.
+- **Location Mode** — no sensor? Brightness can follow the **sun's actual elevation** at
+  your location, computed locally from public NOAA equations — ideal for lid-closed
+  setups in rooms with natural light.
+- **App Presets** — per-app display presets: your video editor gets full brightness and
+  its colour preset, your terminal gets 40%, and everything restores when you switch away.
 - **FaceLight** — one press turns your monitor into a warm video-call fill light; press
   again and your exact previous brightness, contrast, and dimming come back.
 - **Full DDC/CI control** — brightness, contrast, volume, input source, colour presets,

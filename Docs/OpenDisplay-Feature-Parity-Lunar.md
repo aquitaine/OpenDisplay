@@ -14,11 +14,11 @@ not marketing copy.
 
 ## Scorecard
 
-Of the ~18 features Lunar markets: **17 matched · 1 partial · 3 gaps** (Location Mode, App
-Presets, XDR unlock — all filed) (plus two niche items we
+Of the ~18 features Lunar markets: **19 matched · 1 partial · 1 gap** (the XDR unlock, filed as
+#35 — high-risk, last or never) (plus two niche items we
 deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
 
-## Matched (17)
+## Matched (19)
 
 | Lunar feature | Lunar tier | OpenDisplay |
 |---|---|---|
@@ -37,6 +37,8 @@ deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
 | Colour warmth | — | ✅ Night-Shift-following (0.4.0) + manual 2700–9300 K slider (0.5.0) — Lunar doesn't headline this |
 | Clock Mode (scheduled brightness) | **Pro** | ✅ First-class Clock Mode (0.6.0): time/sunrise/noon/sunset anchors, per-anchor offsets, instant/ramp/continuous transitions, NOAA solar math |
 | FaceLight (video-call fill light) | **Pro** | ✅ Max DDC + warm translucent overlay, crash-safe exact-state restore (0.6.0) |
+| Location Mode (sun-elevation brightness) | **Pro** | ✅ NOAA elevation math, civil-twilight→20° ramp, Adaptive Display source (0.7.0) |
+| App Presets (per-app switching) | **Pro** | ✅ Debounced frontmost tracking, crash-safe restore ledger, tested arbitration (0.7.0) |
 | Input Hotkeys (jump to input) | Free | ✅ Per-input global hotkeys, EDID-persistent targets, OSD confirm (0.6.0) |
 | CLI `lux`/`listen`/`lid` | Free | ✅ Plus line-delimited-JSON event stream for scripting (0.6.0) |
 
@@ -46,7 +48,7 @@ deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
 |---|---|---|---|
 | Sensor Mode (ambient-light-driven brightness) | **Pro** | 🟡 Reads the built-in ALS directly, even with the panel off (0.4.0) | No *external* wireless/network sensor (Mac-mini-without-a-MacBook case) |
 
-## Todos (3 open · 4 shipped) — filed as issues, ordered by value-per-effort
+## Todos (1 open · 6 shipped) — filed as issues, ordered by value-per-effort
 
 1. ~~**FaceLight**~~ — ✅ **Shipped (0.6.0, Issue #29).** Max DDC brightness/contrast + warm
    translucent click-through overlay on one press; exact prior state restored on the next press,
@@ -56,14 +58,17 @@ deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
    transitions, on public-domain NOAA solar math. Precedence: an explicit Clock Mode schedule
    outranks Adaptive Display's built-in mirror. Contrast scheduling deferred (needs a silent DDC
    contrast pipeline). `medium` · area:controls
-3. **Location Mode** — brightness follows sun elevation (good for natural-light rooms, no sensor
-   needed). Falls out almost free now that the solar math from Clock Mode exists
-   (`SolarCalculator`). `low after Clock Mode` · area:controls
+3. ~~**Location Mode**~~ — ✅ **Shipped (0.7.0, Issue #31).** Sun-elevation brightness as an
+   Adaptive Display fallback source (below live built-in/ambient readings, above the flat
+   schedule); NOAA elevation math validated against an independent ephemeris algorithm.
+   `low after Clock Mode` · area:controls
 4. ~~**Input-switch hotkeys**~~ — ✅ **Shipped (0.6.0, Issue #32).** Global hotkeys per input source
    riding the shortcut registry and VCP 0x60 switching; EDID-persistent display targeting, OSD
    confirmation, graceful offline handling. `low` · area:controls
-5. **App Presets** — per-app brightness/preset switching (frontmost-app tracking → apply preset,
-   restore on switch away). `medium` · area:automation
+5. ~~**App Presets**~~ — ✅ **Shipped (0.7.0, Issue #33).** Per-app-bundle-ID presets with
+   debounced frontmost tracking, a crash-safe persist-before-write restore ledger, and tested
+   last-writer precedence (FaceLight > App Presets > Clock Mode > Adaptive sync). `medium` ·
+   area:automation
 6. ~~**CLI extras**~~ — ✅ **Shipped (0.6.0, Issue #34).** `lux`, `listen` (line-delimited JSON
    event stream), `lid`. `low` · area:automation
 7. **XDR Brightness unlock** (past 500 nits on XDR panels) — already tracked as the BetterDisplay

@@ -13,6 +13,30 @@ change until 1.0.
   (Displays / Arrange / Scenes / Health & Recovery / About), and repeated presses re-focus the
   existing window instead of spawning another.
 
+## [0.7.0] — 2026-07-21
+
+Wave 2 of the Lunar-parity work: Location Mode and App Presets. With these, every
+Lunar-marketed feature except the XDR brightness unlock is matched.
+
+### Added
+- **Location Mode** (Issue #31) — brightness that follows the sun's real elevation at your
+  location: a night floor below civil twilight (−6°), a linear ramp through dawn and dusk, and a
+  full-brightness plateau once the sun is high (20°+). It slots into Adaptive Display as a
+  fallback source below the live signals — the built-in mirror and the ambient-light sensor still
+  win when available, an explicit Clock Mode schedule still outranks it, and manual tweaks teach
+  it an offset exactly like sync mode. Great for lid-closed setups in rooms with natural light.
+  The sun-elevation math extends 0.6.0's NOAA solar calculator (pure, deterministic, validated
+  against an independent ephemeris algorithm within 0.5°); location is shared with Clock Mode
+  (one-shot opt-in or manual latitude/longitude).
+- **App Presets** (Issue #33) — per-app display presets: when a chosen app comes to the front,
+  its preset (brightness, and optionally contrast and colour preset) applies to the target
+  display — or all displays — and the prior state comes back when the app leaves. Switches are
+  debounced (rapid ⌘-tabbing only commits the app you land on), writes go through the same
+  silent, audited funnels as Adaptive Display (so they never trip the manual-change cooldown),
+  and the pre-preset state is persisted *before* the first write — a crash or relaunch
+  mid-preset restores your real settings, the same crash-safe ledger FaceLight uses.
+  Precedence, documented and tested: FaceLight > App Presets > Clock Mode > Adaptive sync.
+
 ## [0.6.0] — 2026-07-21
 
 The Lunar-parity feature batch: FaceLight, Clock Mode, input-switch hotkeys, and three new CLI
