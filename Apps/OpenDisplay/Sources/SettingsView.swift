@@ -489,6 +489,9 @@ private struct HealthSection: View {
                 ClockModeCard()
 
                 Divider()
+                AppPresetsCard()
+
+                Divider()
 
                 Text("Labs").font(.title3)
                 Toggle(isOn: $model.experimentalRotationEnabled) {
@@ -848,6 +851,177 @@ private struct ClockLocationRow: View {
                 let latitude = model.settings.clockManualLocation?.latitude ?? 0
                 model.setClockManualLocation(GeoCoordinate(latitude: latitude, longitude: newLongitude))
             })
+    }
+}
+
+private struct AppPresetsCard: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: ODSpacing.sm) {
+            HStack(spacing: 8) {
+                Text("App Presets").font(.title3)
+                ODBadge("Labs", tone: .orange)
+            }
+            Toggle(isOn: Binding(
+                get: { model.settings.appPresetsEnabled },
+                set: { model.setAppPresetsEnabled($0) }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Switch a display preset when an app comes to the front")
+                    Text("When a chosen app becomes frontmost, its display\u{2019}s brightness \u{2014} and "
+                         + "optionally contrast and colour preset \u{2014} switch to the values you set, and "
+                         + "restore when the app leaves. Changes are silent (no HUD) and pause Adaptive "
+                         + "Display on those displays while the preset is active.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if model.settings.appPresetsEnabled {
+                AppPresetList()
+            }
+        }
+    }
+}
+
+private struct AppPresetList: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: ODSpacing.sm) {
+            if model.settings.appPresets.isEmpty {
+                Text("No app presets yet. Add one below \u{2014} for example \u{201C}dim to 40% when "
+                     + "Final Cut is in front\u{201D}.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ODCard {
+                    ForEach(Array(model.settings.appPresets.enumerated()),
+                            id: \.element.id) { index, preset in
+                        if index > 0 { ODDivider() }
+                        AppPresetRow(preset: preset)
+                    }
+                }
+            }
+            AddAppPresetMenu()
+        }
+    }
+}
+
+private struct AddAppPresetMenu: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        Menu {
+            ForEach(availableChoices, id: \.bundleID) { choice in
+                Button(choice.name) {
+                    model.upsertAppPreset(AppPresetPolicy.AppPreset(
+                        bundleIdentifier: choice.bundleID, applicationName: choice.name,
+                        brightness: 0.5, target: .allDisplays))
+                }
+            }
+        } label: {
+            Label("Add app preset", systemImage: "plus")
+        }
+        .menuStyle(.borderlessButton)
+        .controlSize(.small)
+        .fixedSize()
+    }
+
+    /// Running apps that lack a preset already, so the menu never offers a duplicate.
+    private var availableChoices: [(name: String, bundleID: String)] {
+        let configured = Set(model.settings.appPresets.map(\.bundleIdentifier))
+        return model.runningApplicationChoices().filter { !configured.contains($0.bundleID) }
+    }
+}
+
+private struct AppPresetRow: View {
+    @EnvironmentObject private var model: AppModel
+    let preset: AppPresetPolicy.AppPreset
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: ODSpacing.sm) {
+                Text(preset.applicationName).bold()
+                Spacer()
+                Picker("", selection: targetBinding) {
+                    Text("All displays").tag(AppPresetPolicy.Target.allDisplays)
+                    ForEach(externalDisplays, id: \.recordID) { observation in
+                        Text(model.displayName(for: observation))
+                            .tag(AppPresetPolicy.Target.display(observation.recordID.rawValue))
+                    }
+                }
+                .labelsHidden().fixedSize()
+                Button(role: .destructive) {
+                    model.removeAppPreset(preset)
+                } label: { Image(systemName: "trash") }
+                    .buttonStyle(.borderless)
+            }
+            HStack(spacing: ODSpacing.md) {
+                Toggle("Brightness", isOn: brightnessEnabledBinding)
+                if preset.brightness != nil {
+                    Stepper("\(Int((preset.brightness ?? 0) * 100))%", value: brightnessBinding,
+                            in: 0...1, step: 0.05)
+                        .fixedSize()
+                }
+            }
+            HStack(spacing: ODSpacing.md) {
+                Toggle("Contrast", isOn: contrastEnabledBinding)
+                if preset.contrast != nil {
+                    Stepper("\(Int((preset.contrast ?? 0) * 100))%", value: contrastBinding,
+                            in: 0...1, step: 0.05)
+                        .fixedSize()
+                }
+            }
+            HStack(spacing: ODSpacing.md) {
+                Toggle("Colour preset", isOn: colorPresetEnabledBinding)
+                if preset.colorPreset != nil {
+                    Picker("", selection: colorPresetBinding) {
+                        ForEach([1, 2, 3, 4, 5, 6], id: \.self) { code in
+                            Text(model.presetName(code)).tag(code)
+                        }
+                    }
+                    .labelsHidden().fixedSize()
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var externalDisplays: [DisplayObservation] {
+        model.displays.filter { $0.displayClass != .builtIn && $0.isActive }
+    }
+
+    private var targetBinding: Binding<AppPresetPolicy.Target> {
+        Binding(get: { preset.target }, set: { updated in updating { $0.target = updated } })
+    }
+    private var brightnessEnabledBinding: Binding<Bool> {
+        Binding(get: { preset.brightness != nil },
+                set: { isOn in updating { $0.brightness = isOn ? ($0.brightness ?? 0.5) : nil } })
+    }
+    private var brightnessBinding: Binding<Double> {
+        Binding(get: { Double(preset.brightness ?? 0) },
+                set: { updated in updating { $0.brightness = Float(updated) } })
+    }
+    private var contrastEnabledBinding: Binding<Bool> {
+        Binding(get: { preset.contrast != nil },
+                set: { isOn in updating { $0.contrast = isOn ? ($0.contrast ?? 0.5) : nil } })
+    }
+    private var contrastBinding: Binding<Double> {
+        Binding(get: { Double(preset.contrast ?? 0) },
+                set: { updated in updating { $0.contrast = Float(updated) } })
+    }
+    private var colorPresetEnabledBinding: Binding<Bool> {
+        Binding(get: { preset.colorPreset != nil },
+                set: { isOn in updating { $0.colorPreset = isOn ? ($0.colorPreset ?? 4) : nil } })
+    }
+    private var colorPresetBinding: Binding<Int> {
+        Binding(get: { preset.colorPreset ?? 4 },
+                set: { updated in updating { $0.colorPreset = updated } })
+    }
+
+    private func updating(_ transform: (inout AppPresetPolicy.AppPreset) -> Void) {
+        var copy = preset
+        transform(&copy)
+        model.upsertAppPreset(copy)
     }
 }
 #endif

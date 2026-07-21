@@ -99,6 +99,17 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     public var updateCheckEnabled: Bool
     /// How the software dimming slider darkens a display (gamma table, overlay window, or both).
     public var dimmingMethod: DimmingMethod
+    /// App Presets (Issue #33): switch a display's brightness/contrast/colour preset when a chosen app
+    /// becomes frontmost and restore the prior state when it leaves. Default off.
+    public var appPresetsEnabled: Bool
+    /// The configured per-app presets (at most one per bundle identifier).
+    public var appPresets: [AppPresetPolicy.AppPreset]
+    /// App-preset restore ledger, keyed by `DisplayRecordID.rawValue`: each governed display's
+    /// brightness/contrast/colour-preset at the moment its app preset took over. INVARIANT: a key is
+    /// present if and only if an app preset is currently applied to that display and a restore is
+    /// owed; captured BEFORE the preset write and cleared after every restore, so a crash/relaunch
+    /// mid-preset still restores correctly (mirrors `faceLightPriorStateByDisplay`).
+    public var appPresetPriorStateByDisplay: [String: AppPresetPolicy.PriorState]
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
@@ -131,7 +142,10 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         clockScheduleEntries: [ClockScheduleEntry] = [],
         clockManualLocation: GeoCoordinate? = nil,
         updateCheckEnabled: Bool = true,
-        dimmingMethod: DimmingMethod = .gamma
+        dimmingMethod: DimmingMethod = .gamma,
+        appPresetsEnabled: Bool = false,
+        appPresets: [AppPresetPolicy.AppPreset] = [],
+        appPresetPriorStateByDisplay: [String: AppPresetPolicy.PriorState] = [:]
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
@@ -164,6 +178,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.clockManualLocation = clockManualLocation
         self.updateCheckEnabled = updateCheckEnabled
         self.dimmingMethod = dimmingMethod
+        self.appPresetsEnabled = appPresetsEnabled
+        self.appPresets = appPresets
+        self.appPresetPriorStateByDisplay = appPresetPriorStateByDisplay
     }
 
     public static let `default` = OpenDisplaySettings()
@@ -198,6 +215,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case clockManualLocation
         case updateCheckEnabled
         case dimmingMethod
+        case appPresetsEnabled
+        case appPresets
+        case appPresetPriorStateByDisplay
     }
 
     /// Tolerant decoder: every missing key falls back to its default and unknown keys are ignored,
@@ -290,6 +310,15 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
             ?? defaults.updateCheckEnabled
         dimmingMethod = try container.decodeIfPresent(DimmingMethod.self, forKey: .dimmingMethod)
             ?? defaults.dimmingMethod
+        appPresetsEnabled = try container.decodeIfPresent(Bool.self, forKey: .appPresetsEnabled)
+            ?? defaults.appPresetsEnabled
+        appPresets = try container
+            .decodeIfPresent([AppPresetPolicy.AppPreset].self, forKey: .appPresets)
+            ?? defaults.appPresets
+        appPresetPriorStateByDisplay = try container
+            .decodeIfPresent([String: AppPresetPolicy.PriorState].self,
+                             forKey: .appPresetPriorStateByDisplay)
+            ?? defaults.appPresetPriorStateByDisplay
     }
 }
 
