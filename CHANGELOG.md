@@ -5,6 +5,35 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.7.1] — 2026-07-22
+
+A review-and-hardening pass over the whole codebase (no new features).
+
+### Fixed
+- **App Presets** no longer lose a display's saved baseline when it is unplugged while a preset
+  is active: the restore stays owed and is paid back automatically when the display returns (or
+  at the next launch), instead of stranding the re-plugged display at the preset's values. A
+  display that *connects* while a preset is active is now governed immediately rather than
+  waiting for the next app switch.
+- **Settings file resilience**: one unreadable field (e.g. after a downgrade, or corruption) now
+  falls back to that field's default instead of silently resetting every setting — including the
+  FaceLight / app-preset / evening-preset restore ledgers — on the next save.
+- Display identity: a "paired" record can no longer absorb an unrelated anonymous monitor; the
+  pairing signal now requires corroborating evidence (serial, model, UUID, or registry path).
+- Refresh-rate-only mode changes and 180° rotations now advance the topology generation instead
+  of always sitting out the 2-second stabilization timeout.
+- `opendisplay edid` on a Mac laptop no longer reports the built-in panel's EDID for an external
+  display whose model number is unreadable.
+- CLI: `favorite set <display> @2x` (no resolution) reports a usage error instead of crashing;
+  `brightness` DDC writes round instead of truncate (0.29 wrote 28 but printed 29%).
+- Clock Mode solar anchors queried just after midnight on a DST-transition day are no longer an
+  hour off.
+- Audit-log entries written concurrently by the app and CLI can no longer interleave mid-line.
+
+### Changed
+- Night Shift detection reuses one CoreBrightness client instead of opening a new connection
+  every 5-second adaptive tick.
+
 ## [0.6.1] — 2026-07-21
 
 ### Fixed
