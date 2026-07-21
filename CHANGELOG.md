@@ -5,6 +5,14 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.6.1] — 2026-07-21
+
+### Fixed
+- Pressing ⌘, (the standard macOS Settings shortcut) opened an empty stub window instead of the
+  real Settings UI. The shortcut and the menu bar's gear now open the same Settings window
+  (Displays / Arrange / Scenes / Health & Recovery / About), and repeated presses re-focus the
+  existing window instead of spawning another.
+
 ## [0.6.0] — 2026-07-21
 
 The Lunar-parity feature batch: FaceLight, Clock Mode, input-switch hotkeys, and three new CLI
