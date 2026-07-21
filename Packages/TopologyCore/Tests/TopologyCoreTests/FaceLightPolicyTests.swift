@@ -41,6 +41,14 @@ final class FaceLightPolicyTests: XCTestCase {
         XCTAssertEqual(Policy.overlayKelvin, ColorTemperatureCurve.minKelvin)
     }
 
+    func testOverlayAlphaIsAStrongButTranslucentWash() {
+        // Opaque (1.0) would blind the panel underneath — including the video call itself on a
+        // single-monitor setup — and too faint (below 0.4) wouldn't read as a fill light.
+        XCTAssertGreaterThanOrEqual(Policy.overlayAlpha, 0.4)
+        XCTAssertLessThanOrEqual(Policy.overlayAlpha, 0.6)
+        XCTAssertLessThan(Policy.overlayAlpha, 1.0)
+    }
+
     func testPriorStateRoundTripsThroughJSON() throws {
         let priorState = Policy.PriorState(brightness: 0.42, contrast: 0.73)
         let encoded = try JSONEncoder().encode(priorState)

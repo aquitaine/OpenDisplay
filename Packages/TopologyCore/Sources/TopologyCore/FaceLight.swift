@@ -1,8 +1,9 @@
 import Foundation
 
 /// Pure decision core for FaceLight — the "turn this monitor into a video-call fill light" hotkey
-/// (DDC brightness/contrast to max, plus a warm click-through overlay). One press activates it and
-/// remembers the display's prior brightness/contrast; the next press restores exactly that state.
+/// (DDC brightness/contrast to max, plus a translucent warm click-through overlay — see
+/// `overlayAlpha` for why it stops short of opaque). One press activates it and remembers the
+/// display's prior brightness/contrast; the next press restores exactly that state.
 ///
 /// The restore ledger this policy produces (`ToggleResult.priorStateToPersist`) belongs in
 /// `OpenDisplaySettings.faceLightPriorStateByDisplay`, written BEFORE the max-out hardware writes
@@ -54,6 +55,20 @@ public enum FaceLightPolicy {
     /// Kelvin used for the fill light's warm-white tint — the colour-temperature curve's warmest
     /// stop (candle-light), the look a video-call fill light needs.
     public static let overlayKelvin: Float = ColorTemperatureCurve.minKelvin
+
+    /// Opacity for the fill-light overlay. A video-call fill light has two competing jobs: throw as
+    /// much warm light off the panel as possible, and leave on-screen content (the call window
+    /// itself, on a single-monitor setup) legible underneath. Full opacity (1.0) wins the first job
+    /// and completely fails the second — the screen becomes a blind warm-white slab. 0.5 is the
+    /// midpoint of that trade-off: an even wash where the overlay dominates the panel's visual
+    /// output (the light-source job), while content underneath stays readable through it — and
+    /// brightness/contrast are simultaneously maxed by `toggle`, which raises the panel's own output
+    /// enough to carry legibility even under a 50% warm wash on top of it. ::
+    ///
+    ///     ok:   0.5 — strong warm wash, call window still visible through it
+    ///     flag: 1.0 — opaque; screen goes blind, feature unusable on one monitor
+    ///     flag: 0.2 — barely tinted; too little extra light for a fill light
+    public static let overlayAlpha: Float = 0.5
 
     /// One hotkey/menu press: toggle FaceLight for a display. `owedPriorState` is that display's
     /// current ledger entry (nil means FaceLight is off for it); `liveBrightness`/`liveContrast` are

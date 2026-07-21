@@ -1566,7 +1566,11 @@ final class AppModel: ObservableObject {
 
     /// Shows or hides the warm-white overlay for FaceLight, reusing the same click-through window
     /// infrastructure the dim/combined methods use — crash-safe because the window is process-bound,
-    /// so an app crash can never leave a warm overlay stuck on screen.
+    /// so an app crash can never leave a warm overlay stuck on screen. The window opacity is
+    /// `FaceLightPolicy.overlayAlpha` (a translucent wash), NOT full opacity: at alpha 1 the panel
+    /// would go visually blind, hiding the very video call FaceLight is meant to light — the maxed
+    /// brightness/contrast from `toggle` plus a strong (not opaque) wash is what keeps the call
+    /// window legible while still throwing extra warm light off the panel.
     private func applyFaceLightOverlay(isActive: Bool, cgID: CGDirectDisplayID) {
         guard isActive else {
             dimOverlay.remove(for: cgID)
@@ -1575,7 +1579,7 @@ final class AppModel: ObservableObject {
         let gains = ColorTemperatureCurve.gains(kelvin: FaceLightPolicy.overlayKelvin)
         let warmWhite = NSColor(red: CGFloat(gains.red), green: CGFloat(gains.green),
                                 blue: CGFloat(gains.blue), alpha: 1)
-        dimOverlay.setAlpha(1, color: warmWhite, for: cgID)
+        dimOverlay.setAlpha(FaceLightPolicy.overlayAlpha, color: warmWhite, for: cgID)
     }
 
     /// Restores every owed FaceLight prior state — crash-safe recovery at launch, and the
