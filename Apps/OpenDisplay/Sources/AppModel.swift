@@ -211,6 +211,18 @@ final class AppModel: ObservableObject {
     /// line updates as the loop acts. All decisions live in the pure `AdaptiveDisplayPolicy`.
     @Published private(set) var adaptiveStates: [DisplayRecordID: AdaptiveDisplayPolicy.DisplayState] = [:]
     private var adaptiveLoop: Task<Void, Never>?
+    /// App Presets (Issue #33): the pure policy's threaded state (which app's preset is applied, the
+    /// debounce window, and the restore ledger). Decisions live in `AppPresetPolicy`; this actor only
+    /// observes the frontmost app, reads live values, and applies the writes through the silent DDC
+    /// funnels adaptive uses.
+    private var appPresetActivation = AppPresetPolicy.ActivationState()
+    /// NSWorkspace frontmost-app observer token, held while App Presets is on with ≥1 preset.
+    private var appPresetObserver: NSObjectProtocol?
+    /// One-shot re-evaluation armed by the policy's `rescheduleAfter` — the debounce timer.
+    private var appPresetDebounceTask: Task<Void, Never>?
+    /// Displays an app preset currently governs. Adaptive/Clock brightness and warmth skip these so
+    /// the app preset stays the last writer (`AppPresetPolicy` precedence, documented + unit-tested).
+    private var appPresetActiveDisplays: Set<DisplayRecordID> = []
     private let nightShift = NightShiftStatusReader()
     private let ambientLight = AmbientLightReader()
     /// Clock Mode (Issue #30): one-shot Core Location helper for the "Use current location" button.
@@ -317,6 +329,8 @@ final class AppModel: ObservableObject {
             reconcileDisplaySleepGuard()  // hold/release the keep-awake assertion for the launch topology
             #if !PUBLIC_API_ONLY
             reconcileAdaptiveLoop()  // start adaptive brightness/warmth if enabled for this topology
+            await restoreOwedAppPresetState()  // crash-safe: relaunch mid-app-preset restores the baseline
+            reconcileAppPresetObserver()  // observe the frontmost app if App Presets is enabled
             #endif
             autoDisconnectPolicy.seed(externalPresent: hasExternalDisplay)  // don't treat a pre-attached external as an arrival
             await autoCheckForUpdatesIfDue()
@@ -354,6 +368,7 @@ final class AppModel: ObservableObject {
                 self?.mediaKeyTap?.stop()
                 #if !PUBLIC_API_ONLY
                 self?.adaptiveLoop?.cancel()
+                self?.stopAppPresetObserver()
                 #endif
             }
         }
@@ -1401,6 +1416,9 @@ final class AppModel: ObservableObject {
             // Resolve capabilities lazily, once — the caches are sticky and pruned on disconnect.
             if brightnessMethod[id] == nil { await refreshBrightness(for: observation) }
             guard brightnessMethod[id] == .hardware else { continue }  // DDC-safety gate
+            // An active app preset is the last writer on this display (Issue #33 precedence) — leave it
+            // alone so adaptive/clock never fights the preset it just applied.
+            if appPresetActiveDisplays.contains(id) { continue }
             if warmthOn, colorPreset[id] == nil { await refreshColorPreset(for: observation) }
 
             let state = adaptiveStates[id] ?? seededAdaptiveState(for: id)
@@ -1647,6 +1665,226 @@ final class AppModel: ObservableObject {
         clockLocationProvider.requestOnce { [weak self] coordinate in
             guard let self, let coordinate else { return }
             self.setClockManualLocation(coordinate)
+        }
+    }
+
+    // MARK: - App Presets (Issue #33): per-app brightness / colour-preset switching
+
+    func setAppPresetsEnabled(_ enabled: Bool) {
+        guard settings.appPresetsEnabled != enabled else { return }
+        settings.appPresetsEnabled = enabled
+        persistSettings()
+        reconcileAppPresetObserver()
+        if !enabled { Task { [weak self] in await self?.restoreOwedAppPresetState() } }
+    }
+
+    /// Inserts or replaces a preset — at most one per bundle identifier, since the frontmost app's
+    /// bundle id is the lookup key — then re-evaluates so a live edit lands without an app switch.
+    func upsertAppPreset(_ preset: AppPresetPolicy.AppPreset) {
+        if let index = settings.appPresets.firstIndex(where: {
+            $0.bundleIdentifier == preset.bundleIdentifier
+        }) {
+            settings.appPresets[index] = preset
+        } else {
+            settings.appPresets.append(preset)
+        }
+        persistSettings()
+        reconcileAppPresetObserver()
+        evaluateAppPresets()
+    }
+
+    func removeAppPreset(_ preset: AppPresetPolicy.AppPreset) {
+        guard let index = settings.appPresets.firstIndex(where: { $0.id == preset.id }) else { return }
+        settings.appPresets.remove(at: index)
+        persistSettings()
+        reconcileAppPresetObserver()
+        evaluateAppPresets()
+    }
+
+    /// Regular (Dock-visible) apps currently running, for the settings "add preset" picker. The bundle
+    /// id is the stable key the policy matches on; the localized name is the label.
+    func runningApplicationChoices() -> [(name: String, bundleID: String)] {
+        NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .compactMap { application in
+                guard let bundleID = application.bundleIdentifier else { return nil }
+                return (application.localizedName ?? bundleID, bundleID)
+            }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Starts or stops the frontmost-app observer — running only while App Presets is on with at least
+    /// one preset (mirrors `reconcileAdaptiveLoop`). Idempotent.
+    func reconcileAppPresetObserver() {
+        let wantRunning = settings.appPresetsEnabled && !settings.appPresets.isEmpty
+        guard wantRunning else {
+            stopAppPresetObserver()
+            return
+        }
+        guard appPresetObserver == nil else { return }
+        appPresetObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.evaluateAppPresets() }
+        }
+        evaluateAppPresets()  // apply for whatever is already frontmost
+    }
+
+    private func stopAppPresetObserver() {
+        if let observer = appPresetObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+            appPresetObserver = nil
+        }
+        appPresetDebounceTask?.cancel()
+        appPresetDebounceTask = nil
+    }
+
+    /// One App-Preset evaluation: read the current frontmost app, prime the governed displays' live
+    /// caches, then resolve and apply the pure policy's decision. Kicked by the frontmost-app observer,
+    /// a live settings edit, a topology change, and the debounce re-check timer.
+    func evaluateAppPresets() {
+        guard settings.appPresetsEnabled, !settings.appPresets.isEmpty else { return }
+        let frontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        Task { [weak self] in
+            guard let self else { return }
+            await self.primeAppPresetCaches(frontmostBundleID: frontmostBundleID)
+            self.resolveAndApplyAppPresets(frontmostBundleID: frontmostBundleID)
+        }
+    }
+
+    /// Reads the current brightness (and colour preset, when the incoming preset sets one) for every
+    /// governed display whose cache is cold, so the captured baseline reflects what is really on screen
+    /// rather than a nil placeholder. No-op when the frontmost app has no preset (a restore reads only
+    /// the ledger).
+    private func primeAppPresetCaches(frontmostBundleID: String?) async {
+        guard let incoming = settings.appPresets.first(where: {
+            $0.bundleIdentifier == frontmostBundleID
+        }) else { return }
+        for observation in displays where observation.displayClass != .builtIn && observation.isActive {
+            let id = observation.recordID
+            if brightnessMethod[id] == nil { await refreshBrightness(for: observation) }
+            guard brightnessMethod[id] == .hardware else { continue }
+            if brightness[id] == nil { await refreshBrightness(for: observation) }
+            if incoming.colorPreset != nil, colorPreset[id] == nil {
+                await refreshColorPreset(for: observation)
+            }
+        }
+    }
+
+    private func resolveAndApplyAppPresets(frontmostBundleID: String?) {
+        let input = AppPresetPolicy.Input(
+            frontmostBundleID: frontmostBundleID, now: Date(), presets: settings.appPresets,
+            displays: appPresetDisplaySnapshots())
+        let decision = AppPresetPolicy.resolve(input, state: appPresetActivation)
+        applyAppPresetDecision(decision)
+        scheduleAppPresetRecheck(after: decision.rescheduleAfter)
+    }
+
+    /// Live values for every active external the policy may govern. FaceLight-active displays are
+    /// excluded — FaceLight is an explicit hotkey and outranks app presets, so the policy never targets
+    /// one while its fill light is on.
+    private func appPresetDisplaySnapshots() -> [AppPresetPolicy.DisplaySnapshot] {
+        displays.compactMap { observation in
+            let id = observation.recordID
+            guard observation.displayClass != .builtIn, observation.isActive,
+                  brightnessMethod[id] == .hardware,
+                  settings.faceLightPriorStateByDisplay[id.rawValue] == nil else { return nil }
+            return AppPresetPolicy.DisplaySnapshot(
+                recordID: id.rawValue, brightness: brightness[id],
+                contrast: ddcControl(.contrast, for: observation), colorPreset: colorPreset[id])
+        }
+    }
+
+    /// Applies a policy decision in the crash-safe order the `Decision` documents: persist captures
+    /// BEFORE their apply writes, issue the apply then restore writes, then persist the clears AFTER
+    /// their restore writes. Finally adopt the new activation state and governed-display set.
+    private func applyAppPresetDecision(_ decision: AppPresetPolicy.Decision) {
+        if !decision.captures.isEmpty {
+            for (rawID, prior) in decision.captures { settings.appPresetPriorStateByDisplay[rawID] = prior }
+            persistSettings()
+        }
+        for write in decision.applyWrites { applyAppPresetWrite(write) }
+        for write in decision.restoreWrites { applyAppPresetWrite(write) }
+        if !decision.clears.isEmpty {
+            for rawID in decision.clears { settings.appPresetPriorStateByDisplay[rawID] = nil }
+            persistSettings()
+        }
+        appPresetActivation = decision.state
+        appPresetActiveDisplays = decision.state.activeBundleID == nil
+            ? []
+            : Set(decision.state.priorStateByDisplay.keys.map(DisplayRecordID.init(rawValue:)))
+    }
+
+    /// Applies one display's preset (or restore) write through the SILENT adaptive funnels — no OSD and
+    /// no manual-change note — so an app preset never trips Adaptive Display's manual-change cooldown.
+    private func applyAppPresetWrite(_ write: AppPresetPolicy.DisplayWrite) {
+        guard let observation = displays.first(where: { $0.recordID.rawValue == write.recordID }) else {
+            return
+        }
+        if let brightness = write.brightness { applyAdaptiveBrightness(brightness, for: observation) }
+        if let contrast = write.contrast { setHardwareControl(.contrast, contrast, for: observation) }
+        if let code = write.colorPreset { applyAdaptivePreset(code, for: observation) }
+    }
+
+    /// Arms the one-shot debounce re-check, replacing any prior timer. On fire it re-evaluates against
+    /// the then-current frontmost app, so a fast Cmd-Tab through several apps commits only the one the
+    /// user lands on.
+    private func scheduleAppPresetRecheck(after delay: TimeInterval?) {
+        appPresetDebounceTask?.cancel()
+        guard let delay else { appPresetDebounceTask = nil; return }
+        appPresetDebounceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.evaluateAppPresets()
+        }
+    }
+
+    /// Restores every owed app-preset prior state — crash-safe recovery at launch and the quit-teardown
+    /// backstop. Mirrors `restoreOwedFaceLightState`: an entry clears only once its restore write is
+    /// issued on the awaited controller, so quitting can't race the fire-and-forget writers.
+    private func restoreOwedAppPresetState() async {
+        guard !settings.appPresetPriorStateByDisplay.isEmpty else {
+            appPresetActivation = AppPresetPolicy.ActivationState()
+            appPresetActiveDisplays = []
+            return
+        }
+        var remaining = settings.appPresetPriorStateByDisplay
+        for (rawID, prior) in settings.appPresetPriorStateByDisplay {
+            guard let observation = displays.first(where: { $0.recordID.rawValue == rawID }),
+                  observation.isActive else { continue }
+            await restoreAppPresetPrior(prior, for: observation)
+            remaining[rawID] = nil
+        }
+        if remaining != settings.appPresetPriorStateByDisplay {
+            settings.appPresetPriorStateByDisplay = remaining
+            persistSettings()
+        }
+        appPresetActivation = AppPresetPolicy.ActivationState(
+            priorStateByDisplay: settings.appPresetPriorStateByDisplay)
+        appPresetActiveDisplays = []
+    }
+
+    /// Writes one display's pre-preset brightness/contrast/colour-preset back on the awaited DDC
+    /// controller (like `restoreFaceLightPrior`), falling back to the software brightness route when
+    /// the panel exposes no controller.
+    private func restoreAppPresetPrior(_ prior: AppPresetPolicy.PriorState,
+                                       for observation: DisplayObservation) async {
+        let id = observation.recordID
+        guard let controller = await ddcController(for: observation) else {
+            if let brightness = prior.brightness { setBrightness(brightness, for: observation) }
+            return
+        }
+        if let level = prior.brightness {
+            let maxLevel = Float(brightnessMax[id] ?? 100)
+            await controller.write(.brightness, Int((level * maxLevel).rounded()))
+            brightness[id] = level
+        }
+        if let contrast = prior.contrast {
+            await restoreFaceLightContrast(contrast, id: id, controller: controller)
+        }
+        if let code = prior.colorPreset {
+            await controller.write(.colorPreset, code)
+            colorPreset[id] = code
         }
     }
     #endif
@@ -2008,6 +2246,8 @@ final class AppModel: ObservableObject {
             reconcileDisplaySleepGuard()  // external arrived/left → acquire or release the keep-awake assertion
             #if !PUBLIC_API_ONLY
             reconcileAdaptiveLoop()  // externals may have arrived/left → start or stop adaptive
+            reconcileAppPresetObserver()  // and start/stop the frontmost-app observer to match
+            evaluateAppPresets()  // govern a newly-arrived external (or release a departed one)
             #endif
             let autoDisconnected = await applyAutoDisconnectBuiltInIfNeeded()  // external arrived → built-in off
             postDisplayNotifications(prior: prior, builtInAutoDisconnected: autoDisconnected)  // Batch-2 #5
@@ -2161,6 +2401,9 @@ final class AppModel: ObservableObject {
         // An applied evening colour preset owes the monitor its daytime preset back — quitting
         // must wait for that DDC write (the willTerminate backstop can't do async I2C).
         if !settings.adaptiveDayPresetByDisplay.isEmpty { return true }
+        // An active app preset owes its governed displays their pre-preset state back (Issue #33) —
+        // the DDC restore must land before the process exits, same as the evening-preset case.
+        if !settings.appPresetPriorStateByDisplay.isEmpty { return true }
         #endif
         // An active FaceLight owes the display its pre-fill-light brightness/contrast back — same
         // reasoning as the evening-preset case above.
@@ -2179,7 +2422,9 @@ final class AppModel: ObservableObject {
         // must not race them).
         adaptiveLoop?.cancel()
         adaptiveLoop = nil
+        stopAppPresetObserver()
         await restoreOwedDayPresets()
+        await restoreOwedAppPresetState()  // hand each governed display its pre-preset state back
         #endif
         await restoreOwedFaceLightState()
         // Reconnect each off-card the way `reconnectOffline(_:)` does — by raw display id, since a

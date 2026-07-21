@@ -32,6 +32,31 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.load(), settings)
     }
 
+    func testAppPresetsAndTheirRestoreLedgerSurviveSaveAndLoad() throws {
+        let store = SettingsStore(directory: directory)
+        let preset = AppPresetPolicy.AppPreset(
+            bundleIdentifier: "com.figma.Desktop", applicationName: "Figma",
+            brightness: 0.6, colorPreset: 4, target: .display("cgid:1"))
+        let settings = OpenDisplaySettings(
+            appPresetsEnabled: true, appPresets: [preset],
+            appPresetPriorStateByDisplay: ["cgid:1": AppPresetPolicy.PriorState(brightness: 0.9)])
+        try store.save(settings)
+        let loaded = store.load()
+        XCTAssertEqual(loaded.appPresets, [preset])
+        XCTAssertEqual(loaded.appPresetPriorStateByDisplay["cgid:1"],
+                       AppPresetPolicy.PriorState(brightness: 0.9))
+    }
+
+    func testAppPresetFieldsDefaultWhenAbsentFromAnOlderFile() throws {
+        let store = SettingsStore(directory: directory)
+        try Data(#"{"confirmationCountdownSeconds": 7}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        let loaded = store.load()
+        XCTAssertFalse(loaded.appPresetsEnabled)
+        XCTAssertTrue(loaded.appPresets.isEmpty)
+        XCTAssertTrue(loaded.appPresetPriorStateByDisplay.isEmpty)
+    }
+
     func testCorruptFileFallsBackToDefaults() throws {
         let store = SettingsStore(directory: directory)
         try Data("not json".utf8).write(to: directory.appendingPathComponent("settings.json"))
