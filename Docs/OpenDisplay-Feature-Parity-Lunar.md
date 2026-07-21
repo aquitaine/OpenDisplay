@@ -14,10 +14,11 @@ not marketing copy.
 
 ## Scorecard
 
-Of the ~18 features Lunar markets: **14 matched · 1 partial · 4 gaps** (plus two niche items we
+Of the ~18 features Lunar markets: **17 matched · 1 partial · 3 gaps** (Location Mode, App
+Presets, XDR unlock — all filed) (plus two niche items we
 deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
 
-## Matched (14)
+## Matched (17)
 
 | Lunar feature | Lunar tier | OpenDisplay |
 |---|---|---|
@@ -35,6 +36,9 @@ deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
 | Multi-monitor support | Free | ✅ EDID-identity matching (correct on docks/twin monitors) |
 | Colour warmth | — | ✅ Night-Shift-following (0.4.0) + manual 2700–9300 K slider (0.5.0) — Lunar doesn't headline this |
 | Clock Mode (scheduled brightness) | **Pro** | ✅ First-class Clock Mode (0.6.0): time/sunrise/noon/sunset anchors, per-anchor offsets, instant/ramp/continuous transitions, NOAA solar math |
+| FaceLight (video-call fill light) | **Pro** | ✅ Max DDC + warm translucent overlay, crash-safe exact-state restore (0.6.0) |
+| Input Hotkeys (jump to input) | Free | ✅ Per-input global hotkeys, EDID-persistent targets, OSD confirm (0.6.0) |
+| CLI `lux`/`listen`/`lid` | Free | ✅ Plus line-delimited-JSON event stream for scripting (0.6.0) |
 
 ## Partial (1)
 
@@ -42,11 +46,11 @@ deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
 |---|---|---|---|
 | Sensor Mode (ambient-light-driven brightness) | **Pro** | 🟡 Reads the built-in ALS directly, even with the panel off (0.4.0) | No *external* wireless/network sensor (Mac-mini-without-a-MacBook case) |
 
-## Todos (6 open · 1 shipped) — filed as issues, ordered by value-per-effort
+## Todos (3 open · 4 shipped) — filed as issues, ordered by value-per-effort
 
-1. **FaceLight** — video-call fill light: max DDC brightness + warm-white click-through overlay on
-   one hotkey. Cheapest win: composes the 0.5.0 overlay system with the colour-temperature gains.
-   `low` · area:controls
+1. ~~**FaceLight**~~ — ✅ **Shipped (0.6.0, Issue #29).** Max DDC brightness/contrast + warm
+   translucent click-through overlay on one press; exact prior state restored on the next press,
+   crash-safe via a persist-before-write ledger. `low` · area:controls
 2. ~~**Clock Mode**~~ — ✅ **Shipped (0.6.0, Issue #30).** User-defined brightness schedules with
    time / sunrise / noon / sunset anchors, per-anchor offsets, and instant/ramp/continuous
    transitions, on public-domain NOAA solar math. Precedence: an explicit Clock Mode schedule
@@ -55,14 +59,13 @@ deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
 3. **Location Mode** — brightness follows sun elevation (good for natural-light rooms, no sensor
    needed). Falls out almost free now that the solar math from Clock Mode exists
    (`SolarCalculator`). `low after Clock Mode` · area:controls
-4. **Input-switch hotkeys** — global hotkeys per input source ("jump to HDMI 2"). Rides the
-   configurable global-hotkey registry (Batch 2, Issue 4) and existing VCP 0x60 switching. `low` ·
-   area:controls
+4. ~~**Input-switch hotkeys**~~ — ✅ **Shipped (0.6.0, Issue #32).** Global hotkeys per input source
+   riding the shortcut registry and VCP 0x60 switching; EDID-persistent display targeting, OSD
+   confirmation, graceful offline handling. `low` · area:controls
 5. **App Presets** — per-app brightness/preset switching (frontmost-app tracking → apply preset,
    restore on switch away). `medium` · area:automation
-6. **CLI extras** — `lux` (ambient-light readout), `listen` (brightness/config event stream),
-   `lid` (lid state). Thin CLI wrappers over sensor + event code that already exists. `low` ·
-   area:automation
+6. ~~**CLI extras**~~ — ✅ **Shipped (0.6.0, Issue #34).** `lux`, `listen` (line-delimited JSON
+   event stream), `lid`. `low` · area:automation
 7. **XDR Brightness unlock** (past 500 nits on XDR panels) — already tracked as the BetterDisplay
    map's Tier 5 (XDR/HDR upscaling). Highest risk: private APIs, thermal concerns. Last or never.
    `very high, private API` · area:controls

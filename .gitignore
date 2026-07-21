@@ -40,3 +40,4 @@ build/
 
 # Signed/notarized release artifacts (scripts/release-signed.sh)
 dist/
+.gstack/

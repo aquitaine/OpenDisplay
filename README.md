@@ -3,8 +3,9 @@
 **Free, open-source display control for macOS (Apple Silicon).** Drive your external
 monitor's *real* hardware — brightness, volume, colour, input — over **DDC/CI**, from the
 menu bar, your keyboard's **brightness keys**, a CLI, or Shortcuts. Plus **auto-brightness**
-that follows your Mac's ambient light sensor. A free, open alternative to **BetterDisplay**,
-**Lunar**, and **MonitorControl**.
+that follows your Mac's ambient light sensor, **scheduled brightness** anchored to sunrise and
+sunset, a one-press **video-call fill light**, and **per-input hotkeys** for KVM setups. A free,
+open alternative to **BetterDisplay**, **Lunar**, and **MonitorControl**.
 
 <p align="center">
   <img src="Docs/images/menubar.png" width="330" alt="OpenDisplay menu-bar popover: per-display cards with resolution and refresh rate, a managed-offline display with one-click reconnect, and tools" />
@@ -32,6 +33,11 @@ no Dock icon.
 - **Adaptive brightness** — the monitor follows your built-in display's ambient-light level;
   with the built-in off it reads the light sensor **directly**; lid closed, it uses a
   schedule. Plus **Night-Shift-following** evening colour warmth.
+- **Clock Mode** — schedule brightness against fixed times or **sunrise / noon / sunset**
+  (with offsets, so "70% half an hour before sunset" just works), stepped, ramped, or
+  glided continuously between points.
+- **FaceLight** — one press turns your monitor into a warm video-call fill light; press
+  again and your exact previous brightness, contrast, and dimming come back.
 - **Full DDC/CI control** — brightness, contrast, volume, input source, colour presets,
   sharpness, and RGB gain, all driving the panel's own hardware.
 - **Safe by design** — every risky change is checkpointed and reversible, with a standalone
@@ -72,8 +78,12 @@ no Dock icon.
   built-in panel, and independent recovery (menu, a global hotkey, and a separate rescue app).
 - **Scenes** — save a display arrangement and re-apply it later.
 - **Black Out** and **software dimming** on any display.
+- **Input-switch hotkeys** — bind a global chord to "this monitor, that input" and jump a
+  KVM-shared display to your Mac without touching its buttons; bindings follow the physical
+  monitor (EDID identity), not the port, and confirm on-screen.
 - **Automation** — an `opendisplay` CLI and Shortcuts/Siri intents drive the same
-  safety-checked, audited path as the UI.
+  safety-checked, audited path as the UI — including `lux` (ambient-light readout), `lid`,
+  and `listen`, a line-delimited JSON stream of brightness and display events for scripting.
 - **Labs (opt-in):** experimental display **rotation** through a sandboxed helper — off by
   default and compiled out of the public-API build entirely.
 

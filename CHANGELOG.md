@@ -5,9 +5,32 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
-## [Unreleased]
+## [0.6.0] — 2026-07-21
+
+The Lunar-parity feature batch: FaceLight, Clock Mode, input-switch hotkeys, and three new CLI
+commands — plus an About section inside Settings.
 
 ### Added
+- **FaceLight** (Issue #29) — turn the active monitor into a video-call fill light with one press:
+  DDC brightness and contrast go to max and a warm, translucent, click-through overlay washes the
+  screen (strong warm light with your call still legible underneath). Press again to restore the
+  exact prior brightness, contrast, and overlay state. The restore ledger is persisted *before* the
+  hardware writes land, so a crash or relaunch mid-FaceLight still puts the display back exactly as
+  it was. Displays without DDC get the overlay-only version. Toggle from each display's card in the
+  menu, or bind the new "Toggle FaceLight" global-hotkey action.
+- **Input-switch hotkeys** (Issue #32) — assignable global hotkeys that jump a monitor straight to a
+  specific input ("⌃⌥⌘2 → Desk, HDMI 2"), so KVM-style setups never need the menu. Configured in
+  Settings; bindings target the display's persistent EDID identity, so they survive dock re-plugs
+  and port reordering. The switch routes through the same audited command path as the UI and CLI,
+  confirms on-screen via the OSD, and posts a notification instead of failing silently when the
+  display is offline or rejects the switch.
+- **CLI: `lux`, `listen`, `lid`** (Issue #34) — `opendisplay lux` prints the current ambient-light
+  reading (with `--json`); `opendisplay lid` reports lid state; `opendisplay listen` streams
+  brightness and display-topology events as line-delimited JSON until Ctrl-C, for scripting
+  (`| jq`, tail-style automation). Schema documented in `Tools/opendisplay/README.md`.
+- **About in Settings** — a new About section in the Settings sidebar (below Health & Recovery)
+  showing the app version and build, a Check for Updates control, and project links — the same
+  information as the About window, now one click away in Settings.
 - **Clock Mode** (Issue #30) — a first-class, user-editable brightness schedule for external
   displays. Each schedule point is anchored either to a fixed clock time or to a solar event
   (sunrise, solar noon, sunset) with a per-anchor offset in minutes — so "70% thirty minutes
