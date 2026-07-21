@@ -9,6 +9,11 @@ final class KeyboardShortcutRegistryTests: XCTestCase {
         let defaults = KeyboardShortcutRegistry.defaults
         XCTAssertEqual(defaults.binding(for: .reconnectAll), r)
         XCTAssertNil(defaults.binding(for: .brightnessUp))   // unbound by default
+        XCTAssertNil(defaults.binding(for: .faceLight))      // unbound by default, same as brightnessUp
+    }
+
+    func testFaceLightHasABehaviorNamingLabel() {
+        XCTAssertEqual(HotkeyAction.faceLight.label, "Toggle FaceLight")
     }
 
     func testControlOptionCommandMaskMatchesCarbon() {

@@ -305,6 +305,10 @@ private struct DisplayCard: View {
                           systemImage: model.isBlackedOut(display) ? "sun.max.fill" : "moon.fill") {
                 model.toggleBlackOut(for: display)
             }
+            ODQuickAction(model.isFaceLightActive(display) ? "Restore" : "FaceLight",
+                          systemImage: model.isFaceLightActive(display) ? "video.slash.fill" : "video.fill") {
+                model.toggleFaceLight(for: display)
+            }
             ODQuickAction("Turn Off", systemImage: "power", tone: .red,
                           enabled: !model.busy && model.activeDisplayCount > 1) {
                 Task { await model.setDisplayActive(false, for: display) }

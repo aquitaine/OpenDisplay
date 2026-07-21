@@ -1,18 +1,20 @@
 import AppKit
 
-/// Owns the black, click-through overlay windows the overlay/combined dimming methods use — one per
-/// dimmed display. Windows are borderless, ignore the mouse, join every Space, sit just below the
-/// status bar (so the menu bar and this app's popover stay reachable at any dim level — the escape
-/// hatch is never dimmed away), and are excluded from screen capture so screenshots come out clean.
-/// All state is process-bound: every overlay vanishes the instant the app exits, so unlike a gamma
-/// dim there is nothing to restore on quit.
+/// Owns the click-through overlay windows the overlay/combined dimming methods (and FaceLight) use —
+/// one per display carrying an overlay. Windows are borderless, ignore the mouse, join every Space,
+/// sit just below the status bar (so the menu bar and this app's popover stay reachable at any dim
+/// level — the escape hatch is never dimmed away), and are excluded from screen capture so
+/// screenshots come out clean. All state is process-bound: every overlay vanishes the instant the
+/// app exits, so unlike a gamma dim there is nothing to restore on quit.
 @MainActor
 final class DimOverlayController {
     private var windows: [CGDirectDisplayID: NSWindow] = [:]
 
-    /// Applies `alpha` (0...1, where 0 removes the overlay) to the display's overlay window,
-    /// creating it on first use. No-ops if the display has no NSScreen (offline / mid-reconfig).
-    func setAlpha(_ alpha: Float, for displayID: CGDirectDisplayID) {
+    /// Applies `alpha` (0...1, where 0 removes the overlay) to the display's overlay window, tinted
+    /// with `color` (default opaque black, for the dimming methods; FaceLight passes a warm-white
+    /// tint instead), creating the window on first use. No-ops if the display has no NSScreen
+    /// (offline / mid-reconfig).
+    func setAlpha(_ alpha: Float, color: NSColor = .black, for displayID: CGDirectDisplayID) {
         guard alpha > 0.001 else {
             remove(for: displayID)
             return
@@ -21,6 +23,7 @@ final class DimOverlayController {
         let window = windows[displayID] ?? makeWindow(on: screen)
         windows[displayID] = window
         window.setFrame(screen.frame, display: false)
+        window.backgroundColor = color
         window.alphaValue = CGFloat(alpha)
         window.orderFrontRegardless()
     }
