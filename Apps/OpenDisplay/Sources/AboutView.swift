@@ -13,10 +13,30 @@ struct AboutView: View {
 
     private static let repo = "https://github.com/aquitaine/OpenDisplay"
 
-    private var version: String {
+    /// A single project link shown both in this window and in Settings → About, so the two surfaces
+    /// can never drift apart on titles, icons, or destinations.
+    struct AboutLink: Identifiable {
+        let title: String
+        let systemImage: String
+        let url: URL
+        var id: String { title }
+    }
+
+    /// The project links AboutView offers, reused verbatim by the Settings → About card.
+    static let projectLinks: [AboutLink] = [
+        AboutLink(title: "Website", systemImage: "globe", url: URL(string: repo)!),
+        AboutLink(title: "Release notes", systemImage: "doc.text", url: URL(string: "\(repo)/releases")!),
+        AboutLink(title: "Report an issue", systemImage: "ladybug", url: URL(string: "\(repo)/issues/new")!),
+        AboutLink(title: "License (GPL-3.0)", systemImage: "checkmark.seal",
+                  url: URL(string: "\(repo)/blob/main/LICENSE")!),
+    ]
+
+    /// The running build's marketing version ("0.5.1"), reused by the Settings → About card.
+    static var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
     }
-    private var build: String {
+    /// The running build number, reused by the Settings → About card.
+    static var build: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
     }
 
@@ -32,21 +52,19 @@ struct AboutView: View {
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("Version \(version) (build \(build))")
+            Text("Version \(Self.version) (build \(Self.build))")
                 .font(.callout.monospacedDigit())
                 .textSelection(.enabled)
-                .accessibilityLabel("Version \(version), build \(build)")
+                .accessibilityLabel("Version \(Self.version), build \(Self.build)")
                 .padding(.top, 2)
-            updateStatus
+            UpdateCheckStatusView()
 
             Divider().padding(.vertical, ODSpacing.xs)
 
             VStack(alignment: .leading, spacing: ODSpacing.sm) {
-                aboutLink("Website", systemImage: "globe", url: Self.repo)
-                aboutLink("Release notes", systemImage: "doc.text", url: "\(Self.repo)/releases")
-                aboutLink("Report an issue", systemImage: "ladybug", url: "\(Self.repo)/issues/new")
-                aboutLink("License (GPL-3.0)", systemImage: "checkmark.seal",
-                          url: "\(Self.repo)/blob/main/LICENSE")
+                ForEach(Self.projectLinks) { link in
+                    aboutLink(link)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, ODSpacing.lg)
@@ -60,9 +78,26 @@ struct AboutView: View {
         .frame(width: 300)
     }
 
-    /// Mirrors the menu's update row: idle → button, checking → progress, result → outcome text
-    /// (with a click-through to the release page when one is available).
-    @ViewBuilder private var updateStatus: some View {
+    private func aboutLink(_ link: AboutLink) -> some View {
+        Link(destination: link.url) {
+            Label {
+                Text(link.title).font(.callout)
+            } icon: {
+                Image(systemName: link.systemImage).frame(width: 18)
+            }
+        }
+        .foregroundStyle(ODColor.accent)
+        .accessibilityHint("Opens in your browser")
+    }
+}
+
+/// Mirrors the menu's update row: idle → button, checking → progress, result → outcome text (with a
+/// click-through to the release page when one is available). Shared by the About window and the
+/// Settings → About card so both surfaces drive the same `AppModel.updateState` machinery.
+struct UpdateCheckStatusView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
         switch model.updateState {
         case .idle:
             Button("Check for Updates…") { Task { await model.checkForUpdates() } }
@@ -85,18 +120,6 @@ struct AboutView: View {
             .controlSize(.small)
             .accessibilityHint("Opens the release page in your browser")
         }
-    }
-
-    private func aboutLink(_ title: String, systemImage: String, url: String) -> some View {
-        Link(destination: URL(string: url)!) {
-            Label {
-                Text(title).font(.callout)
-            } icon: {
-                Image(systemName: systemImage).frame(width: 18)
-            }
-        }
-        .foregroundStyle(ODColor.accent)
-        .accessibilityHint("Opens in your browser")
     }
 }
 #endif
