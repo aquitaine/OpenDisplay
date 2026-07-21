@@ -6,14 +6,37 @@ import SwiftUI
 /// the Settings window are both AppKit-managed by `AppDelegate`: SwiftUI's `MenuBarExtra` mis-anchors
 /// its pop-out across multiple displays, and a menu-bar app can't reliably surface SwiftUI's `Settings`
 /// scene through the responder chain — so the delegate hosts `SettingsView` in its own `NSWindow` and
-/// owns the shared `AppModel`. The placeholder scene below only satisfies `App`'s scene requirement; it
-/// never auto-opens.
+/// owns the shared `AppModel`. The placeholder scene below only satisfies `App`'s scene requirement;
+/// if it is ever surfaced anyway, its content redirects to the delegate's window.
 @main
 struct OpenDisplayApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        Settings { EmptyView() }
+        Settings { SettingsSceneRedirect() }
+    }
+}
+
+/// Content for the placeholder `Settings` scene. Registering the scene gives the app the standard
+/// ⌘, "Settings…" behavior, but its SwiftUI-owned window is NOT the real settings UI — that lives in
+/// the AppKit window `AppDelegate` owns (see `showSettings`). The delegate intercepts ⌘, before it
+/// reaches this scene; this view is the backstop for any other path that surfaces the scene's window
+/// (e.g. a `showSettingsWindow:` action): the moment it lands in a window, close that window and open
+/// the real one.
+private struct SettingsSceneRedirect: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { Redirector() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class Redirector: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
+            // Async so we're not closing the window out from under AppKit mid-setup.
+            DispatchQueue.main.async { [weak window] in
+                window?.close()
+                NotificationCenter.default.post(name: .openDisplayShowSettings, object: nil)
+            }
+        }
     }
 }
 
@@ -32,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let popover = NSPopover()
     private var settingsWindow: NSWindow?
     private var aboutWindow: NSWindow?
+    private var settingsKeyMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         popover.behavior = .transient
@@ -51,6 +75,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self, selector: #selector(showSettings), name: .openDisplayShowSettings, object: nil)
         NotificationCenter.default.addObserver(
             self, selector: #selector(showAbout), name: .openDisplayShowAbout, object: nil)
+
+        // ⌘, is registered by the placeholder SwiftUI `Settings` scene, whose window is not the real
+        // settings UI. Intercept the shortcut before the scene sees it and open OUR Settings window —
+        // the same one the menu's gear opens. (`SettingsSceneRedirect` backstops non-keyboard paths.)
+        settingsKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  event.charactersIgnoringModifiers == "," else { return event }
+            self?.showSettings()
+            return nil
+        }
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.image = NSImage(systemSymbolName: "display", accessibilityDescription: "OpenDisplay")
