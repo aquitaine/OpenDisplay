@@ -5,6 +5,30 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [Unreleased]
+
+### Added
+- **Clock Mode** (Issue #30) — a first-class, user-editable brightness schedule for external
+  displays. Each schedule point is anchored either to a fixed clock time or to a solar event
+  (sunrise, solar noon, sunset) with a per-anchor offset in minutes — so "70% thirty minutes
+  before sunrise" tracks the season automatically. Three transition styles carry brightness between
+  points: **instant** (step at the anchor), **30-min ramp** (ease in over the half-hour ending at
+  the anchor), and **continuous** (glide across the whole gap). Transitions are silent — no OSD —
+  like every other adaptive change.
+  - **Solar math** is public-domain NOAA solar-position equations, computed as pure, deterministic
+    logic in `TopologyCore` (`SolarCalculator`) and unit-tested against known city/date sunrise and
+    sunset pairs (London, New York, Sydney) within a couple of minutes, plus polar-day/night and
+    noon-symmetry invariants. Location comes from Core Location (one-shot, opt-in "Use current
+    location") with a manual latitude/longitude fallback; with no location, solar anchors are
+    skipped gracefully and time anchors still work.
+  - **Precedence with Adaptive Display:** an explicit Clock Mode schedule outranks Adaptive
+    Display's built-in mirror — enabling Clock Mode governs external brightness even when brightness
+    sync is on. Adaptive warmth (colour preset) is orthogonal and unaffected. A manual brightness
+    change still pauses the schedule for the cooldown, reusing the same quiet-write machinery, so
+    the two never fight.
+  - Settings gain a Clock Mode editor (add / edit / delete schedule points, choose the location)
+    under Health & Recovery, consistent with the existing design.
+
 ## [0.5.1] — 2026-07-21
 
 Patch release: a real About window and keyboard-accessibility fixes in the menu pop-out.

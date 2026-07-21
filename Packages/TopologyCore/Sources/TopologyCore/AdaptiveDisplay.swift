@@ -108,11 +108,16 @@ public enum AdaptiveDisplayPolicy {
         public var nightShiftActive: Bool?
         public var brightnessSyncEnabled: Bool
         public var warmthEnabled: Bool
+        /// Clock Mode's explicit scheduled brightness for this tick, or nil when Clock Mode isn't
+        /// governing. When present it TAKES PRECEDENCE over the built-in mirror and the ambient
+        /// curve — an explicit user schedule outranks the inferred sync — while reusing the same
+        /// cooldown/hysteresis/manual-adoption machinery so the write stays silent and non-fighting.
+        public var scheduleOverride: Float?
 
         public init(now: Date, minuteOfDay: Int, builtInPresent: Bool, builtInBrightness: Float?,
                     ambientLux: Double? = nil, displayAsleep: Bool, currentPreset: Int?,
                     dayPreset: Int?, nightShiftActive: Bool?, brightnessSyncEnabled: Bool,
-                    warmthEnabled: Bool) {
+                    warmthEnabled: Bool, scheduleOverride: Float? = nil) {
             self.now = now
             self.minuteOfDay = minuteOfDay
             self.builtInPresent = builtInPresent
@@ -124,6 +129,7 @@ public enum AdaptiveDisplayPolicy {
             self.nightShiftActive = nightShiftActive
             self.brightnessSyncEnabled = brightnessSyncEnabled
             self.warmthEnabled = warmthEnabled
+            self.scheduleOverride = scheduleOverride
         }
     }
 
@@ -296,7 +302,16 @@ public enum AdaptiveDisplayPolicy {
             return nil
         }
         let target: Float
-        if input.builtInPresent {
+        if let override = input.scheduleOverride {
+            // Clock Mode precedence: an explicit user schedule outranks the built-in mirror and the
+            // ambient curve. Adopt a manual change the same way schedule mode does — hold the user's
+            // level until the scheduled target itself moves past hysteresis.
+            target = override
+            if let anchor = state.manualScheduleAnchor {
+                if abs(target - anchor) < config.hysteresis { return nil }
+                state.manualScheduleAnchor = nil
+            }
+        } else if input.builtInPresent {
             // Sync mode. A nil sample is a transient read failure: skip the tick — NEVER treat it
             // as built-in-gone (that would yank brightness to a fallback level on a hiccup).
             guard let builtIn = input.builtInBrightness else { return nil }

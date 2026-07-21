@@ -98,6 +98,39 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(loaded.adaptiveBrightnessOffsetByDisplay.isEmpty)
     }
 
+    func testClockScheduleFieldsDefaultOffAndRoundTrip() throws {
+        let defaults = OpenDisplaySettings.default
+        XCTAssertFalse(defaults.clockScheduleEnabled)
+        XCTAssertTrue(defaults.clockScheduleEntries.isEmpty)
+        XCTAssertNil(defaults.clockManualLocation)
+
+        let store = SettingsStore(directory: directory)
+        let entry = ClockScheduleEntry(anchor: .sunrise, offsetMinutes: -30, brightness: 0.7,
+                                       transition: .ramp)
+        let settings = OpenDisplaySettings(
+            clockScheduleEnabled: true,
+            clockScheduleEntries: [entry,
+                                   ClockScheduleEntry(anchor: .time, timeMinute: 1320, brightness: 0.3,
+                                                      transition: .instant)],
+            clockManualLocation: GeoCoordinate(latitude: 51.4769, longitude: 0.0))
+        try store.save(settings)
+        XCTAssertEqual(store.load(), settings)
+        XCTAssertEqual(store.load().clockScheduleEntries.first, entry)
+    }
+
+    func testPreClockSettingsFileDecodesToClockDefaults() throws {
+        // A settings file from before Clock Mode existed loads with the user's values intact and the
+        // clock fields at their defaults — never a wholesale fall back to .default.
+        let json = #"{"persistencePolicy":"persistentOffline","adaptiveWarmthEnabled":true}"#
+        try Data(json.utf8).write(to: directory.appendingPathComponent("settings.json"))
+        let loaded = SettingsStore(directory: directory).load()
+        XCTAssertEqual(loaded.persistencePolicy, .persistentOffline)
+        XCTAssertTrue(loaded.adaptiveWarmthEnabled)
+        XCTAssertFalse(loaded.clockScheduleEnabled)
+        XCTAssertTrue(loaded.clockScheduleEntries.isEmpty)
+        XCTAssertNil(loaded.clockManualLocation)
+    }
+
     func testDisplayNotificationsDefaultsOffAndRoundTrips() throws {
         XCTAssertFalse(OpenDisplaySettings.default.displayNotificationsEnabled)
         let store = SettingsStore(directory: directory)
