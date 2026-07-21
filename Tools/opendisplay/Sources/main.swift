@@ -1,6 +1,7 @@
 import AutomationSchema
 import CoreGraphics
 import CoreGraphicsProvider
+import Dispatch
 import DisplayDomain
 import ExperimentalLifecycleProvider
 import Foundation
@@ -41,6 +42,17 @@ func emit<T: Encodable>(_ value: T) {
     encoder.dateEncodingStrategy = .iso8601
     guard let data = try? encoder.encode(value), let text = String(data: data, encoding: .utf8) else {
         fail("failed to encode JSON output")
+    }
+    print(text)
+}
+
+/// Encodes one `listen` event compactly (no pretty-printing) so it prints as exactly one line, with
+/// sorted keys so two events with the same shape diff cleanly.
+func emitLine<T: Encodable>(_ value: T) {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    guard let data = try? encoder.encode(value), let text = String(data: data, encoding: .utf8) else {
+        fail("failed to encode JSON event")
     }
     print(text)
 }
@@ -199,6 +211,33 @@ func runDiagnose() async {
         let suffix = reasons.isEmpty ? "" : " (\(reasons.joined(separator: ",")))"
         print("\(id)\(labsTag): \(probe.status.rawValue) · risk=\(probe.risk.rawValue)\(suffix)")
     }
+}
+
+/// Prints the current ambient-light reading in lux — the direct ALS path Adaptive Display's ambient
+/// mode falls back to (`Providers/ExperimentalLifecycleProvider/Sources/AmbientLight.swift`). Exits
+/// non-zero when the sensor can't be read (no sensor, lid closed, or the IOKit SPI moved).
+func runLux() async {
+    guard let lux = AmbientLightReader().lux() else {
+        fail("ambient light sensor unavailable (no sensor, lid closed, or SPI unreachable)")
+    }
+    if asJSON { emit(["lux": lux]) } else { print(String(format: "%.1f lux", lux)) }
+}
+
+/// Reports the lid's open/closed state via `LidStatePolicy`, reusing the same signals Adaptive
+/// Display already senses. Exits non-zero only when this Mac has no built-in panel to reason about
+/// at all (a desktop Mac) — see `LidStatePolicy` for why `closed` is otherwise inferred, not sensed.
+func runLid() async {
+    let snapshot = await observer.currentSnapshot()
+    let builtInObservations = snapshot.observations.filter { $0.displayClass == .builtIn }
+    let builtInIsActive = builtInObservations.contains { $0.isActive }
+    let ambientLux = AmbientLightReader().lux()
+    guard let state = LidStatePolicy.evaluate(
+        builtInIsActive: builtInIsActive, hasBuiltInPanel: !builtInObservations.isEmpty,
+        ambientLux: ambientLux
+    ) else {
+        fail("lid state unavailable — no built-in display observed on this Mac")
+    }
+    if asJSON { emit(["state": state.rawValue]) } else { print(state.rawValue) }
 }
 
 func runAlias() async {
@@ -639,11 +678,87 @@ func runRotateExperimental() async {
     }
 }
 
+// MARK: - Listen (line-delimited JSON event stream)
+
+/// Keeps the Ctrl-C signal source alive for the process's lifetime — a `DispatchSourceSignal` stops
+/// firing the moment nothing retains it, so a local `let` inside `installCleanSigintExit` would be
+/// silently deallocated before any signal ever arrived. `nonisolated(unsafe)`: written once at
+/// startup, on the same thread that later reads it only to keep it retained (matches the retained-
+/// token pattern in `GlobalHotKey.swift`).
+nonisolated(unsafe) var sigintSource: DispatchSourceSignal?
+
+/// Installs a clean Ctrl-C exit for `listen`: ignore the default disposition (which would kill the
+/// process mid-write) and `exit(0)` from a dedicated queue once the signal lands.
+func installCleanSigintExit() {
+    signal(SIGINT, SIG_IGN)
+    let queue = DispatchQueue(label: "opendisplay.listen.sigint")
+    let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: queue)
+    source.setEventHandler { exit(0) }
+    source.resume()
+    sigintSource = source
+}
+
+/// The live topology as `listen`'s compact per-display summary.
+func summarizeCurrentDisplays() async -> [ListenEvent.DisplaySummary] {
+    let snapshot = await observer.currentSnapshot()
+    return snapshot.observations.map {
+        ListenEvent.DisplaySummary(id: $0.recordID.rawValue, active: $0.isActive, main: $0.isMain,
+                                   mode: modeString($0))
+    }
+}
+
+/// Streams a `config` event on every topology change (hotplug, mode, rotation, mirror, main display).
+func watchConfigEvents() async {
+    let topologyChanges = await observer.changes()
+    for await _ in topologyChanges {
+        let displays = await summarizeCurrentDisplays()
+        emitLine(ListenEvent.config(at: Date().timeIntervalSince1970, displays: displays))
+    }
+}
+
+/// Streams a `brightness` event for every live `OSDBroadcast` (menu/media-key/CLI/App-Intent origin).
+/// Requires "Broadcast OSD events" enabled in OpenDisplay's settings — `runListen` warns on stderr
+/// once at startup when it's off.
+func watchBrightnessEvents() async {
+    let center = DistributedNotificationCenter.default()
+    let broadcastName = Notification.Name(OSDBroadcast.notificationName)
+    for await notification in center.notifications(named: broadcastName) {
+        guard let userInfo = notification.userInfo as? [String: String],
+              let broadcast = OSDBroadcast(userInfo: userInfo), broadcast.kind == .brightness
+        else { continue }
+        emitLine(ListenEvent.brightness(from: broadcast))
+    }
+}
+
+/// One-time stderr note when the app hasn't opted into broadcasting brightness changes — otherwise
+/// `listen` would sit silent on brightness with no clue why.
+func warnIfBrightnessEventsAreOff() {
+    let settingsStore = (try? SettingsStore.defaultDirectory()).map(SettingsStore.init(directory:))
+    guard settingsStore?.load().publishOSDEventsEnabled != true else { return }
+    FileHandle.standardError.write(Data(
+        "note: brightness events need \"Broadcast OSD events\" on in OpenDisplay settings\n".utf8))
+}
+
+/// Streams brightness + config-change events as line-delimited JSON until Ctrl-C. Line-buffered
+/// (`setvbuf`) so a piped consumer (`| jq`, `| tail -f`) sees each event as it happens rather than
+/// batched at exit.
+func runListen() async {
+    setvbuf(stdout, nil, _IOLBF, 0)
+    installCleanSigintExit()
+    warnIfBrightnessEventsAreOff()
+    async let brightnessEvents: Void = watchBrightnessEvents()
+    async let configEvents: Void = watchConfigEvents()
+    _ = await (brightnessEvents, configEvents)
+}
+
 // MARK: - Dispatch
 
 switch command {
 case "list": await runList()
 case "diagnose": await runDiagnose()
+case "lux": await runLux()
+case "lid": await runLid()
+case "listen": await runListen()
 case "alias": await runAlias()
 case "tag": await runTag()
 case "recover": await runRecover()
@@ -662,6 +777,9 @@ case "help", "--help", "-h":
     USAGE:
       opendisplay list [--json]
       opendisplay diagnose [--json]
+      opendisplay lux [--json]
+      opendisplay lid [--json]
+      opendisplay listen
       opendisplay alias <selector> <name>
       opendisplay tag <selector> <tag>
       opendisplay disconnect <selector> [--dry-run] [--json]
@@ -674,8 +792,11 @@ case "help", "--help", "-h":
       opendisplay edid <selector> [--out <path.bin>]
       opendisplay favorite <list|set|unset> <selector> [WxH[@Hz][@2x]]
 
+    lux/lid exit non-zero when the sensor/state is unavailable. listen streams line-delimited JSON
+    (one event per line) until Ctrl-C; see Tools/opendisplay/README.md for the event schema.
+
     SELECTORS: id:<recordID> · alias:<name> · tag:<tag> · main · builtin · state:<active|managedOffline> · <cgDisplayID>
     """)
 default:
-    fail("unknown command '\(command)' (try: list, diagnose, alias, tag, disconnect, reconnect, recover, scene, brightness, ddc, help)", code: 2)
+    fail("unknown command '\(command)' (try: list, diagnose, lux, lid, listen, alias, tag, disconnect, reconnect, recover, scene, brightness, ddc, help)", code: 2)
 }
