@@ -310,6 +310,7 @@ final class AppModel: ObservableObject {
             await setUpScenes()
             await loadManagedOffline()
             await refresh()
+            await restoreOwedFaceLightState()  // crash-safe recovery: relaunching mid-FaceLight restores it
             await enforceActiveSurfaceInvariant()  // recover if we launched into a stranded (0-active) state
             reconcileDisplaySleepGuard()  // hold/release the keep-awake assertion for the launch topology
             #if !PUBLIC_API_ONLY
@@ -1567,6 +1568,111 @@ final class AppModel: ObservableObject {
     }
     #endif
 
+    // MARK: - FaceLight: video-call fill light
+
+    /// Toggles FaceLight for `observation`: DDC brightness/contrast to max plus a warm click-through
+    /// overlay; the next press restores the exact prior brightness/contrast. The restore ledger is
+    /// persisted BEFORE the max-out write and cleared only after a confirmed restore, so a crash or
+    /// relaunch mid-FaceLight still restores correctly — see `FaceLightPolicy` and
+    /// `restoreOwedFaceLightState`. Displays with no DDC contrast channel simply get no contrast
+    /// write; the overlay alone carries the fill-light effect for them.
+    func toggleFaceLight(for observation: DisplayObservation) {
+        guard let cgID = observation.cgDisplayID else { return }
+        let id = observation.recordID
+        let owedPriorState = settings.faceLightPriorStateByDisplay[id.rawValue]
+        let outcome = FaceLightPolicy.toggle(
+            owedPriorState: owedPriorState, liveBrightness: brightness[id] ?? 1.0,
+            liveContrast: ddcControl(.contrast, for: observation))
+
+        settings.faceLightPriorStateByDisplay[id.rawValue] = outcome.priorStateToPersist
+        persistSettings()
+
+        if let brightnessWrite = outcome.brightnessWrite { setBrightness(brightnessWrite, for: observation) }
+        if let contrastWrite = outcome.contrastWrite {
+            setHardwareControl(.contrast, contrastWrite, for: observation)
+        }
+        applyFaceLightOverlay(isActive: outcome.isNowActive, cgID: cgID)
+    }
+
+    /// True while `observation` is currently FaceLight's fill light (ledger presence IS the flag,
+    /// exactly like `adaptiveDayPresetByDisplay` doubles as the evening-warmth "is active" flag).
+    func isFaceLightActive(_ observation: DisplayObservation) -> Bool {
+        settings.faceLightPriorStateByDisplay[observation.recordID.rawValue] != nil
+    }
+
+    /// Shows or hides the warm-white overlay for FaceLight, reusing the same click-through window
+    /// infrastructure the dim/combined methods use — crash-safe because the window is process-bound,
+    /// so an app crash can never leave a warm overlay stuck on screen. The window opacity is
+    /// `FaceLightPolicy.overlayAlpha` (a translucent wash), NOT full opacity: at alpha 1 the panel
+    /// would go visually blind, hiding the very video call FaceLight is meant to light — the maxed
+    /// brightness/contrast from `toggle` plus a strong (not opaque) wash is what keeps the call
+    /// window legible while still throwing extra warm light off the panel.
+    private func applyFaceLightOverlay(isActive: Bool, cgID: CGDirectDisplayID) {
+        guard isActive else {
+            dimOverlay.remove(for: cgID)
+            return
+        }
+        let gains = ColorTemperatureCurve.gains(kelvin: FaceLightPolicy.overlayKelvin)
+        let warmWhite = NSColor(red: CGFloat(gains.red), green: CGFloat(gains.green),
+                                blue: CGFloat(gains.blue), alpha: 1)
+        dimOverlay.setAlpha(FaceLightPolicy.overlayAlpha, color: warmWhite, for: cgID)
+    }
+
+    /// Restores every owed FaceLight prior state — crash-safe recovery at launch, and the
+    /// quit-teardown backstop `needsQuitReversion` waits for. A ledger entry only clears once its
+    /// restore write is confirmed landed, mirroring `restoreOwedDayPresets`'s ordering.
+    private func restoreOwedFaceLightState() async {
+        guard !settings.faceLightPriorStateByDisplay.isEmpty else { return }
+        var remaining = settings.faceLightPriorStateByDisplay
+        for (rawID, prior) in settings.faceLightPriorStateByDisplay {
+            guard let observation = displays.first(where: { $0.recordID.rawValue == rawID }),
+                  observation.isActive else { continue }
+            await restoreFaceLightPrior(prior, for: observation)
+            remaining[rawID] = nil
+        }
+        if remaining != settings.faceLightPriorStateByDisplay {
+            settings.faceLightPriorStateByDisplay = remaining
+            persistSettings()
+        }
+    }
+
+    /// Writes one display's pre-FaceLight brightness/contrast back and drops its overlay. The DDC
+    /// branch awaits the controller directly (bypassing the coalesced writer) so a caller that awaits
+    /// this — quit teardown, launch-time crash recovery — knows the hardware write already landed.
+    private func restoreFaceLightPrior(_ prior: FaceLightPolicy.PriorState,
+                                       for observation: DisplayObservation) async {
+        let id = observation.recordID
+        #if !PUBLIC_API_ONLY
+        if let controller = await ddcController(for: observation) {
+            let maxLevel = Float(brightnessMax[id] ?? 100)
+            await controller.write(.brightness, Int((prior.brightness * maxLevel).rounded()))
+            brightness[id] = prior.brightness
+            if let contrast = prior.contrast {
+                await restoreFaceLightContrast(contrast, id: id, controller: controller)
+            }
+            removeFaceLightOverlay(for: observation)
+            return
+        }
+        #endif
+        setBrightness(prior.brightness, for: observation)
+        removeFaceLightOverlay(for: observation)
+    }
+
+    #if !PUBLIC_API_ONLY
+    private func restoreFaceLightContrast(_ contrast: Float, id: DisplayRecordID,
+                                          controller: ExternalDisplayDDC) async {
+        let key = DDCControlKey(id: id, vcp: HardwareControl.contrast.vcp)
+        let contrastMax = Float(ddcControlMax[key] ?? 100)
+        await controller.write(.contrast, Int((contrast * contrastMax).rounded()))
+        ddcControlLevel[id, default: [:]][HardwareControl.contrast.vcp] = contrast
+    }
+    #endif
+
+    private func removeFaceLightOverlay(for observation: DisplayObservation) {
+        guard let cgID = observation.cgDisplayID else { return }
+        dimOverlay.remove(for: cgID)
+    }
+
     /// Applies a chosen resolution/mode behind the timed auto-revert gate (Issue 6), then re-reads the
     /// topology. A bad/blank resolution can leave a display unreadable, so the change is checkpointed
     /// and reverts itself unless confirmed within the window.
@@ -1973,6 +2079,9 @@ final class AppModel: ObservableObject {
         // must wait for that DDC write (the willTerminate backstop can't do async I2C).
         if !settings.adaptiveDayPresetByDisplay.isEmpty { return true }
         #endif
+        // An active FaceLight owes the display its pre-fill-light brightness/contrast back — same
+        // reasoning as the evening-preset case above.
+        if !settings.faceLightPriorStateByDisplay.isEmpty { return true }
         return false
     }
 
@@ -1989,6 +2098,7 @@ final class AppModel: ObservableObject {
         adaptiveLoop = nil
         await restoreOwedDayPresets()
         #endif
+        await restoreOwedFaceLightState()
         // Reconnect each off-card the way `reconnectOffline(_:)` does — by raw display id, since a
         // disabled display drops off the online list. `coordinator.reconnectAll()` only sees the
         // observer snapshot's offline list, which doesn't include this persisted `managedOffline`
@@ -2054,6 +2164,11 @@ final class AppModel: ObservableObject {
             return { [weak self] in Task { await self?.adjustMainBrightness(by: 0.1) } }
         case .brightnessDown:
             return { [weak self] in Task { await self?.adjustMainBrightness(by: -0.1) } }
+        case .faceLight:
+            return { [weak self] in
+                guard let self, let main = self.displays.first(where: \.isMain) else { return }
+                self.toggleFaceLight(for: main)
+            }
         }
     }
 

@@ -8,6 +8,7 @@ public enum HotkeyAction: String, Hashable, Sendable, Codable, CaseIterable {
     case cycleMainDisplay
     case brightnessUp
     case brightnessDown
+    case faceLight
 
     public var label: String {
         switch self {
@@ -15,6 +16,7 @@ public enum HotkeyAction: String, Hashable, Sendable, Codable, CaseIterable {
         case .cycleMainDisplay: return "Cycle Main Display"
         case .brightnessUp: return "Brightness Up"
         case .brightnessDown: return "Brightness Down"
+        case .faceLight: return "Toggle FaceLight"
         }
     }
 

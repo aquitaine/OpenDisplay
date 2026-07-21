@@ -175,6 +175,27 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(loaded.osdStyle, .native)
     }
 
+    func testFaceLightLedgerDefaultsEmptyAndRoundTrips() throws {
+        XCTAssertTrue(OpenDisplaySettings.default.faceLightPriorStateByDisplay.isEmpty)
+        let store = SettingsStore(directory: directory)
+        let settings = OpenDisplaySettings(
+            faceLightPriorStateByDisplay: ["cg:abc": FaceLightPolicy.PriorState(brightness: 0.4, contrast: 0.5)]
+        )
+        try store.save(settings)
+        XCTAssertEqual(store.load(), settings)
+    }
+
+    func testPreFaceLightSettingsFileDecodesToEmptyLedger() throws {
+        // A settings file from before FaceLight existed must still load, defaulting the ledger empty
+        // rather than losing the rest of the file's values.
+        let json = #"{"persistencePolicy":"persistentOffline","mediaKeyInterceptionEnabled":true}"#
+        try Data(json.utf8).write(to: directory.appendingPathComponent("settings.json"))
+        let loaded = SettingsStore(directory: directory).load()
+        XCTAssertEqual(loaded.persistencePolicy, .persistentOffline)
+        XCTAssertTrue(loaded.mediaKeyInterceptionEnabled)
+        XCTAssertTrue(loaded.faceLightPriorStateByDisplay.isEmpty)
+    }
+
     func testSettingsFileIsIndependentlyReadable() throws {
         let store = SettingsStore(directory: directory)
         try store.save(OpenDisplaySettings(persistencePolicy: .reconnectOnWake))

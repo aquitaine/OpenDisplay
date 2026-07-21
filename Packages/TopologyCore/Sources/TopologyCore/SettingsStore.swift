@@ -41,6 +41,12 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// When on, broadcast each OSD event over `DistributedNotificationCenter` for external/notch HUD
     /// apps (Batch-3 #6). Default off.
     public var publishOSDEventsEnabled: Bool
+    /// FaceLight restore ledger, keyed by `DisplayRecordID.rawValue`: each display's brightness/
+    /// contrast at the moment FaceLight turned it into a fill light. INVARIANT: a key is present if
+    /// and only if FaceLight is currently active for that display and a restore is owed; persisted
+    /// BEFORE the max-brightness write and cleared after every restore, so a crash/relaunch
+    /// mid-FaceLight still restores correctly (mirrors `adaptiveDayPresetByDisplay`).
+    public var faceLightPriorStateByDisplay: [String: FaceLightPolicy.PriorState]
     /// Adaptive Display (Labs): mirror the built-in panel's (ambient-light-driven) brightness to
     /// external displays' hardware backlight over DDC; falls back to the schedule curve below when
     /// no built-in is active (clamshell). Default off.
@@ -91,6 +97,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         osdStyle: OSDStyle = .native,
         osdPosition: OSDPosition = .bottomCenter,
         publishOSDEventsEnabled: Bool = false,
+        faceLightPriorStateByDisplay: [String: FaceLightPolicy.PriorState] = [:],
         adaptiveBrightnessSyncEnabled: Bool = false,
         adaptiveWarmthEnabled: Bool = false,
         adaptiveDayStartMinute: Int = 420,
@@ -118,6 +125,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.osdStyle = osdStyle
         self.osdPosition = osdPosition
         self.publishOSDEventsEnabled = publishOSDEventsEnabled
+        self.faceLightPriorStateByDisplay = faceLightPriorStateByDisplay
         self.adaptiveBrightnessSyncEnabled = adaptiveBrightnessSyncEnabled
         self.adaptiveWarmthEnabled = adaptiveWarmthEnabled
         self.adaptiveDayStartMinute = adaptiveDayStartMinute
@@ -147,6 +155,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case osdStyle
         case osdPosition
         case publishOSDEventsEnabled
+        case faceLightPriorStateByDisplay
         case adaptiveBrightnessSyncEnabled
         case adaptiveWarmthEnabled
         case adaptiveDayStartMinute
@@ -202,6 +211,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         publishOSDEventsEnabled = try container
             .decodeIfPresent(Bool.self, forKey: .publishOSDEventsEnabled)
             ?? defaults.publishOSDEventsEnabled
+        faceLightPriorStateByDisplay = try container
+            .decodeIfPresent([String: FaceLightPolicy.PriorState].self, forKey: .faceLightPriorStateByDisplay)
+            ?? defaults.faceLightPriorStateByDisplay
         adaptiveBrightnessSyncEnabled = try container
             .decodeIfPresent(Bool.self, forKey: .adaptiveBrightnessSyncEnabled)
             ?? defaults.adaptiveBrightnessSyncEnabled
