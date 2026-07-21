@@ -72,6 +72,21 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(loaded.confirmationCountdownSeconds, OpenDisplaySettings.default.confirmationCountdownSeconds)
     }
 
+    func testOneUndecodableFieldDegradesAloneInsteadOfWipingTheFile() throws {
+        // A future build's unknown enum case (or a corrupted field) must cost only that one field —
+        // a full-file fallback to .default would erase every setting AND the restore ledgers, then
+        // the next save would persist the wipe.
+        let json = #"""
+        {"dimmingMethod":"fromTheFuture","preventDisplaySleepWithExternal":true,
+         "faceLightPriorStateByDisplay":{"cgid:7":{"brightness":0.4}}}
+        """#
+        try Data(json.utf8).write(to: directory.appendingPathComponent("settings.json"))
+        let loaded = SettingsStore(directory: directory).load()
+        XCTAssertEqual(loaded.dimmingMethod, OpenDisplaySettings.default.dimmingMethod)
+        XCTAssertTrue(loaded.preventDisplaySleepWithExternal)
+        XCTAssertEqual(loaded.faceLightPriorStateByDisplay["cgid:7"]?.brightness, 0.4)
+    }
+
     func testPreventDisplaySleepDefaultsOffAndRoundTrips() throws {
         XCTAssertFalse(OpenDisplaySettings.default.preventDisplaySleepWithExternal)
         let store = SettingsStore(directory: directory)

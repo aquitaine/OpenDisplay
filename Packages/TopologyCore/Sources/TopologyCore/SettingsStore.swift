@@ -220,105 +220,92 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case appPresetPriorStateByDisplay
     }
 
-    /// Tolerant decoder: every missing key falls back to its default and unknown keys are ignored,
-    /// so settings files survive schema changes in either direction.
+    /// Tolerant decoder: every missing OR undecodable key falls back to its default and unknown
+    /// keys are ignored, so settings files survive schema changes in either direction. Per-key
+    /// tolerance matters as much as missing-key tolerance: one unknown enum case or reshaped field
+    /// (e.g. after a downgrade) must degrade that one setting, not throw the whole file away —
+    /// `load()` would return `.default` and the next save would overwrite every setting *and* the
+    /// FaceLight/app-preset/day-preset restore ledgers, stranding displays at applied values.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let defaults = OpenDisplaySettings.default
-        persistencePolicy = try container.decodeIfPresent(PersistencePolicy.self, forKey: .persistencePolicy)
+        persistencePolicy = container.lenient(PersistencePolicy.self, forKey: .persistencePolicy)
             ?? defaults.persistencePolicy
-        confirmationCountdownSeconds = try container.decodeIfPresent(Int.self, forKey: .confirmationCountdownSeconds)
+        confirmationCountdownSeconds = container.lenient(Int.self, forKey: .confirmationCountdownSeconds)
             ?? defaults.confirmationCountdownSeconds
-        reconnectAllHotkeyEnabled = try container.decodeIfPresent(Bool.self, forKey: .reconnectAllHotkeyEnabled)
+        reconnectAllHotkeyEnabled = container.lenient(Bool.self, forKey: .reconnectAllHotkeyEnabled)
             ?? defaults.reconnectAllHotkeyEnabled
-        preventDisplaySleepWithExternal = try container
-            .decodeIfPresent(Bool.self, forKey: .preventDisplaySleepWithExternal)
+        preventDisplaySleepWithExternal = container.lenient(Bool.self, forKey: .preventDisplaySleepWithExternal)
             ?? defaults.preventDisplaySleepWithExternal
-        autoDisconnectBuiltInOnExternal = try container
-            .decodeIfPresent(Bool.self, forKey: .autoDisconnectBuiltInOnExternal)
+        autoDisconnectBuiltInOnExternal = container.lenient(Bool.self, forKey: .autoDisconnectBuiltInOnExternal)
             ?? defaults.autoDisconnectBuiltInOnExternal
-        arrangementAutoRevertSeconds = try container
-            .decodeIfPresent(Int.self, forKey: .arrangementAutoRevertSeconds)
+        arrangementAutoRevertSeconds = container.lenient(Int.self, forKey: .arrangementAutoRevertSeconds)
             ?? defaults.arrangementAutoRevertSeconds
-        hotkeyShortcuts = try container
-            .decodeIfPresent(KeyboardShortcutRegistry.self, forKey: .hotkeyShortcuts)
+        hotkeyShortcuts = container.lenient(KeyboardShortcutRegistry.self, forKey: .hotkeyShortcuts)
             ?? defaults.hotkeyShortcuts
-        displayNotificationsEnabled = try container
-            .decodeIfPresent(Bool.self, forKey: .displayNotificationsEnabled)
+        displayNotificationsEnabled = container.lenient(Bool.self, forKey: .displayNotificationsEnabled)
             ?? defaults.displayNotificationsEnabled
-        mediaKeyInterceptionEnabled = try container
-            .decodeIfPresent(Bool.self, forKey: .mediaKeyInterceptionEnabled)
+        mediaKeyInterceptionEnabled = container.lenient(Bool.self, forKey: .mediaKeyInterceptionEnabled)
             ?? defaults.mediaKeyInterceptionEnabled
-        mediaKeyTargetMode = try container
-            .decodeIfPresent(MediaKeyTargetMode.self, forKey: .mediaKeyTargetMode)
+        mediaKeyTargetMode = container.lenient(MediaKeyTargetMode.self, forKey: .mediaKeyTargetMode)
             ?? defaults.mediaKeyTargetMode
-        osdEnabled = try container.decodeIfPresent(Bool.self, forKey: .osdEnabled)
+        osdEnabled = container.lenient(Bool.self, forKey: .osdEnabled)
             ?? defaults.osdEnabled
-        osdStyle = try container.decodeIfPresent(OSDStyle.self, forKey: .osdStyle)
+        osdStyle = container.lenient(OSDStyle.self, forKey: .osdStyle)
             ?? defaults.osdStyle
-        osdPosition = try container.decodeIfPresent(OSDPosition.self, forKey: .osdPosition)
+        osdPosition = container.lenient(OSDPosition.self, forKey: .osdPosition)
             ?? defaults.osdPosition
-        publishOSDEventsEnabled = try container
-            .decodeIfPresent(Bool.self, forKey: .publishOSDEventsEnabled)
+        publishOSDEventsEnabled = container.lenient(Bool.self, forKey: .publishOSDEventsEnabled)
             ?? defaults.publishOSDEventsEnabled
-        faceLightPriorStateByDisplay = try container
-            .decodeIfPresent([String: FaceLightPolicy.PriorState].self, forKey: .faceLightPriorStateByDisplay)
+        faceLightPriorStateByDisplay = container.lenient([String: FaceLightPolicy.PriorState].self, forKey: .faceLightPriorStateByDisplay)
             ?? defaults.faceLightPriorStateByDisplay
-        adaptiveBrightnessSyncEnabled = try container
-            .decodeIfPresent(Bool.self, forKey: .adaptiveBrightnessSyncEnabled)
+        adaptiveBrightnessSyncEnabled = container.lenient(Bool.self, forKey: .adaptiveBrightnessSyncEnabled)
             ?? defaults.adaptiveBrightnessSyncEnabled
-        adaptiveWarmthEnabled = try container
-            .decodeIfPresent(Bool.self, forKey: .adaptiveWarmthEnabled)
+        adaptiveWarmthEnabled = container.lenient(Bool.self, forKey: .adaptiveWarmthEnabled)
             ?? defaults.adaptiveWarmthEnabled
-        adaptiveDayStartMinute = try container
-            .decodeIfPresent(Int.self, forKey: .adaptiveDayStartMinute)
+        adaptiveDayStartMinute = container.lenient(Int.self, forKey: .adaptiveDayStartMinute)
             ?? defaults.adaptiveDayStartMinute
-        adaptiveNightStartMinute = try container
-            .decodeIfPresent(Int.self, forKey: .adaptiveNightStartMinute)
+        adaptiveNightStartMinute = container.lenient(Int.self, forKey: .adaptiveNightStartMinute)
             ?? defaults.adaptiveNightStartMinute
-        adaptiveTransitionMinutes = try container
-            .decodeIfPresent(Int.self, forKey: .adaptiveTransitionMinutes)
+        adaptiveTransitionMinutes = container.lenient(Int.self, forKey: .adaptiveTransitionMinutes)
             ?? defaults.adaptiveTransitionMinutes
-        adaptiveFallbackDayLevel = try container
-            .decodeIfPresent(Float.self, forKey: .adaptiveFallbackDayLevel)
+        adaptiveFallbackDayLevel = container.lenient(Float.self, forKey: .adaptiveFallbackDayLevel)
             ?? defaults.adaptiveFallbackDayLevel
-        adaptiveFallbackNightLevel = try container
-            .decodeIfPresent(Float.self, forKey: .adaptiveFallbackNightLevel)
+        adaptiveFallbackNightLevel = container.lenient(Float.self, forKey: .adaptiveFallbackNightLevel)
             ?? defaults.adaptiveFallbackNightLevel
-        adaptiveEveningPreset = try container
-            .decodeIfPresent(Int.self, forKey: .adaptiveEveningPreset)
+        adaptiveEveningPreset = container.lenient(Int.self, forKey: .adaptiveEveningPreset)
             ?? defaults.adaptiveEveningPreset
-        adaptiveDayPresetByDisplay = try container
-            .decodeIfPresent([String: Int].self, forKey: .adaptiveDayPresetByDisplay)
+        adaptiveDayPresetByDisplay = container.lenient([String: Int].self, forKey: .adaptiveDayPresetByDisplay)
             ?? defaults.adaptiveDayPresetByDisplay
-        adaptiveBrightnessOffsetByDisplay = try container
-            .decodeIfPresent([String: Float].self, forKey: .adaptiveBrightnessOffsetByDisplay)
+        adaptiveBrightnessOffsetByDisplay = container.lenient([String: Float].self, forKey: .adaptiveBrightnessOffsetByDisplay)
             ?? defaults.adaptiveBrightnessOffsetByDisplay
-        adaptiveLocationModeEnabled = try container
-            .decodeIfPresent(Bool.self, forKey: .adaptiveLocationModeEnabled)
+        adaptiveLocationModeEnabled = container.lenient(Bool.self, forKey: .adaptiveLocationModeEnabled)
             ?? defaults.adaptiveLocationModeEnabled
-        clockScheduleEnabled = try container
-            .decodeIfPresent(Bool.self, forKey: .clockScheduleEnabled)
+        clockScheduleEnabled = container.lenient(Bool.self, forKey: .clockScheduleEnabled)
             ?? defaults.clockScheduleEnabled
-        clockScheduleEntries = try container
-            .decodeIfPresent([ClockScheduleEntry].self, forKey: .clockScheduleEntries)
+        clockScheduleEntries = container.lenient([ClockScheduleEntry].self, forKey: .clockScheduleEntries)
             ?? defaults.clockScheduleEntries
-        clockManualLocation = try container
-            .decodeIfPresent(GeoCoordinate.self, forKey: .clockManualLocation)
+        clockManualLocation = container.lenient(GeoCoordinate.self, forKey: .clockManualLocation)
             ?? defaults.clockManualLocation
-        updateCheckEnabled = try container.decodeIfPresent(Bool.self, forKey: .updateCheckEnabled)
+        updateCheckEnabled = container.lenient(Bool.self, forKey: .updateCheckEnabled)
             ?? defaults.updateCheckEnabled
-        dimmingMethod = try container.decodeIfPresent(DimmingMethod.self, forKey: .dimmingMethod)
+        dimmingMethod = container.lenient(DimmingMethod.self, forKey: .dimmingMethod)
             ?? defaults.dimmingMethod
-        appPresetsEnabled = try container.decodeIfPresent(Bool.self, forKey: .appPresetsEnabled)
+        appPresetsEnabled = container.lenient(Bool.self, forKey: .appPresetsEnabled)
             ?? defaults.appPresetsEnabled
-        appPresets = try container
-            .decodeIfPresent([AppPresetPolicy.AppPreset].self, forKey: .appPresets)
+        appPresets = container.lenient([AppPresetPolicy.AppPreset].self, forKey: .appPresets)
             ?? defaults.appPresets
-        appPresetPriorStateByDisplay = try container
-            .decodeIfPresent([String: AppPresetPolicy.PriorState].self,
+        appPresetPriorStateByDisplay = container.lenient([String: AppPresetPolicy.PriorState].self,
                              forKey: .appPresetPriorStateByDisplay)
             ?? defaults.appPresetPriorStateByDisplay
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// `decodeIfPresent` that also tolerates a present-but-undecodable value, returning nil instead
+    /// of throwing — the per-key half of `OpenDisplaySettings`' tolerant decoding.
+    fileprivate func lenient<T: Decodable>(_ type: T.Type, forKey key: Key) -> T? {
+        (try? decodeIfPresent(type, forKey: key)) ?? nil
     }
 }
 

@@ -177,7 +177,7 @@ public enum AdaptiveDisplayPolicy {
         if let progress = rampProgress(minute, from: config.nightStartMinute, width: ramp) {
             return day - (day - night) * progress    // evening: day → night
         }
-        return isNightPlateau(minute, config: config) ? night : day
+        return scheduleIsNight(atMinute: minute, config: config) ? night : day
     }
 
     /// Whether a minute-of-day falls in the night phase (for warmth, the schedule fallback when
@@ -223,10 +223,6 @@ public enum AdaptiveDisplayPolicy {
         let delta = ((minute - start) % 1440 + 1440) % 1440
         guard delta < width else { return nil }
         return (Float(delta) + 1) / Float(width)
-    }
-
-    private static func isNightPlateau(_ minute: Int, config: AdaptiveDisplayConfig) -> Bool {
-        inWrappedRange(minute, from: config.nightStartMinute, to: config.dayStartMinute)
     }
 
     /// Whether `minute` lies in [from, to) on a 24h clock, correctly when the range wraps midnight.

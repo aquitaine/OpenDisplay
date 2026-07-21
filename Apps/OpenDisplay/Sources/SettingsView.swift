@@ -958,7 +958,7 @@ private struct AppPresetRow: View {
             HStack(spacing: ODSpacing.md) {
                 Toggle("Brightness", isOn: brightnessEnabledBinding)
                 if preset.brightness != nil {
-                    Stepper("\(Int((preset.brightness ?? 0) * 100))%", value: brightnessBinding,
+                    Stepper("\(Int(((preset.brightness ?? 0) * 100).rounded()))%", value: brightnessBinding,
                             in: 0...1, step: 0.05)
                         .fixedSize()
                 }
@@ -966,7 +966,7 @@ private struct AppPresetRow: View {
             HStack(spacing: ODSpacing.md) {
                 Toggle("Contrast", isOn: contrastEnabledBinding)
                 if preset.contrast != nil {
-                    Stepper("\(Int((preset.contrast ?? 0) * 100))%", value: contrastBinding,
+                    Stepper("\(Int(((preset.contrast ?? 0) * 100).rounded()))%", value: contrastBinding,
                             in: 0...1, step: 0.05)
                         .fixedSize()
                 }

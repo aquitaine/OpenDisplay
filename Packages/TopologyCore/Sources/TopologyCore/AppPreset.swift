@@ -191,7 +191,7 @@ public enum AppPresetPolicy {
     public static func resolve(_ input: Input, state: ActivationState) -> Decision {
         let desiredBundleID = desiredBundle(frontmost: input.frontmostBundleID, presets: input.presets)
         if desiredBundleID == state.activeBundleID {
-            return steadyDecision(state: withoutPending(state))
+            return steadyReconcile(input: input, state: withoutPending(state))
         }
         return debounce(desiredBundleID: desiredBundleID, input: input, state: state)
     }
@@ -216,8 +216,30 @@ public enum AppPresetPolicy {
         return commit(desiredBundleID: desiredBundleID, input: input, state: working)
     }
 
-    private static func steadyDecision(state: ActivationState) -> Decision {
-        Decision(state: state, appPresetIsActive: state.activeBundleID != nil)
+    /// Steady state (no app switch): reconcile the governed set against the world, because displays
+    /// come and go while an app stays frontmost. A target display that arrived since activation gets
+    /// captured + applied now (it would otherwise stay ungoverned until the next app switch); a
+    /// ledger entry whose display is present but no longer targeted gets restored; entries for
+    /// absent displays stay owed. With no preset active this still restores any owed entry whose
+    /// display has returned, so a reconnect never waits for quit to get its baseline back.
+    private static func steadyReconcile(input: Input, state: ActivationState) -> Decision {
+        let active = state.activeBundleID.flatMap { preset(for: $0, in: input.presets) }
+        let targetIDs = active.map { targetDisplayIDs($0, displays: input.displays) } ?? []
+        var ledger = state.priorStateByDisplay
+
+        let restore = restoreDisplaysLeaving(targetSet: Set(targetIDs),
+                                             presentIDs: presentIDs(input), ledger: &ledger)
+        // Only newcomers (no ledger entry yet) are captured + written — steady state must not
+        // re-issue DDC writes for displays already governed.
+        let newcomers = targetIDs.filter { state.priorStateByDisplay[$0] == nil }
+        let application = applyIncoming(active, targetIDs: newcomers, displays: input.displays,
+                                        ledger: &ledger)
+
+        var finalState = state
+        finalState.priorStateByDisplay = ledger
+        return Decision(captures: application.captures, applyWrites: application.writes,
+                        restoreWrites: restore.writes, clears: restore.clears, state: finalState,
+                        appPresetIsActive: state.activeBundleID != nil)
     }
 
     private static func pendingDecision(state: ActivationState, reschedule: TimeInterval) -> Decision {
@@ -234,7 +256,8 @@ public enum AppPresetPolicy {
         let targetSet = Set(targetIDs)
         var ledger = state.priorStateByDisplay
 
-        let restore = restoreDisplaysLeaving(targetSet: targetSet, ledger: &ledger)
+        let restore = restoreDisplaysLeaving(targetSet: targetSet, presentIDs: presentIDs(input),
+                                             ledger: &ledger)
         let application = applyIncoming(incoming, targetIDs: targetIDs, displays: input.displays,
                                         ledger: &ledger)
 
@@ -247,19 +270,29 @@ public enum AppPresetPolicy {
     }
 
     /// Restore every owed display that the incoming preset no longer governs, dropping its ledger
-    /// entry — the restore write must land before the entry clears (see `Decision`).
-    private static func restoreDisplaysLeaving(targetSet: Set<String>,
+    /// entry — the restore write must land before the entry clears (see `Decision`). Only displays
+    /// in `presentIDs` are restored: a restore write for an absent display (unplugged, asleep,
+    /// FaceLight-excluded) would be silently dropped by the caller while its clear still persisted,
+    /// deleting the owed baseline and stranding the display at preset values when it returns. Absent
+    /// entries stay owed; `steadyReconcile` (or launch recovery) restores them once the display is back.
+    private static func restoreDisplaysLeaving(targetSet: Set<String>, presentIDs: Set<String>,
                                                ledger: inout [String: PriorState])
         -> (writes: [DisplayWrite], clears: [String]) {
         var writes: [DisplayWrite] = []
         var clears: [String] = []
-        for recordID in ledger.keys.sorted() where !targetSet.contains(recordID) {
+        for recordID in ledger.keys.sorted()
+        where !targetSet.contains(recordID) && presentIDs.contains(recordID) {
             guard let prior = ledger[recordID] else { continue }
             writes.append(restoreWrite(recordID: recordID, prior: prior))
             clears.append(recordID)
             ledger[recordID] = nil
         }
         return (writes, clears)
+    }
+
+    /// The record IDs of every display present in this evaluation's world.
+    private static func presentIDs(_ input: Input) -> Set<String> {
+        Set(input.displays.map(\.recordID))
     }
 
     /// Capture a baseline for each newly governed display (keeping any baseline already owed from a
