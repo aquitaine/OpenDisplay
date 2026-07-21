@@ -73,6 +73,43 @@ public enum SolarCalculator {
                            sunsetMinute: wrappedMinute(solarNoonMinutes + 4.0 * hourAngle))
     }
 
+    /// Sun elevation in degrees above the horizon (negative when the sun is below it) at an
+    /// explicit minute-of-day, calendar date, and UTC offset — the arbitrary-time counterpart to
+    /// `events`, built from the same NOAA declination and equation-of-time terms. Location Mode
+    /// samples this continuously through the day to drive brightness from the sun's real position,
+    /// rather than only at the three named events.
+    public static func elevationDegrees(atMinute minuteOfDay: Int, year: Int, month: Int, day: Int,
+                                        coordinate: GeoCoordinate, utcOffsetMinutes: Int) -> Double {
+        let dayFraction = (Double(minuteOfDay) - Double(utcOffsetMinutes)) / 1440.0
+        let century = julianCentury(julianDay(year: year, month: month, day: day) + dayFraction)
+        let declination = sunDeclinationDegrees(century)
+
+        let trueSolarTimeMinutes = wrappedMinute(Double(minuteOfDay) + equationOfTimeMinutes(century)
+            + 4.0 * coordinate.longitude - Double(utcOffsetMinutes))
+        let hourAngleDegrees = Double(trueSolarTimeMinutes) / 4.0 - 180.0
+
+        let latitudeRadians = radians(coordinate.latitude)
+        let declinationRadians = radians(declination)
+        let cosineZenith = sin(latitudeRadians) * sin(declinationRadians)
+            + cos(latitudeRadians) * cos(declinationRadians) * cos(radians(hourAngleDegrees))
+        let zenithDegrees = degrees(acos(min(1, max(-1, cosineZenith))))
+        return 90.0 - zenithDegrees
+    }
+
+    /// Sun elevation for a `Date` in a `TimeZone`, honouring that zone's UTC offset on that day —
+    /// the elevation counterpart to `events(on:in:coordinate:)`.
+    public static func elevationDegrees(at date: Date, in timeZone: TimeZone,
+                                        coordinate: GeoCoordinate) -> Double {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let dayComponents = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        let minuteOfDay = (dayComponents.hour ?? 0) * 60 + (dayComponents.minute ?? 0)
+        return elevationDegrees(atMinute: minuteOfDay, year: dayComponents.year ?? 2000,
+                                month: dayComponents.month ?? 1, day: dayComponents.day ?? 1,
+                                coordinate: coordinate,
+                                utcOffsetMinutes: timeZone.secondsFromGMT(for: date) / 60)
+    }
+
     // MARK: - NOAA equations (each in degrees unless the name says otherwise)
 
     private static func julianDay(year: Int, month: Int, day: Int) -> Double {

@@ -113,11 +113,18 @@ public enum AdaptiveDisplayPolicy {
         /// curve — an explicit user schedule outranks the inferred sync — while reusing the same
         /// cooldown/hysteresis/manual-adoption machinery so the write stays silent and non-fighting.
         public var scheduleOverride: Float?
+        /// Location Mode: the sun's current elevation in degrees at the configured location, or nil
+        /// when Location Mode is off or no location is configured. A user-selected source like the
+        /// ambient curve — it slots in below the built-in mirror and the ambient sensor (both are
+        /// live readings and win when available) but above the flat day/night schedule, making it a
+        /// better lid-closed fallback than a fixed plateau. `scheduleOverride` still outranks it.
+        public var locationElevationDegrees: Double?
 
         public init(now: Date, minuteOfDay: Int, builtInPresent: Bool, builtInBrightness: Float?,
                     ambientLux: Double? = nil, displayAsleep: Bool, currentPreset: Int?,
                     dayPreset: Int?, nightShiftActive: Bool?, brightnessSyncEnabled: Bool,
-                    warmthEnabled: Bool, scheduleOverride: Float? = nil) {
+                    warmthEnabled: Bool, scheduleOverride: Float? = nil,
+                    locationElevationDegrees: Double? = nil) {
             self.now = now
             self.minuteOfDay = minuteOfDay
             self.builtInPresent = builtInPresent
@@ -130,6 +137,7 @@ public enum AdaptiveDisplayPolicy {
             self.brightnessSyncEnabled = brightnessSyncEnabled
             self.warmthEnabled = warmthEnabled
             self.scheduleOverride = scheduleOverride
+            self.locationElevationDegrees = locationElevationDegrees
         }
     }
 
@@ -190,6 +198,22 @@ public enum AdaptiveDisplayPolicy {
         guard lux > floorLux else { return floorLevel }
         guard lux < ceilLux else { return ceilLevel }
         let progress = Float((log10(lux) - log10(floorLux)) / (log10(ceilLux) - log10(floorLux)))
+        return floorLevel + (ceilLevel - floorLevel) * progress
+    }
+
+    /// Brightness level for the sun's elevation above the horizon (Location Mode): a night floor
+    /// while the sun sits below civil twilight (-6°, the point outdoor light is negligible), a
+    /// linear ramp through dawn/dusk, and a plateau once the sun is high enough (20°) that indoor
+    /// natural light is already plentiful. Linear-in-elevation is the simple, honest model — unlike
+    /// `ambientLevel` there is no lux reading to fit a curve to, only the sun's geometry.
+    public static func locationLevel(forElevationDegrees elevation: Double) -> Float {
+        let nightFloorElevation = -6.0
+        let daylightPlateauElevation = 20.0
+        let floorLevel: Float = 0.2, ceilLevel: Float = 1.0
+        guard elevation > nightFloorElevation else { return floorLevel }
+        guard elevation < daylightPlateauElevation else { return ceilLevel }
+        let progress = Float((elevation - nightFloorElevation)
+            / (daylightPlateauElevation - nightFloorElevation))
         return floorLevel + (ceilLevel - floorLevel) * progress
     }
 
@@ -321,6 +345,12 @@ public enum AdaptiveDisplayPolicy {
             // Ambient mode: built-in off but the lid is open, so the light sensor still sees the
             // room — follow it directly. Same offset-learning contract as sync mode.
             target = min(1, max(0, ambientLevel(forLux: lux) + state.brightnessOffset))
+            state.manualScheduleAnchor = nil
+        } else if let elevationDegrees = input.locationElevationDegrees {
+            // Location Mode: neither a live mirror nor an ambient reading is available (typically
+            // lid closed, no light sensor) — follow the sun's elevation instead of the flat
+            // schedule. Same offset-learning contract as sync/ambient mode.
+            target = min(1, max(0, locationLevel(forElevationDegrees: elevationDegrees) + state.brightnessOffset))
             state.manualScheduleAnchor = nil
         } else {
             target = scheduleLevel(atMinute: input.minuteOfDay, config: config)

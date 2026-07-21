@@ -12,12 +12,14 @@ final class AdaptiveDisplayPolicyTests: XCTestCase {
                        minute: Int, builtInPresent: Bool = true, builtIn: Float? = nil,
                        lux: Double? = nil, asleep: Bool = false, currentPreset: Int? = nil,
                        dayPreset: Int? = nil, nightShift: Bool? = nil, sync: Bool = false,
-                       warmth: Bool = false, scheduleOverride: Float? = nil) -> Policy.Input {
+                       warmth: Bool = false, scheduleOverride: Float? = nil,
+                       elevationDegrees: Double? = nil) -> Policy.Input {
         Policy.Input(now: now, minuteOfDay: minute, builtInPresent: builtInPresent,
                      builtInBrightness: builtIn, ambientLux: lux, displayAsleep: asleep,
                      currentPreset: currentPreset, dayPreset: dayPreset,
                      nightShiftActive: nightShift, brightnessSyncEnabled: sync,
-                     warmthEnabled: warmth, scheduleOverride: scheduleOverride)
+                     warmthEnabled: warmth, scheduleOverride: scheduleOverride,
+                     locationElevationDegrees: elevationDegrees)
     }
 
     // MARK: - Schedule curve
@@ -241,6 +243,116 @@ final class AdaptiveDisplayPolicyTests: XCTestCase {
             config: config, state: state)
         XCTAssertNotNil(decision.brightnessWrite)
         XCTAssertNil(decision.state.manualScheduleAnchor)
+    }
+
+    // MARK: - Location Mode (Issue #31: sun elevation, no sensor needed)
+
+    func testLocationLevelCurveAnchorsAndMonotonicity() {
+        XCTAssertEqual(Policy.locationLevel(forElevationDegrees: -6), 0.2)    // civil-twilight floor
+        XCTAssertEqual(Policy.locationLevel(forElevationDegrees: -30), 0.2)   // deep night
+        XCTAssertEqual(Policy.locationLevel(forElevationDegrees: 20), 1.0)    // daylight plateau
+        XCTAssertEqual(Policy.locationLevel(forElevationDegrees: 60), 1.0)    // midday sun
+        // Midpoint of the -6°...20° ramp: halfway from the floor to the ceiling.
+        XCTAssertEqual(Policy.locationLevel(forElevationDegrees: 7), 0.6, accuracy: 0.0001)
+        let dawn = Policy.locationLevel(forElevationDegrees: -3)
+        let midMorning = Policy.locationLevel(forElevationDegrees: 5)
+        let noon = Policy.locationLevel(forElevationDegrees: 15)
+        XCTAssertLessThan(dawn, midMorning)
+        XCTAssertLessThan(midMorning, noon)
+    }
+
+    func testLocationModeFollowsElevationCurveWhenNoMirrorOrAmbient() {
+        // Lid closed, no light sensor: Location Mode's curve replaces the flat schedule.
+        let level = Policy.locationLevel(forElevationDegrees: 10)
+        let decision = Policy.evaluate(
+            input(minute: noon, builtInPresent: false, sync: true, elevationDegrees: 10),
+            config: config, state: Policy.DisplayState())
+        XCTAssertEqual(decision.brightnessWrite ?? -1, level, accuracy: 0.0001)
+        XCTAssertNotEqual(level, Policy.scheduleLevel(atMinute: noon, config: config))
+    }
+
+    func testLocationModeAppliesLearnedOffset() {
+        let level = Policy.locationLevel(forElevationDegrees: 10)
+        let decision = Policy.evaluate(
+            input(minute: noon, builtInPresent: false, sync: true, elevationDegrees: 10),
+            config: config, state: Policy.DisplayState(brightnessOffset: -0.1))
+        XCTAssertEqual(decision.brightnessWrite ?? -1, level - 0.1, accuracy: 0.0001)
+    }
+
+    func testModePriorityBuiltInMirrorOverLocationMode() {
+        // The built-in's live mirror beats the computed elevation curve when both are candidates.
+        let decision = Policy.evaluate(
+            input(minute: noon, builtIn: 0.5, sync: true, elevationDegrees: 60),
+            config: config, state: Policy.DisplayState())
+        XCTAssertEqual(decision.brightnessWrite ?? -1, 0.5, accuracy: 0.0001)
+    }
+
+    func testModePriorityAmbientSensorOverLocationMode() {
+        // A live lux reading beats the computed elevation curve when both are candidates.
+        let ambient = Policy.ambientLevel(forLux: 300)
+        let decision = Policy.evaluate(
+            input(minute: noon, builtInPresent: false, lux: 300, sync: true, elevationDegrees: 60),
+            config: config, state: Policy.DisplayState())
+        XCTAssertEqual(decision.brightnessWrite ?? -1, ambient, accuracy: 0.0001)
+    }
+
+    func testLocationModeOutranksFlatSchedule() {
+        // The whole point: a night-elevation reading still beats the flat schedule fallback, since
+        // it's read as a deliberate "it's dark out" signal rather than a fixed clock plateau.
+        let level = Policy.locationLevel(forElevationDegrees: -20)
+        let decision = Policy.evaluate(
+            input(minute: noon, builtInPresent: false, sync: true, elevationDegrees: -20),
+            config: config, state: Policy.DisplayState())
+        XCTAssertEqual(decision.brightnessWrite ?? -1, level, accuracy: 0.0001)
+        XCTAssertNotEqual(decision.brightnessWrite, Policy.scheduleLevel(atMinute: noon, config: config))
+    }
+
+    func testNoLocationReadingFallsBackToFlatSchedule() {
+        // Location Mode on but no elevation available (no location configured): degrade to the
+        // existing flat-schedule fallback exactly like before Location Mode existed.
+        let decision = Policy.evaluate(
+            input(minute: noon, builtInPresent: false, sync: true, elevationDegrees: nil),
+            config: config, state: Policy.DisplayState())
+        XCTAssertEqual(decision.brightnessWrite ?? -1, 0.8, accuracy: 0.0001)
+    }
+
+    func testClockScheduleOverrideOutranksLocationMode() {
+        // Clock Mode's explicit schedule wins even with an elevation reading present.
+        let decision = Policy.evaluate(
+            input(minute: noon, builtInPresent: false, sync: true, scheduleOverride: 0.4,
+                  elevationDegrees: 60),
+            config: config, state: Policy.DisplayState())
+        XCTAssertEqual(decision.brightnessWrite ?? -1, 0.4, accuracy: 0.0001)
+    }
+
+    func testManualCooldownOutranksLocationMode() {
+        // A recent manual change holds off Location Mode exactly like every other source.
+        let manualAt = Date(timeIntervalSinceReferenceDate: 0)
+        let state = Policy.noteManualBrightness(0.3, reference: Policy.locationLevel(forElevationDegrees: 10),
+                                                scheduleTarget: 0.8, at: manualAt, state: Policy.DisplayState())
+        let decision = Policy.evaluate(
+            input(now: manualAt.addingTimeInterval(30), minute: noon, builtInPresent: false, sync: true,
+                  elevationDegrees: 20),
+            config: config, state: state)
+        XCTAssertNil(decision.brightnessWrite)
+    }
+
+    func testManualInLocationModeLearnsOffsetAndResumesAfterCooldown() {
+        let manualAt = Date(timeIntervalSinceReferenceDate: 0)
+        let levelAtTen = Policy.locationLevel(forElevationDegrees: 10)
+        // User dials to 0.5 while the sun sits at 10° elevation → offset = 0.5 − level(10°).
+        let state = Policy.noteManualBrightness(0.5, reference: levelAtTen, scheduleTarget: 0.8,
+                                                at: manualAt, state: Policy.DisplayState())
+        XCTAssertEqual(state.brightnessOffset, 0.5 - levelAtTen, accuracy: 0.0001)
+
+        // Past cooldown, the sun has climbed to 30° → target rises from the user's baseline offset.
+        let decision = Policy.evaluate(
+            input(now: manualAt.addingTimeInterval(120), minute: noon, builtInPresent: false, sync: true,
+                  elevationDegrees: 30),
+            config: config, state: state)
+        XCTAssertEqual(decision.brightnessWrite ?? -1,
+                       Policy.locationLevel(forElevationDegrees: 30) + state.brightnessOffset,
+                       accuracy: 0.0001)
     }
 
     // MARK: - Clock Mode precedence (scheduleOverride)

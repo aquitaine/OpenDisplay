@@ -420,6 +420,23 @@ private struct HealthSection: View {
                     }
                     .fixedSize()
                 }
+                Toggle(isOn: Binding(
+                    get: { model.settings.adaptiveLocationModeEnabled },
+                    set: { model.setAdaptiveLocationModeEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Follow the sun\u{2019}s position (Location Mode)")
+                        Text("Drives brightness from the sun\u{2019}s elevation at the location set "
+                             + "below \u{2014} dim near dawn/dusk, full once the sun is well up. A "
+                             + "better lid-closed fallback than the flat schedule; the built-in "
+                             + "mirror and ambient sensor still take priority when available, and "
+                             + "Clock Mode\u{2019}s explicit schedule always wins.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if model.settings.adaptiveLocationModeEnabled, !model.settings.clockScheduleEnabled {
+                    ClockLocationRow()
+                }
                 if model.settings.adaptiveBrightnessSyncEnabled || model.settings.adaptiveWarmthEnabled {
                     HStack(spacing: 16) {
                         DatePicker("Day starts", selection: minuteBinding(

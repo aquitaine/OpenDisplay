@@ -1329,7 +1329,7 @@ final class AppModel: ObservableObject {
     /// panel animating right next to the external, faster buys nothing through the 0.02 hysteresis.
     func reconcileAdaptiveLoop() {
         let anyModeOn = settings.adaptiveBrightnessSyncEnabled || settings.adaptiveWarmthEnabled
-            || settings.clockScheduleEnabled
+            || settings.clockScheduleEnabled || settings.adaptiveLocationModeEnabled
         let wantRunning = anyModeOn
             && displays.contains { $0.isActive && $0.displayClass != .builtIn }
         if wantRunning {
@@ -1355,7 +1355,8 @@ final class AppModel: ObservableObject {
         let syncOn = settings.adaptiveBrightnessSyncEnabled
         let warmthOn = settings.adaptiveWarmthEnabled
         let clockOn = settings.clockScheduleEnabled && !settings.clockScheduleEntries.isEmpty
-        guard syncOn || warmthOn || clockOn else { return }
+        let locationOn = settings.adaptiveLocationModeEnabled
+        guard syncOn || warmthOn || clockOn || locationOn else { return }
 
         let now = Date()
         let comps = Calendar.current.dateComponents([.hour, .minute], from: now)
@@ -1365,6 +1366,11 @@ final class AppModel: ObservableObject {
         // built-in mirror, so the mirror sampling is skipped entirely.
         let clockTarget = clockOn ? clockScheduleBrightness(atMinute: minuteOfDay, on: now) : nil
         let mirrorActive = syncOn && clockTarget == nil
+        // Location Mode's sun-elevation reading, cheap pure math so it's always sampled when the
+        // mode is on and a location is configured; the policy itself decides precedence against
+        // the built-in mirror and ambient sensor (see `AdaptiveDisplayPolicy.brightnessDecision`).
+        let locationElevation = locationElevationDegrees(at: now)
+        let brightnessGoverned = mirrorActive || clockTarget != nil || locationElevation != nil
 
         let builtInObs = displays.first { $0.displayClass == .builtIn && $0.isActive }
         var builtInSample: Float?
@@ -1406,15 +1412,17 @@ final class AppModel: ObservableObject {
             let state = adaptiveStates[id] ?? seededAdaptiveState(for: id)
             let input = AdaptiveDisplayPolicy.Input(
                 now: now, minuteOfDay: minuteOfDay,
-                builtInPresent: builtInObs != nil,
+                // Only a candidate source when brightness sync itself is enabled — otherwise a lid-
+                // open built-in would block Location Mode from ever reaching its elevation branch.
+                builtInPresent: syncOn && builtInObs != nil,
                 builtInBrightness: builtInSample,
                 ambientLux: ambientLuxEMA,
                 displayAsleep: CGDisplayIsAsleep(cgID) != 0,
                 currentPreset: colorPreset[id],
                 dayPreset: settings.adaptiveDayPresetByDisplay[id.rawValue],
                 nightShiftActive: nightShiftActive,
-                brightnessSyncEnabled: mirrorActive || clockTarget != nil, warmthEnabled: warmthOn,
-                scheduleOverride: clockTarget)
+                brightnessSyncEnabled: brightnessGoverned, warmthEnabled: warmthOn,
+                scheduleOverride: clockTarget, locationElevationDegrees: locationElevation)
             let decision = AdaptiveDisplayPolicy.evaluate(input, config: config, state: state)
 
             if let dayPreset = decision.rememberDayPreset {
@@ -1451,6 +1459,15 @@ final class AppModel: ObservableObject {
         }
         return ClockSchedulePolicy.brightness(atMinute: minute,
                                               entries: settings.clockScheduleEntries, solar: solar)
+    }
+
+    /// The sun's elevation at `date` for Location Mode, or nil when the mode is off or no location
+    /// is configured (manual lat/long, or a completed one-shot Core Location fetch — the same
+    /// storage Clock Mode's solar anchors use).
+    private func locationElevationDegrees(at date: Date) -> Double? {
+        guard settings.adaptiveLocationModeEnabled, let coordinate = settings.clockManualLocation
+        else { return nil }
+        return SolarCalculator.elevationDegrees(at: date, in: .current, coordinate: coordinate)
     }
 
     /// OSD-silent adaptive brightness apply: cache + coalesced DDC write, NO OSD flash and NO
@@ -1498,23 +1515,30 @@ final class AppModel: ObservableObject {
     }
 
     /// The manual-brightness note for `setBrightness`'s hardware branch (user slider/media keys on
-    /// a synced external): learn the offset in sync mode, anchor the adoption in schedule mode.
+    /// a synced external): learn the offset in sync/ambient/location mode, anchor the adoption in
+    /// schedule mode.
     private func noteManualBrightnessForAdaptive(_ value: Float, id: DisplayRecordID) {
+        let syncOn = settings.adaptiveBrightnessSyncEnabled
         let clockOn = settings.clockScheduleEnabled && !settings.clockScheduleEntries.isEmpty
-        guard settings.adaptiveBrightnessSyncEnabled || clockOn else { return }
+        guard syncOn || clockOn || settings.adaptiveLocationModeEnabled else { return }
         let now = Date()
         let comps = Calendar.current.dateComponents([.hour, .minute], from: now)
         let minute = (comps.hour ?? 0) * 60 + (comps.minute ?? 0)
         let clockTarget = clockOn ? clockScheduleBrightness(atMinute: minute, on: now) : nil
+        let locationLevel = (clockTarget == nil ? locationElevationDegrees(at: now) : nil)
+            .map(AdaptiveDisplayPolicy.locationLevel(forElevationDegrees:))
         // The offset-teaching reference is whatever brightness is currently following: nothing when
-        // Clock Mode governs (schedule-like adoption), else the built-in's level in sync mode or the
-        // light-sensor curve in ambient mode. The adoption anchor is the governing schedule target.
+        // Clock Mode governs (schedule-like adoption), else the built-in's level in sync mode, the
+        // light-sensor curve in ambient mode, or the sun-elevation curve in Location Mode. The
+        // adoption anchor is the governing schedule target.
         let builtIn = displays.first { $0.displayClass == .builtIn && $0.isActive }
         let reference: Float? = clockTarget != nil
             ? nil
-            : builtIn.flatMap { brightness[$0.recordID] }
-                ?? ambientLuxEMA.map(AdaptiveDisplayPolicy.ambientLevel(forLux:))
+            : (syncOn ? builtIn.flatMap { brightness[$0.recordID] }
+                    ?? ambientLuxEMA.map(AdaptiveDisplayPolicy.ambientLevel(forLux:)) : nil)
+                ?? locationLevel
         let scheduleTarget = clockTarget
+            ?? locationLevel
             ?? AdaptiveDisplayPolicy.scheduleLevel(atMinute: minute, config: settings.adaptiveConfig)
         adaptiveStates[id] = AdaptiveDisplayPolicy.noteManualBrightness(
             value, reference: reference, scheduleTarget: scheduleTarget, at: now,
@@ -1526,7 +1550,7 @@ final class AppModel: ObservableObject {
     func adaptiveStatusLine(for observation: DisplayObservation) -> String? {
         guard observation.displayClass != .builtIn,
               settings.adaptiveBrightnessSyncEnabled || settings.adaptiveWarmthEnabled
-                || settings.clockScheduleEnabled,
+                || settings.clockScheduleEnabled || settings.adaptiveLocationModeEnabled,
               brightnessMethod[observation.recordID] == .hardware else { return nil }
         let id = observation.recordID
         let state = adaptiveStates[id]
@@ -1539,16 +1563,19 @@ final class AppModel: ObservableObject {
         if let clockTarget {
             // Clock Mode governs brightness and outranks the adaptive mirror.
             parts.append("clock \(Int((clockTarget * 100).rounded()))%")
-        } else if settings.adaptiveBrightnessSyncEnabled {
+        } else if settings.adaptiveBrightnessSyncEnabled || settings.adaptiveLocationModeEnabled {
             if let manualAt = state?.manualBrightnessAt,
                Date() < manualAt.addingTimeInterval(settings.adaptiveConfig.manualCooldown) {
                 parts.append("brightness paused (manual)")
-            } else if displays.contains(where: { $0.displayClass == .builtIn && $0.isActive }) {
+            } else if settings.adaptiveBrightnessSyncEnabled,
+                      displays.contains(where: { $0.displayClass == .builtIn && $0.isActive }) {
                 let offset = Int(((state?.brightnessOffset ?? 0) * 100).rounded())
                 parts.append(offset == 0 ? "following built-in"
                                          : String(format: "following built-in (%+d%%)", offset))
-            } else if let lux = ambientLuxEMA {
+            } else if settings.adaptiveBrightnessSyncEnabled, let lux = ambientLuxEMA {
                 parts.append("following room light (\(Int(lux.rounded())) lx)")
+            } else if let elevation = locationElevationDegrees(at: now) {
+                parts.append("following sun position (\(Int(elevation.rounded()))°)")
             } else {
                 parts.append("on schedule (no light sensor)")
             }
@@ -1558,6 +1585,7 @@ final class AppModel: ObservableObject {
         }
         guard !parts.isEmpty else { return nil }
         let usesAdaptive = settings.adaptiveBrightnessSyncEnabled || settings.adaptiveWarmthEnabled
+            || settings.adaptiveLocationModeEnabled
         let prefix = usesAdaptive ? "Adaptive: " : "Clock Mode: "
         return prefix + parts.joined(separator: " · ")
     }
@@ -1575,6 +1603,15 @@ final class AppModel: ObservableObject {
         persistSettings()
         reconcileAdaptiveLoop()
         if !enabled { Task { [weak self] in await self?.restoreOwedDayPresets() } }
+    }
+
+    /// Toggles Location Mode: brightness follows the sun's elevation at `clockManualLocation` when
+    /// neither the built-in mirror nor the ambient sensor is available (Issue #31).
+    func setAdaptiveLocationModeEnabled(_ enabled: Bool) {
+        guard settings.adaptiveLocationModeEnabled != enabled else { return }
+        settings.adaptiveLocationModeEnabled = enabled
+        persistSettings()
+        reconcileAdaptiveLoop()
     }
 
     func setAdaptiveEveningPreset(_ code: Int) {
