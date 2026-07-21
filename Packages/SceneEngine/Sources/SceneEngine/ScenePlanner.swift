@@ -158,7 +158,7 @@ public struct ScenePlanner: Sendable {
 
         if let brightness = desired.brightness {
             ops.append(.init(kind: .setBrightness, target: target,
-                             detail: "Brightness \(Int(brightness))%",
+                             detail: "Brightness \(Int((brightness * 100).rounded()))%",
                              status: .willApply, risk: .hardwareDependent))
         }
 

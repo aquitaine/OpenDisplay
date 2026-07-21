@@ -171,6 +171,54 @@ final class AppPresetPolicyTests: XCTestCase {
         XCTAssertTrue(decision.captures.isEmpty)
     }
 
+    // MARK: - Topology churn while active
+
+    func testAnUnpluggedDisplaysLedgerEntryStaysOwedWhenTheAppLeaves() {
+        let displays = [snapshot(externalOne, brightness: 0.9), snapshot(externalTwo, brightness: 0.8)]
+        let activated = settle(frontmost: "com.figma.Desktop", presets: [figmaPreset()],
+                               displays: displays, from: Policy.ActivationState())
+        // External two is unplugged, then the user leaves Figma. Its restore write couldn't land,
+        // so its ledger entry must stay owed — clearing it would strand the display at the preset
+        // value forever once re-plugged.
+        let decision = settle(frontmost: "com.apple.Finder", presets: [figmaPreset()],
+                              displays: [snapshot(externalOne, brightness: 0.6)],
+                              from: activated.state)
+        XCTAssertEqual(decision.restoreWrites.map(\.recordID), [externalOne])
+        XCTAssertEqual(decision.clears, [externalOne])
+        XCTAssertEqual(decision.state.priorStateByDisplay[externalTwo], Policy.PriorState(brightness: 0.8))
+    }
+
+    func testADisplayArrivingMidActivationIsGovernedWithoutAnAppSwitch() {
+        let activated = settle(frontmost: "com.figma.Desktop", presets: [figmaPreset()],
+                               displays: [snapshot(externalOne, brightness: 0.9)],
+                               from: Policy.ActivationState())
+        // External two plugs in while Figma stays frontmost: the steady re-evaluation (kicked by the
+        // caller's topology observer) must capture + apply it, not wait for the next app switch.
+        let decision = Policy.resolve(
+            Policy.Input(frontmostBundleID: "com.figma.Desktop", now: epoch.addingTimeInterval(60),
+                         presets: [figmaPreset()],
+                         displays: [snapshot(externalOne, brightness: 0.6),
+                                    snapshot(externalTwo, brightness: 0.8)]),
+            state: activated.state)
+        XCTAssertEqual(decision.captures, [externalTwo: Policy.PriorState(brightness: 0.8)])
+        XCTAssertEqual(decision.applyWrites, [Policy.DisplayWrite(recordID: externalTwo, brightness: 0.6)])
+        XCTAssertTrue(decision.restoreWrites.isEmpty)  // external one is already governed — no rewrite
+        XCTAssertTrue(decision.appPresetIsActive)
+    }
+
+    func testAReturningDisplayIsRestoredWhenNoPresetIsActive() {
+        // An owed entry survived an unplug (see above) and the app has since deactivated. When the
+        // display returns, the steady no-preset state must pay the restore back — not hold it until quit.
+        let owed = Policy.ActivationState(priorStateByDisplay: [externalTwo: Policy.PriorState(brightness: 0.8)])
+        let decision = Policy.resolve(
+            Policy.Input(frontmostBundleID: "com.apple.Finder", now: epoch, presets: [figmaPreset()],
+                         displays: [snapshot(externalTwo, brightness: 0.6)]),
+            state: owed)
+        XCTAssertEqual(decision.restoreWrites, [Policy.DisplayWrite(recordID: externalTwo, brightness: 0.8)])
+        XCTAssertEqual(decision.clears, [externalTwo])
+        XCTAssertTrue(decision.state.priorStateByDisplay.isEmpty)
+    }
+
     // MARK: - Crash safety
 
     func testTheBaselineIsCapturedBeforeTheApplyWriteSoACrashBetweenStillOwesARestore() {

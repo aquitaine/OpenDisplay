@@ -36,17 +36,24 @@ public enum SolarCalculator {
     private static let sunriseZenithDegrees = 90.833
 
     /// Solar events for a `Date` in a `TimeZone`, honouring that zone's UTC offset on that day (so
-    /// daylight-saving transitions are handled correctly).
+    /// daylight-saving transitions are handled correctly). The offset is resolved at that civil
+    /// day's noon, not at `date` itself: queried at 00:30 on a DST-transition day, the instant's
+    /// offset is the pre-shift one, which would report sunrise/sunset an hour off — noon is safely
+    /// past every real-world transition (02:00–03:00) and matches the offset in effect at the
+    /// events themselves.
     public static func events(on date: Date, in timeZone: TimeZone,
                               coordinate: GeoCoordinate) -> SolarEvents {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone
         let dayComponents = calendar.dateComponents([.year, .month, .day], from: date)
+        let noon = calendar.date(from: DateComponents(
+            year: dayComponents.year, month: dayComponents.month, day: dayComponents.day, hour: 12
+        )) ?? date
         return events(year: dayComponents.year ?? 2000,
                       month: dayComponents.month ?? 1,
                       day: dayComponents.day ?? 1,
                       coordinate: coordinate,
-                      utcOffsetMinutes: timeZone.secondsFromGMT(for: date) / 60)
+                      utcOffsetMinutes: timeZone.secondsFromGMT(for: noon) / 60)
     }
 
     /// Solar events for an explicit calendar date and UTC offset — the deterministic core the tests

@@ -113,20 +113,26 @@ public enum IdentityScorer {
             evidence.append(IdentityEvidence(signal: signal, matched: matched, weight: weights[signal] ?? 0))
         }
 
-        add(.explicitPairing, explicitPairing || candidate.pairingConfirmed)
-        add(.userAlias, aliasMatches)
-
         let serialMatches: Bool = {
             guard let a = observed.serialNumber ?? observed.serialHash,
                   let b = candidate.fingerprint.serialNumber ?? candidate.fingerprint.serialHash
             else { return false }
             return a == b
         }()
-        add(.edidSerial, serialMatches)
 
         let modelMatches = observed.vendorID != nil
             && observed.vendorID == candidate.fingerprint.vendorID
             && observed.productID == candidate.fingerprint.productID
+
+        // The record-side `pairingConfirmed` flag counts only when THIS observation shows some
+        // corroborating identity evidence — its 0.90 weight alone clears the resolver's accept
+        // floor, so an uncorroborated flag would let any anonymous panel be recognized *as* the
+        // paired record (and merge its fingerprint over it). The caller-side `explicitPairing`
+        // (the user pairing this very observation right now) stays unconditional.
+        let corroborated = serialMatches || modelMatches || cgUUIDMatches || ioPathMatches
+        add(.explicitPairing, explicitPairing || (candidate.pairingConfirmed && corroborated))
+        add(.userAlias, aliasMatches)
+        add(.edidSerial, serialMatches)
         add(.modelFamily, modelMatches)
 
         add(.ioRegistryPath, ioPathMatches)

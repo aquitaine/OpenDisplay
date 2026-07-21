@@ -446,7 +446,7 @@ func runBrightness() async {
                      : "failed (DisplayServices unavailable)")
         } else if let ddc = ExternalDisplayDDC(displayID: cgID) {
             let maxValue = await ddc.read(.brightness)?.max ?? 100
-            let ok = await ddc.write(.brightness, Int(level * Float(maxValue)))
+            let ok = await ddc.write(.brightness, Int((level * Float(maxValue)).rounded()))
             print(ok ? "\(name(for: target)): brightness = \(Int((level * 100).rounded()))% (DDC)"
                      : "DDC write failed")
         } else {
@@ -603,7 +603,8 @@ func runEDID() async {
 func parseModeArg(_ s: String) -> DisplayMode? {
     let hiDPI = s.contains("@2x")
     let parts = s.replacingOccurrences(of: "@2x", with: "").split(separator: "@")
-    let dims = parts[0].lowercased().split(separator: "x")
+    guard let sizePart = parts.first else { return nil }  // a bare "@2x" leaves nothing to parse
+    let dims = sizePart.lowercased().split(separator: "x")
     guard dims.count == 2, let w = Int(dims[0]), let h = Int(dims[1]) else { return nil }
     let hz = parts.count > 1 ? (Double(parts[1]) ?? 60) : 60
     return DisplayMode(pixelWidth: w, pixelHeight: h, pointWidth: w, pointHeight: h, refreshHz: hz, isHiDPI: hiDPI)

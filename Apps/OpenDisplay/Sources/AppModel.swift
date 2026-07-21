@@ -1115,7 +1115,7 @@ final class AppModel: ObservableObject {
             return
         }
         guard let controller = await ddcController(for: observation) else {
-            await notifyInputSwitchFailed(entry.displayID, reason: "is offline")
+            await notifyInputSwitchFailed(entry.displayID, reason: "has no DDC control")
             return
         }
         guard await controller.write(.inputSource, entry.inputCode) else {
@@ -1402,7 +1402,7 @@ final class AppModel: ObservableObject {
             // the sensor keeps reporting even though macOS drives no panel from it). EMA-smoothed;
             // an unreadable sensor (lid actually closed) clears it → schedule mode.
             let reader = ambientLight
-            if let sample = await Task.detached(priority: .utility) { reader.lux() }.value {
+            if let sample = await Task.detached(priority: .utility, operation: { reader.lux() }).value {
                 ambientLuxEMA = ambientLuxEMA.map { $0 * 0.6 + sample * 0.4 } ?? sample
             } else {
                 ambientLuxEMA = nil
@@ -2056,16 +2056,7 @@ final class AppModel: ObservableObject {
     func favoriteResolutions(among stops: [DisplayMode], for observation: DisplayObservation) -> [DisplayMode] {
         let merged = favorites.merged(stops: stops, for: observation.recordID)
         let count = favorites.favoriteKeys(for: observation.recordID).count
-        return Array(merged.prefix(min(count, merged.count))).filter { isFavoriteResolution($0, for: observation) }
-    }
-
-    /// Refresh rates available at the display's current resolution (same point size + HiDPI), descending.
-    func refreshRates(for observation: DisplayObservation) -> [Double] {
-        guard let cgID = observation.cgDisplayID, let current = observation.mode else { return [] }
-        let rates = observer.allModes(for: cgID)
-            .filter { $0.pointWidth == current.pointWidth && $0.pointHeight == current.pointHeight && $0.isHiDPI == current.isHiDPI }
-            .map { ($0.refreshHz * 10).rounded() / 10 }
-        return Array(Set(rates)).sorted(by: >)
+        return merged.prefix(count).filter { isFavoriteResolution($0, for: observation) }
     }
 
     /// Switches the refresh rate at the current resolution.
@@ -2073,14 +2064,6 @@ final class AppModel: ObservableObject {
         guard var target = observation.mode else { return }
         target.refreshHz = hz
         await setMode(target, for: observation)
-    }
-
-    /// True when the current resolution offers both a HiDPI (Retina) and a non-HiDPI variant.
-    func hiDPIToggleAvailable(for observation: DisplayObservation) -> Bool {
-        guard let cgID = observation.cgDisplayID, let current = observation.mode else { return false }
-        let modes = observer.allModes(for: cgID)
-            .filter { $0.pointWidth == current.pointWidth && $0.pointHeight == current.pointHeight }
-        return modes.contains(where: { $0.isHiDPI }) && modes.contains(where: { !$0.isHiDPI })
     }
 
     /// Switches the current resolution between HiDPI (Retina) and non-HiDPI, keeping the best refresh.
@@ -2093,8 +2076,6 @@ final class AppModel: ObservableObject {
         await setMode(candidate, for: observation)
     }
 
-    /// Makes a display the main display by re-anchoring every origin so this one sits at (0,0) —
-    /// Core Graphics treats the display at the origin as main.
     /// Makes a display the main display by re-anchoring every origin so this one sits at (0,0) — Core
     /// Graphics treats the display at the origin as main, and accepts the negative origins this gives
     /// the other displays, so the physical arrangement is preserved.

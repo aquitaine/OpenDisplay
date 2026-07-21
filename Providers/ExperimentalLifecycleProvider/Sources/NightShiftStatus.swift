@@ -21,11 +21,12 @@ public struct NightShiftStatusReader: Sendable {
     /// `getBlueLightStatus:` fills ~40–80 bytes across known macOS versions; 128 absorbs growth.
     private static let statusBufferSize = 128
 
-    public init() {}
-
-    /// Whether Night Shift is currently active, or nil if the private client is unavailable or
-    /// the call fails in any way. Cheap enough to call once per adaptive tick (5s).
-    public func isActive() -> Bool? {
+    /// One process-wide `CBBlueLightClient`: constructing it opens an XPC connection to
+    /// corebrightnessd, so building (and tearing down) a fresh one per 5s adaptive tick would
+    /// churn connections forever. `static let` gives thread-safe lazy init; the status call itself
+    /// is an ordinary XPC round-trip and safe from any thread (`nonisolated(unsafe)` records that
+    /// judgement, since the private class can't be marked Sendable).
+    private nonisolated(unsafe) static let client: NSObject? = {
         // dlopen first: NSClassFromString alone can't find the class unless something already
         // loaded CoreBrightness into this process.
         guard dlopen(
@@ -34,7 +35,15 @@ public struct NightShiftStatusReader: Sendable {
         guard let clientClass = NSClassFromString("CBBlueLightClient") as? NSObject.Type else {
             return nil
         }
-        let client = clientClass.init()
+        return clientClass.init()
+    }()
+
+    public init() {}
+
+    /// Whether Night Shift is currently active, or nil if the private client is unavailable or
+    /// the call fails in any way. Cheap enough to call once per adaptive tick (5s).
+    public func isActive() -> Bool? {
+        guard let client = Self.client else { return nil }
         let selector = Selector(("getBlueLightStatus:"))
         guard client.responds(to: selector), let method = client.method(for: selector) else {
             return nil

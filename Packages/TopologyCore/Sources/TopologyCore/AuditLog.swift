@@ -68,13 +68,15 @@ public struct DiskAuditLog: AuditLogging {
         try? fileManager.createDirectory(
             at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true
         )
-        if let handle = try? FileHandle(forWritingTo: fileURL) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: line)
-        } else {
-            try? line.write(to: fileURL, options: .atomic)
-        }
+        // O_APPEND: the app, CLI, and out-of-process App Intents all append to this file, and a
+        // kernel-atomic append per write() is what keeps concurrent entries from interleaving
+        // mid-line (seek-then-write is two steps, so two writers could land inside each other's
+        // lines — recent() then drops both as torn). A single small write stays one syscall.
+        let fd = open(fileURL.path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        guard fd >= 0 else { return }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        try? handle.write(contentsOf: line)
+        try? handle.close()
     }
 
     public func recent(limit: Int) async -> [AuditEntry] {
