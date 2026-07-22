@@ -43,6 +43,9 @@ no Dock icon.
   its colour preset, your terminal gets 40%, and everything restores when you switch away.
 - **FaceLight** — one press turns your monitor into a warm video-call fill light; press
   again and your exact previous brightness, contrast, and dimming come back.
+- **XDR Brightness** (Labs) — one tap drives the MacBook Pro's XDR panel to **2× its normal
+  SDR maximum**, using the HDR headroom Apple reserves for video. Public APIs only, and it
+  can never outlive the app — quit (or crash) and the panel is back to normal.
 - **Full DDC/CI control** — brightness, contrast, volume, input source, colour presets,
   sharpness, and RGB gain, all driving the panel's own hardware.
 - **Safe by design** — every risky change is checkpointed and reversible, with a standalone
@@ -89,6 +92,10 @@ no Dock icon.
 - **Automation** — an `opendisplay` CLI and Shortcuts/Siri intents drive the same
   safety-checked, audited path as the UI — including `lux` (ambient-light readout), `lid`,
   and `listen`, a line-delimited JSON stream of brightness and display events for scripting.
+- **XDR Brightness** (Labs, opt-in): a sun badge on the built-in's brightness row boosts SDR
+  content to 2× the panel's normal maximum — the EDR-trigger + gamma-map technique, public
+  Metal/CoreGraphics only. HDR content looks clipped while boosted; sustained use warms the
+  panel. Session-only by design: it never survives quit or crash.
 - **Labs (opt-in):** experimental display **rotation** through a sandboxed helper — off by
   default and compiled out of the public-API build entirely.
 
@@ -99,7 +106,7 @@ off the main thread, so the menu stays responsive while monitors are being drive
 
 Fair comparison, honestly stated. **BetterDisplay** and **Lunar** are excellent, mature
 commercial apps with features OpenDisplay doesn't have yet (virtual/dummy displays, EDID
-overrides, XDR brightness upscaling, adaptive sync tuning). **MonitorControl** is a great
+overrides, adaptive sync tuning). **MonitorControl** is a great
 free tool focused on brightness/volume keys. What OpenDisplay brings to that landscape:
 
 - **Free and fully open source (GPL)** — every line of the DDC engine, the safety

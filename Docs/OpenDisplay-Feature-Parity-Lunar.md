@@ -14,11 +14,11 @@ not marketing copy.
 
 ## Scorecard
 
-Of the ~18 features Lunar markets: **19 matched · 1 partial · 1 gap** (the XDR unlock, filed as
-#35 — high-risk, last or never) (plus two niche items we
-deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
+Of the ~18 features Lunar markets: **20 matched · 1 partial · 0 gaps** (plus two niche items we
+deliberately skip). Every feature Lunar markets is now matched or consciously declined.
+Several of Lunar's Pro features are free in OpenDisplay.
 
-## Matched (19)
+## Matched (20)
 
 | Lunar feature | Lunar tier | OpenDisplay |
 |---|---|---|
@@ -41,6 +41,7 @@ deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
 | App Presets (per-app switching) | **Pro** | ✅ Debounced frontmost tracking, crash-safe restore ledger, tested arbitration (0.7.0) |
 | Input Hotkeys (jump to input) | Free | ✅ Per-input global hotkeys, EDID-persistent targets, OSD confirm (0.6.0) |
 | CLI `lux`/`listen`/`lid` | Free | ✅ Plus line-delimited-JSON event stream for scripting (0.6.0) |
+| XDR Brightness (SDR past 500 nits) | **Pro** | ✅ One-tap 2× boost, public Metal/CG only (Lunar's private preset path broke in macOS 26.3), session-only + crash-safe (0.8.0) |
 
 ## Partial (1)
 
@@ -71,9 +72,11 @@ deliberately skip). Several of Lunar's Pro features are free in OpenDisplay.
    area:automation
 6. ~~**CLI extras**~~ — ✅ **Shipped (0.6.0, Issue #34).** `lux`, `listen` (line-delimited JSON
    event stream), `lid`. `low` · area:automation
-7. **XDR Brightness unlock** (past 500 nits on XDR panels) — already tracked as the BetterDisplay
-   map's Tier 5 (XDR/HDR upscaling). Highest risk: private APIs, thermal concerns. Last or never.
-   `very high, private API` · area:controls
+7. ~~**XDR Brightness unlock**~~ — ✅ **Shipped (0.8.0, Issue #35).** One-tap 2× boost on the
+   built-in XDR panel via the EDR-trigger + gamma-table-map technique — public Metal/CG only
+   (no private API after all; Apple broke Lunar's preset-based private path in macOS 26.3, so
+   the gamma route is also the *durable* one). Session-only, Labs-gated, hardware-verified at
+   ~1600 nits. `shipped` · area:controls
 
 ## Deliberately skipped
 

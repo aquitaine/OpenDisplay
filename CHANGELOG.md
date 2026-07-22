@@ -5,6 +5,26 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.8.0] — 2026-07-23
+
+The last row of the Lunar parity table: **every feature Lunar markets is now matched**.
+
+### Added
+- **XDR Brightness** (Labs, Issue #35) — drive the MacBook Pro's XDR panel past its 500-nit
+  SDR cap. A compact sun badge at the end of the built-in's brightness row toggles a **2×
+  boost**: a tiny extended-dynamic-range trigger makes macOS raise the physical backlight,
+  and a gamma-table remap hands that raised range to your normal (SDR) content — the whole
+  desktop gets genuinely brighter, hardware-verified around 1600 nits at the 3.2× internal
+  ceiling. Public Metal/Core Graphics only (no private API), so it also works in the
+  public-API-only build. Opt-in via Settings → Labs, session-only by design: quitting —
+  or even crashing — always returns the panel to normal. Known trade-offs, stated in the
+  UI: HDR content looks clipped while boosted, and sustained boost warms the panel.
+
+### Fixed
+- The app now enforces a **single running instance**: a second copy (a Debug build alongside
+  the installed release, or several stale builds) exits immediately instead of fighting the
+  first one for the gamma slot, DDC bus, settings file, hotkeys, and menu bar.
+
 ## [0.7.1] — 2026-07-22
 
 A review-and-hardening pass over the whole codebase (no new features).
