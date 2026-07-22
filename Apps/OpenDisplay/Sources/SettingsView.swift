@@ -490,10 +490,12 @@ private struct HealthSection: View {
 
                 Divider()
                 AppPresetsCard()
+                #endif
 
                 Divider()
 
                 Text("Labs").font(.title3)
+                #if !PUBLIC_API_ONLY
                 Toggle(isOn: $model.experimentalRotationEnabled) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Experimental display rotation")
@@ -503,6 +505,20 @@ private struct HealthSection: View {
                     }
                 }
                 #endif
+                // Public Metal/CG only, so unlike the rotation toggle above this stays in the
+                // public-API-only build too.
+                Toggle(isOn: Binding(
+                    get: { model.settings.xdrBrightnessEnabled },
+                    set: { model.setXDRBrightnessEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("XDR Brightness")
+                        Text("Unlock the built-in XDR panel\u{2019}s full brightness for SDR content. "
+                             + "Experimental: HDR content will look clipped while boosted, and sustained "
+                             + "max brightness increases panel temperature. Never persists past quit.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
 
                 Divider()
 

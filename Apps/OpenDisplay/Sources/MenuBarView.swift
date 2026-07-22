@@ -183,6 +183,7 @@ private struct DisplayCard: View {
             header
             if isExpanded && display.isActive {
                 brightnessRow
+                if model.xdrCapable(display) { xdrRow }
                 if let volume = model.ddcControl(.volume, for: display) { volumeRow(volume) }
                 chipRow
                 quickActions
@@ -263,6 +264,21 @@ private struct DisplayCard: View {
                 Text(caption).font(.system(size: 9)).foregroundStyle(.tertiary)
                     .padding(.leading, 32).padding(.bottom, 2)
             }
+        }
+    }
+
+    /// XDR Brightness (Labs, Issue #35): drives SDR content past the panel's SDR maximum. Only
+    /// shown when the Labs toggle is on and this is the built-in XDR panel (`xdrCapable`).
+    private var xdrRow: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ODSliderRow(
+                systemImage: "sun.max", trailingSystemImage: "sun.max.fill",
+                value: Binding(get: { Double(model.xdrBoostFraction[id] ?? 0) },
+                               set: { model.setXDRBoost(Float($0), for: display) }),
+                valueText: "\(Int(((model.xdrBoostFraction[id] ?? 0) * 100).rounded()))%",
+                accessibilityLabel: "XDR brightness")
+            Text("XDR · above SDR maximum").font(.system(size: 9)).foregroundStyle(.tertiary)
+                .padding(.leading, 32).padding(.bottom, 2)
         }
     }
 
