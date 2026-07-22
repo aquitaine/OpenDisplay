@@ -102,6 +102,14 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertFalse(SettingsStore(directory: directory).load().preventDisplaySleepWithExternal)
     }
 
+    func testXDRBrightnessDefaultsOffAndRoundTrips() throws {
+        XCTAssertFalse(OpenDisplaySettings.default.xdrBrightnessEnabled)
+        let store = SettingsStore(directory: directory)
+        let settings = OpenDisplaySettings(xdrBrightnessEnabled: true)
+        try store.save(settings)
+        XCTAssertTrue(store.load().xdrBrightnessEnabled)
+    }
+
     func testAdaptiveFieldsDefaultOffAndRoundTrip() throws {
         // Both behaviors default OFF (opt-in Labs feature); tunables have sane defaults.
         let defaults = OpenDisplaySettings.default

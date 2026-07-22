@@ -110,6 +110,10 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// owed; captured BEFORE the preset write and cleared after every restore, so a crash/relaunch
     /// mid-preset still restores correctly (mirrors `faceLightPriorStateByDisplay`).
     public var appPresetPriorStateByDisplay: [String: AppPresetPolicy.PriorState]
+    /// XDR Brightness (Labs, Issue #35): allow unlocking the built-in XDR panel's full backlight
+    /// for SDR content via `XDRBrightnessPolicy`. Only this opt-in toggle persists — the boost
+    /// level itself is session-only, so a relaunch always starts at normal brightness. Default off.
+    public var xdrBrightnessEnabled: Bool
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
@@ -145,7 +149,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         dimmingMethod: DimmingMethod = .gamma,
         appPresetsEnabled: Bool = false,
         appPresets: [AppPresetPolicy.AppPreset] = [],
-        appPresetPriorStateByDisplay: [String: AppPresetPolicy.PriorState] = [:]
+        appPresetPriorStateByDisplay: [String: AppPresetPolicy.PriorState] = [:],
+        xdrBrightnessEnabled: Bool = false
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
@@ -181,6 +186,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.appPresetsEnabled = appPresetsEnabled
         self.appPresets = appPresets
         self.appPresetPriorStateByDisplay = appPresetPriorStateByDisplay
+        self.xdrBrightnessEnabled = xdrBrightnessEnabled
     }
 
     public static let `default` = OpenDisplaySettings()
@@ -218,6 +224,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case appPresetsEnabled
         case appPresets
         case appPresetPriorStateByDisplay
+        case xdrBrightnessEnabled
     }
 
     /// Tolerant decoder: every missing OR undecodable key falls back to its default and unknown
@@ -298,6 +305,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         appPresetPriorStateByDisplay = container.lenient([String: AppPresetPolicy.PriorState].self,
                              forKey: .appPresetPriorStateByDisplay)
             ?? defaults.appPresetPriorStateByDisplay
+        xdrBrightnessEnabled = container.lenient(Bool.self, forKey: .xdrBrightnessEnabled)
+            ?? defaults.xdrBrightnessEnabled
     }
 }
 
