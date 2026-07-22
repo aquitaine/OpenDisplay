@@ -684,9 +684,14 @@ final class AppModel: ObservableObject {
     /// backlight has settled. Skips (and keeps skipping) while Black Out holds the panel at gamma 0.
     private func followXDRRamp(id: DisplayRecordID, cgID: CGDirectDisplayID) async {
         var lastHeadroom: Float = -1
-        for _ in 0..<16 {
+        for tick in 0..<16 {
             guard !Task.isCancelled, xdrBoostFraction[id] != nil else { return }
             let headroom = xdrHeadroom(cgID: cgID)
+            // Self-heal: if EDR hasn't engaged after ~1.5s the trigger's first frame was lost
+            // (e.g. presented mid-window-setup or mid-reconfiguration) — re-present it.
+            if tick == 3, headroom <= 1.001, let screen = Self.screen(for: cgID) {
+                xdrTrigger.setEngaged(true, on: screen)
+            }
             if !blackedOut.contains(id) {
                 let split = DimmingComposer.split(method: settings.dimmingMethod, level: softwareDim[id] ?? 1)
                 writeGamma(level: split.gammaLevel, id: id, cgID: cgID)

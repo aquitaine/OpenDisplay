@@ -67,10 +67,12 @@ final class XDRBrightnessController {
         isEngaged = false
     }
 
-    /// The 8×8 pt trigger rect in the screen's top-left corner (AppKit coordinates are bottom-left
-    /// origin, so top-left is at `maxY`).
+    /// The 8×8 pt trigger rect near the screen's top-left, 44 pt below the top edge — BELOW the
+    /// menu-bar/notch strip. Verified on hardware: a window inside that top strip never engages
+    /// EDR (its pixels aren't composited as regular content there), which silently defeats the
+    /// whole mechanism; 44 pt down engages within a second.
     private func triggerFrame(on screen: NSScreen) -> NSRect {
-        NSRect(x: screen.frame.minX, y: screen.frame.maxY - 8, width: 8, height: 8)
+        NSRect(x: screen.frame.minX + 4, y: screen.frame.maxY - 44, width: 8, height: 8)
     }
 
     /// Builds the borderless trigger window hosting the EDR Metal layer. The layer asks for
@@ -100,9 +102,12 @@ final class XDRBrightnessController {
         metalLayer = layer
         commandQueue = layer.device?.makeCommandQueue()
 
+        // Sublayer of the view's backing layer — the hardware-verified arrangement. (A layer-
+        // hosting swap after `wantsLayer = true` renders nothing here, and an undisplayed layer
+        // means no EDR request reaches WindowServer.)
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 8, height: 8))
         view.wantsLayer = true
-        view.layer = layer
+        view.layer?.addSublayer(layer)
         window.contentView = view
         return window
     }
