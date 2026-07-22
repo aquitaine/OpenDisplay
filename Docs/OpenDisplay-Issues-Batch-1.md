@@ -2,7 +2,7 @@
 
 Six issues for the first build pass: **five quick wins** the audit confirmed have the most existing
 scaffolding, plus **one safety-hardening item** the audit surfaced. Each is self-contained — paste as
-a GitHub issue, or point Claude Code at this file.
+a GitHub issue, or work from this file directly.
 
 Target: **Apple Silicon only.** Line/symbol references are from the repo audit. Where a feature has a
 private-SPI path, keep it behind the existing `#if !PUBLIC_API_ONLY` gate and `dlsym` resolution so

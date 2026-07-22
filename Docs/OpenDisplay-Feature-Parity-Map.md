@@ -1,7 +1,7 @@
 # OpenDisplay → BetterDisplay Feature Parity Map
 
 A complete inventory of BetterDisplay's feature surface (v4.x, as of June 2026), mapped against
-OpenDisplay's current capabilities, written as a planning + handoff document for Claude Code.
+OpenDisplay's current capabilities, written as a planning + handoff document.
 
 Sources: BetterDisplay GitHub README, the official "List of free and Pro features" wiki matrix,
 and betterdisplay.pro. OpenDisplay status is taken from its README/PRD claims — see the caveat
@@ -24,7 +24,7 @@ IOAVService) — higher maintenance risk across macOS releases.
 
 > **Caveat on OD status:** these are mapped from OpenDisplay's README, not a line-by-line code audit.
 > Rows marked `✅` are explicitly claimed as functional there; `🟡` are present but Labs/experimental
-> or partial; `⬜` are not mentioned. A precise code-level audit (best done in Claude Code with repo
+> or partial; `⬜` are not mentioned. A precise code-level audit (best done with repo
 > access) would tighten the `🟡`/`⬜` calls — flagged at the end.
 
 > **Clean-room reminder:** this is a map of *capabilities to match*, not BetterDisplay's code, UI,
@@ -254,7 +254,7 @@ Worth keeping visible — these are differentiators to lean into, not gaps:
 
 ## Suggested build order (handoff tiers)
 
-Grouped by risk/effort so Claude Code can take a tier at a time. The principle: **broaden the free-tier
+Grouped by risk/effort so a tier can be taken at a time. The principle: **broaden the free-tier
 parity with low-risk, no-private-API wins first; defer the hardware-gated and private-API moat.**
 
 **Tier 0 — already done (the free-tier core).** Brightness (3 methods), DDC hardware controls, ICC
