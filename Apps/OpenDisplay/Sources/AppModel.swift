@@ -680,24 +680,23 @@ final class AppModel: ObservableObject {
     }
 
     /// One ramp follow: re-express gamma through the funnel (which reads the live headroom) every
-    /// 500 ms for up to 8 s, stopping early once two consecutive headroom readings agree — the
-    /// backlight has settled. Skips (and keeps skipping) while Black Out holds the panel at gamma 0.
+    /// 500 ms for the full 8 s window. No early exit on "headroom stopped changing": the OS ramps
+    /// the backlight stepwise with flat spots longer than one tick, and bailing at the first
+    /// plateau froze the boost at a fraction of the target (observed live: stuck at ×1.21 while
+    /// the backlight went on to full headroom). Sixteen formula/table writes over 8 s are cheap.
+    /// Skips (and keeps skipping) while Black Out holds the panel at gamma 0.
     private func followXDRRamp(id: DisplayRecordID, cgID: CGDirectDisplayID) async {
-        var lastHeadroom: Float = -1
         for tick in 0..<16 {
             guard !Task.isCancelled, xdrBoostFraction[id] != nil else { return }
-            let headroom = xdrHeadroom(cgID: cgID)
             // Self-heal: if EDR hasn't engaged after ~1.5s the trigger's first frame was lost
             // (e.g. presented mid-window-setup or mid-reconfiguration) — re-present it.
-            if tick == 3, headroom <= 1.001, let screen = Self.screen(for: cgID) {
+            if tick == 3, xdrHeadroom(cgID: cgID) <= 1.001, let screen = Self.screen(for: cgID) {
                 xdrTrigger.setEngaged(true, on: screen)
             }
             if !blackedOut.contains(id) {
                 let split = DimmingComposer.split(method: settings.dimmingMethod, level: softwareDim[id] ?? 1)
                 writeGamma(level: split.gammaLevel, id: id, cgID: cgID)
             }
-            if headroom == lastHeadroom { return }
-            lastHeadroom = headroom
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
     }
