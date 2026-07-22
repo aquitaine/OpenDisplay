@@ -12,8 +12,32 @@ import SwiftUI
 struct OpenDisplayApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    init() {
+        Self.enforceSingleInstance()
+    }
+
     var body: some Scene {
         Settings { SettingsSceneRedirect() }
+    }
+
+    /// Refuses to run alongside another OpenDisplay instance — any copy: a Debug build, the
+    /// installed release, a second bundle on disk. Two instances fight over everything this app
+    /// manages exactly once per system: the per-display gamma slot, the DDC/I2C bus, the settings
+    /// file, the Carbon hotkeys, and the menu-bar item. LaunchServices only prevents re-launching
+    /// the *same* bundle, so distinct copies need this runtime guard. The oldest instance (lowest
+    /// pid) wins; a newcomer exits here in `App.init`, before the delegate — and therefore
+    /// `AppModel` and all its side effects — exists. Deterministic under a simultaneous
+    /// multi-launch: every instance that can see an older sibling bows out.
+    private static func enforceSingleInstance() {
+        #if DEBUG
+        // Escape hatch for cross-process test harnesses that intentionally run two copies.
+        if ProcessInfo.processInfo.environment["OPENDISPLAY_ALLOW_MULTIPLE"] != nil { return }
+        #endif
+        guard let bundleID = Bundle.main.bundleIdentifier else { return }
+        let mine = ProcessInfo.processInfo.processIdentifier
+        let hasOlderSibling = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .contains { !$0.isTerminated && $0.processIdentifier != mine && $0.processIdentifier < mine }
+        if hasOlderSibling { exit(0) }
     }
 }
 
