@@ -1,6 +1,14 @@
 import XCTest
 @testable import TopologyCore
 
+extension XDRBrightnessPolicyTests {
+    func testDefaultBoostFractionYieldsTwoTimesAtFullHeadroom() {
+        XCTAssertEqual(
+            XDRBrightnessPolicy.boost(forFraction: XDRBrightnessPolicy.defaultBoostFraction, headroom: 16),
+            2.0, accuracy: 0.001)
+    }
+}
+
 final class XDRBrightnessPolicyTests: XCTestCase {
     func testFractionZeroIsNoBoost() {
         XCTAssertEqual(XDRBrightnessPolicy.boost(forFraction: 0, headroom: 8.6), 1.0)

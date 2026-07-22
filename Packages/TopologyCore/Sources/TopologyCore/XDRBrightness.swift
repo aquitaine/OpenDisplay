@@ -17,6 +17,11 @@ public enum XDRBrightnessPolicy {
     /// backlight physically delivers only clips more of the range for zero extra light.
     public static let maxBoost: Float = 3.2
 
+    /// The slider fraction the menu's one-tap XDR toggle applies: solves `boost(forFraction:)` for
+    /// a 2× boost at full headroom — meaningfully "brighter than max" without the 3.2× ceiling's
+    /// heat and battery cost. (1 + f·(maxBoost − 1) = 2 ⇒ f = 1 / 2.2.)
+    public static let defaultBoostFraction: Float = 1 / 2.2
+
     /// The gamma boost for a slider `fraction` (0 = off … 1 = maximum), given the display's live
     /// EDR `headroom` (`maximumExtendedDynamicRangeColorComponentValue`). Linear from 1 at
     /// fraction 0 up to the usable ceiling — the smaller of the live headroom and `maxBoost` — so

@@ -3,6 +3,7 @@ import AppKit
 import DisplayDomain
 import OpenDisplayDesignSystem
 import SwiftUI
+import TopologyCore
 
 /// The menu-bar popover (primary surface), styled after the design kit's `MBDisplay`: a compact
 /// per-display row that expands to the *fast, frequent* controls — one unified brightness slider,
@@ -183,7 +184,6 @@ private struct DisplayCard: View {
             header
             if isExpanded && display.isActive {
                 brightnessRow
-                if model.xdrCapable(display) { xdrRow }
                 if let volume = model.ddcControl(.volume, for: display) { volumeRow(volume) }
                 chipRow
                 quickActions
@@ -254,12 +254,15 @@ private struct DisplayCard: View {
 
     private var brightnessRow: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ODSliderRow(
-                systemImage: "sun.min", trailingSystemImage: "sun.max",
-                value: Binding(get: { Double(model.brightness[id] ?? 0.5) },
-                               set: { model.setBrightness(Float($0), for: display) }),
-                valueText: "\(Int(((model.brightness[id] ?? 0.5) * 100).rounded()))%",
-                accessibilityLabel: "Brightness")
+            HStack(spacing: 6) {
+                ODSliderRow(
+                    systemImage: "sun.min", trailingSystemImage: "sun.max",
+                    value: Binding(get: { Double(model.brightness[id] ?? 0.5) },
+                                   set: { model.setBrightness(Float($0), for: display) }),
+                    valueText: "\(Int(((model.brightness[id] ?? 0.5) * 100).rounded()))%",
+                    accessibilityLabel: "Brightness")
+                if model.xdrCapable(display) { xdrBoostToggle }
+            }
             if let caption = model.brightnessCaption(for: display) {
                 Text(caption).font(.system(size: 9)).foregroundStyle(.tertiary)
                     .padding(.leading, 32).padding(.bottom, 2)
@@ -267,19 +270,22 @@ private struct DisplayCard: View {
         }
     }
 
-    /// XDR Brightness (Labs, Issue #35): drives SDR content past the panel's SDR maximum. Only
-    /// shown when the Labs toggle is on and this is the built-in XDR panel (`xdrCapable`).
-    private var xdrRow: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ODSliderRow(
-                systemImage: "sun.max", trailingSystemImage: "sun.max.fill",
-                value: Binding(get: { Double(model.xdrBoostFraction[id] ?? 0) },
-                               set: { model.setXDRBoost(Float($0), for: display) }),
-                valueText: "\(Int(((model.xdrBoostFraction[id] ?? 0) * 100).rounded()))%",
-                accessibilityLabel: "XDR brightness")
-            Text("XDR · above SDR maximum").font(.system(size: 9)).foregroundStyle(.tertiary)
-                .padding(.leading, 32).padding(.bottom, 2)
+    /// XDR Brightness (Labs, Issue #35): a compact sun badge at the end of the brightness row that
+    /// boosts SDR content to 2× the panel's SDR maximum while on. Binary on purpose — a second
+    /// slider read as over-designed, and "brighter than max" is a yes/no want; the ramp follower
+    /// already eases the transition. Only offered on the built-in XDR panel with the Labs toggle on.
+    private var xdrBoostToggle: some View {
+        Button {
+            let isOn = (model.xdrBoostFraction[id] ?? 0) > 0
+            model.setXDRBoost(isOn ? 0 : XDRBrightnessPolicy.defaultBoostFraction, for: display)
+        } label: {
+            Image(systemName: (model.xdrBoostFraction[id] ?? 0) > 0 ? "sun.max.fill" : "sun.max")
+                .foregroundStyle((model.xdrBoostFraction[id] ?? 0) > 0 ? ODColor.accent : Color.secondary)
         }
+        .buttonStyle(.plain)
+        .help("XDR boost — drive SDR content to 2× the panel's normal maximum")
+        .accessibilityLabel("XDR boost")
+        .accessibilityValue((model.xdrBoostFraction[id] ?? 0) > 0 ? "on" : "off")
     }
 
     private func volumeRow(_ volume: Float) -> some View {
