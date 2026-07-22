@@ -364,6 +364,8 @@ final class AppModel: ObservableObject {
             CoreGraphicsProvider.restoreGamma()
             MainActor.assumeIsolated {
                 self?.sleepGuard.releaseAll()
+                self?.xdrRampTask?.cancel()
+                self?.xdrTrigger.disengage()  // process-bound anyway; one line for tidiness
                 self?.mediaKeyTapRetry?.cancel()
                 self?.mediaKeyTap?.stop()
                 #if !PUBLIC_API_ONLY
@@ -422,11 +424,7 @@ final class AppModel: ObservableObject {
     /// user's OpenDisplay alias, so matching an aliased display ("Desk") against "Dell U2720Q" must go
     /// through this rather than `displayName(for:)`.
     private func osDisplayName(for observation: DisplayObservation) -> String {
-        let screenNumberKey = NSDeviceDescriptionKey("NSScreenNumber")
-        if let cgID = observation.cgDisplayID,
-           let screen = NSScreen.screens.first(where: {
-               ($0.deviceDescription[screenNumberKey] as? NSNumber)?.uint32Value == cgID
-           }) {
+        if let screen = observation.cgDisplayID.flatMap(Self.screen(for:)) {
             return screen.localizedName
         }
         if observation.displayClass == .builtIn { return "Built-in Display" }
@@ -434,6 +432,14 @@ final class AppModel: ObservableObject {
             return "\(observation.displayClass.rawValue.capitalized) · \(mode.pixelWidth)×\(mode.pixelHeight)"
         }
         return observation.recordID.rawValue
+    }
+
+    /// The live NSScreen for a CG display id, or nil while it's offline / mid-reconfiguration.
+    private static func screen(for cgID: CGDirectDisplayID) -> NSScreen? {
+        let screenNumberKey = NSDeviceDescriptionKey("NSScreenNumber")
+        return NSScreen.screens.first {
+            ($0.deviceDescription[screenNumberKey] as? NSNumber)?.uint32Value == cgID
+        }
     }
 
     /// Where the rescue-readable checkpoints live, shown in Settings → Diagnostics & Recovery.
@@ -596,14 +602,21 @@ final class AppModel: ObservableObject {
         writeGamma(level: split.gammaLevel, id: id, cgID: cgID)
     }
 
-    /// The one funnel for gamma writes: dim scale × the display's colour-temperature gains. Direct
-    /// `setGammaDim` calls would silently clear an active warmth — only Black Out (which wants the
-    /// neutral floor) bypasses this.
+    /// The one funnel for gamma writes: dim scale × the display's colour-temperature gains × the
+    /// XDR boost (Issue #35 — read live here so no caller can silently clear an active boost).
+    /// Direct `setGammaDim` calls would silently clear an active warmth — only Black Out (which
+    /// wants the neutral floor) bypasses this.
     private func writeGamma(level: Float, id: DisplayRecordID, cgID: CGDirectDisplayID) {
         let gains = ColorTemperatureCurve.gains(
             kelvin: colorTemperature[id] ?? ColorTemperatureCurve.neutralKelvin)
+        // Headroom is only read while a boost is set — a plain dim/warmth write skips the
+        // NSScreen lookup and takes the provider's untouched formula path (boost 1).
+        let fraction = xdrBoostFraction[id] ?? 0
+        let boost = fraction > 0
+            ? XDRBrightnessPolicy.boost(forFraction: fraction, headroom: xdrHeadroom(cgID: cgID))
+            : 1
         observer.setGammaAdjustment(
-            dim: level, red: gains.red, green: gains.green, blue: gains.blue, for: cgID)
+            dim: level, red: gains.red, green: gains.green, blue: gains.blue, boost: boost, for: cgID)
     }
 
     /// Switches the dimming method and re-expresses every live dim through it, so the slider
@@ -617,6 +630,97 @@ final class AppModel: ObservableObject {
             guard let cgID = displays.first(where: { $0.recordID == id })?.cgDisplayID else { continue }
             applyDim(level: level, id: id, cgID: cgID)
         }
+    }
+
+    // MARK: - XDR Brightness (Labs, Issue #35)
+
+    /// Per-display XDR boost fraction (the XDR slider's 0...1 position); absent = off. Session-only
+    /// by design — like the software dim, it must never outlive the app, and sustained max
+    /// brightness warms the panel, so a relaunch always starts at normal brightness.
+    @Published private(set) var xdrBoostFraction: [DisplayRecordID: Float] = [:]
+    /// The tiny EDR window that makes WindowServer raise the XDR backlight. Process-bound, like
+    /// the dim overlays — a crash tears it down and the backlight relaxes back to SDR on its own.
+    private let xdrTrigger = XDRBrightnessController()
+    /// Follows the backlight ramp after the trigger engages, re-expressing gamma as headroom
+    /// rises. Short-lived (≤ 8 s); replaced on every slider set.
+    private var xdrRampTask: Task<Void, Never>?
+
+    /// Whether the XDR row is offered for `observation`: the Labs toggle is on, it's the built-in
+    /// panel, and its screen reports EDR potential beyond SDR (only XDR-class panels do).
+    func xdrCapable(_ observation: DisplayObservation) -> Bool {
+        guard settings.xdrBrightnessEnabled, observation.displayClass == .builtIn,
+              let screen = observation.cgDisplayID.flatMap(Self.screen(for:)) else { return false }
+        return screen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1.0
+    }
+
+    /// Sets the XDR boost fraction (0...1) for the built-in XDR panel. A positive fraction shows
+    /// the EDR trigger and starts the ramp follower — the backlight takes several seconds to reach
+    /// full headroom, and each tick re-expresses gamma so brightness rides the ramp up. Zero
+    /// cancels the follower, drops the trigger, and re-expresses neutral (boost-1) gamma.
+    func setXDRBoost(_ fraction: Float, for observation: DisplayObservation) {
+        guard let cgID = observation.cgDisplayID else { return }
+        let id = observation.recordID
+        let fraction = min(max(fraction, 0), 1)
+        xdrBoostFraction[id] = fraction > 0 ? fraction : nil
+        xdrRampTask?.cancel()
+        xdrRampTask = nil
+        guard fraction > 0 else {
+            xdrTrigger.disengage()
+            guard !blackedOut.contains(id) else { return }  // Black Out stays the last gamma writer
+            let split = DimmingComposer.split(method: settings.dimmingMethod, level: softwareDim[id] ?? 1)
+            writeGamma(level: split.gammaLevel, id: id, cgID: cgID)
+            return
+        }
+        guard let screen = Self.screen(for: cgID) else {  // offline / mid-reconfig: nothing to boost
+            xdrBoostFraction[id] = nil
+            return
+        }
+        xdrTrigger.setEngaged(true, on: screen)
+        xdrRampTask = Task { [weak self] in await self?.followXDRRamp(id: id, cgID: cgID) }
+    }
+
+    /// One ramp follow: re-express gamma through the funnel (which reads the live headroom) every
+    /// 500 ms for the full 8 s window. No early exit on "headroom stopped changing": the OS ramps
+    /// the backlight stepwise with flat spots longer than one tick, and bailing at the first
+    /// plateau froze the boost at a fraction of the target (observed live: stuck at ×1.21 while
+    /// the backlight went on to full headroom). Sixteen formula/table writes over 8 s are cheap.
+    /// Skips (and keeps skipping) while Black Out holds the panel at gamma 0.
+    private func followXDRRamp(id: DisplayRecordID, cgID: CGDirectDisplayID) async {
+        for tick in 0..<16 {
+            guard !Task.isCancelled, xdrBoostFraction[id] != nil else { return }
+            // Self-heal: if EDR hasn't engaged after ~1.5s the trigger's first frame was lost
+            // (e.g. presented mid-window-setup or mid-reconfiguration) — re-present it.
+            if tick == 3, xdrHeadroom(cgID: cgID) <= 1.001, let screen = Self.screen(for: cgID) {
+                xdrTrigger.setEngaged(true, on: screen)
+            }
+            if !blackedOut.contains(id) {
+                let split = DimmingComposer.split(method: settings.dimmingMethod, level: softwareDim[id] ?? 1)
+                writeGamma(level: split.gammaLevel, id: id, cgID: cgID)
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+    }
+
+    /// The display's live EDR headroom (1 = plain SDR) — what WindowServer is currently
+    /// attenuating SDR content by, ramping over several seconds after the trigger engages.
+    private func xdrHeadroom(cgID: CGDirectDisplayID) -> Float {
+        guard let screen = Self.screen(for: cgID) else { return 1 }
+        return Float(screen.maximumExtendedDynamicRangeColorComponentValue)
+    }
+
+    /// Toggle for XDR Brightness (Labs). Turning it OFF zeroes every active boost first — through
+    /// `setXDRBoost`, so the trigger drops and gamma re-expresses — leaving nothing engaged behind
+    /// a disabled toggle.
+    func setXDRBrightnessEnabled(_ enabled: Bool) {
+        guard settings.xdrBrightnessEnabled != enabled else { return }
+        if !enabled {
+            for id in xdrBoostFraction.keys {
+                guard let observation = displays.first(where: { $0.recordID == id }) else { continue }
+                setXDRBoost(0, for: observation)
+            }
+        }
+        settings.xdrBrightnessEnabled = enabled
+        persistSettings()
     }
 
     /// Displays currently blacked out (gamma driven to zero — the panel stays logically connected so it
@@ -733,7 +837,11 @@ final class AppModel: ObservableObject {
         if !colorTemperature.keys.allSatisfy(ids.contains) {
             colorTemperature = colorTemperature.filter { ids.contains($0.key) }
         }
+        if !xdrBoostFraction.keys.allSatisfy(ids.contains) {
+            xdrBoostFraction = xdrBoostFraction.filter { ids.contains($0.key) }
+        }
         dimOverlay.reconcile()  // drop overlays for departed displays, re-fit after mode/layout changes
+        xdrTrigger.reconcile(screens: NSScreen.screens)  // re-fit / re-present the EDR trigger, drop if its display left
         if !colorProfileControllable.keys.allSatisfy(ids.contains) { colorProfileControllable = colorProfileControllable.filter { ids.contains($0.key) } }
         if !blackedOut.allSatisfy(ids.contains) { blackedOut = blackedOut.filter(ids.contains) }
         #if !PUBLIC_API_ONLY
@@ -2462,6 +2570,9 @@ final class AppModel: ObservableObject {
         CoreGraphicsProvider.restoreGamma()
         softwareDim.removeAll()
         dimOverlay.removeAll()
+        xdrRampTask?.cancel()
+        xdrBoostFraction.removeAll()
+        xdrTrigger.disengage()  // process-bound anyway; dropped now so the backlight relaxes at once
         sleepGuard.releaseAll()
     }
 

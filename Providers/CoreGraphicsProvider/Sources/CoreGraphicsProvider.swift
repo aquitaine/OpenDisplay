@@ -173,11 +173,39 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
     public nonisolated func setGammaAdjustment(
         dim: Float, red: Float, green: Float, blue: Float, for displayID: CGDirectDisplayID
     ) {
+        setGammaAdjustment(dim: dim, red: red, green: green, blue: blue, boost: 1, for: displayID)
+    }
+
+    /// `setGammaAdjustment` with an XDR brightness boost (≥ 1) multiplied in. The formula API
+    /// clamps its coefficients to 1.0, so a boost — which maps EDR-attenuated SDR content back up
+    /// toward full drive of the raised backlight — can only be expressed as an explicit transfer
+    /// TABLE: the same linear ramp the formula produces, times `boost`, saturating at 1. With no
+    /// meaningful boost this delegates to the formula path, so existing behavior is untouched.
+    /// Like the formula path, the table is an absolute re-expression from the app's own state
+    /// (never a scale of the current hardware table), so repeated writes can't compound.
+    public nonisolated func setGammaAdjustment(
+        dim: Float, red: Float, green: Float, blue: Float, boost: Float,
+        for displayID: CGDirectDisplayID
+    ) {
         let scale = CGGammaValue(max(0.15, min(1, dim)))
         let r = scale * CGGammaValue(min(max(red, 0), 1))
         let g = scale * CGGammaValue(min(max(green, 0), 1))
         let b = scale * CGGammaValue(min(max(blue, 0), 1))
-        _ = CGSetDisplayTransferByFormula(displayID, 0, r, 1, 0, g, 1, 0, b, 1)
+        guard boost > 1.001 else {
+            _ = CGSetDisplayTransferByFormula(displayID, 0, r, 1, 0, g, 1, 0, b, 1)
+            return
+        }
+        let count = 256
+        var redTable = [CGGammaValue](repeating: 0, count: count)
+        var greenTable = [CGGammaValue](repeating: 0, count: count)
+        var blueTable = [CGGammaValue](repeating: 0, count: count)
+        for i in 0..<count {
+            let input = CGGammaValue(i) / CGGammaValue(count - 1) * CGGammaValue(boost)
+            redTable[i] = min(1, input * r)
+            greenTable[i] = min(1, input * g)
+            blueTable[i] = min(1, input * b)
+        }
+        _ = CGSetDisplayTransferByTable(displayID, UInt32(count), redTable, greenTable, blueTable)
     }
 
     /// Restores every display's gamma to its ColorSync calibration, clearing any software dim. Call
