@@ -158,14 +158,10 @@ final class AppModel: ObservableObject {
     }
 
     /// A display OpenDisplay turned off — remembered (and persisted) so it stays visible and
-    /// re-enableable even across app restarts, and so the watchdog can always recover it.
-    struct OfflineDisplay: Identifiable, Equatable, Codable {
-        let recordID: DisplayRecordID
-        let cgID: CGDirectDisplayID
-        let name: String
-        let displayClass: DisplayClass
-        var id: DisplayRecordID { recordID }
-    }
+    /// re-enableable even across app restarts, and so the watchdog can always recover it. The type
+    /// and its on-disk format live in TopologyCore because the CLI reads the same file: the display
+    /// you turned off is exactly the one you may need the CLI to bring back.
+    typealias OfflineDisplay = ManagedOfflineDisplay
 
     /// Count of currently-active displays — the UI disables the off-toggle on the last one.
     var activeDisplayCount: Int { displays.filter(\.isActive).count }
@@ -249,6 +245,8 @@ final class AppModel: ObservableObject {
     /// Pinned favourite resolutions per display (Batch-2 #3), persisted to favorites.json.
     @Published private(set) var favorites = FavoriteResolutions()
     private let favoritesStore: FavoritesStore?
+    /// On-disk managed-offline list, shared with the CLI (see `ManagedOfflineStore`).
+    private let managedOfflineStore: ManagedOfflineStore?
 
     /// Update-check state driving the menu's "Check for updates" row.
     enum UpdateState: Equatable {
@@ -310,6 +308,8 @@ final class AppModel: ObservableObject {
         let favoritesStore = (try? SettingsStore.defaultDirectory()).map(FavoritesStore.init(directory:))
         self.favoritesStore = favoritesStore
         self.favorites = favoritesStore?.load() ?? FavoriteResolutions()
+        self.managedOfflineStore =
+            (try? ManagedOfflineStore.defaultDirectory()).map(ManagedOfflineStore.init(directory:))
         // Register the configurable global hotkeys (Batch-2 #4). Reconnect-All is always-available
         // (recovery hierarchy step 3) and reachable even when the menu bar isn't; the rest are unbound
         // by default. A chord that can't be claimed is simply skipped (menu-bar item remains).
@@ -522,22 +522,17 @@ final class AppModel: ObservableObject {
         scenes = await library.all()
     }
 
-    private static func managedOfflineURL() -> URL? {
-        (try? DiskCheckpointStore.defaultDirectory())?.appendingPathComponent("managed-offline.json")
-    }
-
     /// Persists the managed-offline list so a turned-off display survives an app restart as a
-    /// recoverable off-card (the in-memory-only list was lost on restart, stranding the display).
+    /// recoverable off-card (the in-memory-only list was lost on restart, stranding the display),
+    /// and so the CLI can see — and reconnect — what the app turned off.
     private func persistManagedOffline() {
-        guard let url = Self.managedOfflineURL() else { return }
-        try? JSONEncoder().encode(managedOffline).write(to: url, options: .atomic)
+        try? managedOfflineStore?.save(managedOffline)
     }
 
     /// Loads persisted off-displays and reconciles them against the live topology: any that are back
     /// online + active are dropped (they returned on their own); the rest remain as off-cards.
     private func loadManagedOffline() async {
-        guard let url = Self.managedOfflineURL(), let data = try? Data(contentsOf: url),
-              let saved = try? JSONDecoder().decode([OfflineDisplay].self, from: data) else { return }
+        guard let saved = managedOfflineStore?.load(), !saved.isEmpty else { return }
         let snapshot = await observer.currentSnapshot()
         let activeIDs = Set(snapshot.activeDisplays.map(\.recordID))
         managedOffline = saved.filter { !activeIDs.contains($0.recordID) }
@@ -2349,10 +2344,7 @@ final class AppModel: ObservableObject {
     func reconnectOffline(_ offline: OfflineDisplay) async {
         busy = true
         defer { busy = false }
-        let reconnectID = offline.cgID != 0
-            ? DisplayRecordID(rawValue: "cgid:\(offline.cgID)")
-            : offline.recordID
-        try? await lifecycle.reconnect(reconnectID, deadline: Date().addingTimeInterval(10))
+        try? await lifecycle.reconnect(offline.reconnectID, deadline: Date().addingTimeInterval(10))
         managedOffline.removeAll { $0.recordID == offline.recordID }
         persistManagedOffline()
         await refresh()
@@ -2558,10 +2550,7 @@ final class AppModel: ObservableObject {
         // observer snapshot's offline list, which doesn't include this persisted `managedOffline`
         // set, so it would no-op here and leave the display off.
         for offline in managedOffline {
-            let reconnectID = offline.cgID != 0
-                ? DisplayRecordID(rawValue: "cgid:\(offline.cgID)")
-                : offline.recordID
-            try? await lifecycle.reconnect(reconnectID, deadline: Date().addingTimeInterval(10))
+            try? await lifecycle.reconnect(offline.reconnectID, deadline: Date().addingTimeInterval(10))
         }
         if !managedOffline.isEmpty {
             managedOffline.removeAll()

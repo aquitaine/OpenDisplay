@@ -85,8 +85,21 @@ let sceneLibrary = await SceneLibrary(store: sceneStore)
 
 typealias ResolvedDisplay = (observation: DisplayObservation, record: DisplayRecord)
 
+/// The app's persisted managed-offline list — displays OpenDisplay logically turned off. Read here
+/// because a disabled display is GONE from `CGGetOnlineDisplayList`: enumeration can never
+/// rediscover it, so without this file the CLI cannot see (or reconnect) the very displays it is
+/// most needed for. Empty when the app never turned anything off.
+let managedOfflineStore = (try? ManagedOfflineStore.defaultDirectory()).map(ManagedOfflineStore.init(directory:))
+let managedOfflineDisplays = managedOfflineStore?.load() ?? []
+let managedOfflineIDs = Set(managedOfflineDisplays.map(\.recordID))
+
 /// Resolves every live display's fingerprint into the registry (recognizing or minting), so the
 /// registry learns the current displays and we can map observations <-> records for this run.
+///
+/// Managed-offline displays are appended as synthetic inactive observations: they have no live
+/// hardware to fingerprint, so their registry record is looked up by id (it was minted when the
+/// display was last online). This is what makes `reconnect`, `list`, and `state:managedOffline`
+/// work on a display that the OS no longer reports at all.
 func resolveCurrentDisplays() async -> [ResolvedDisplay] {
     let snapshot = await observer.currentSnapshot()
     let observations = snapshot.observations.filter { $0.cgDisplayID != nil }
@@ -97,7 +110,39 @@ func resolveCurrentDisplays() async -> [ResolvedDisplay] {
     }
     // One batched resolve → exactly one registry write for the whole display set this run.
     let records = await registry.resolveAll(inputs)
-    return Array(zip(observations, records))
+    var pairs = Array(zip(observations, records))
+
+    let online = Set(observations.map(\.recordID))
+    for offline in managedOfflineDisplays where !online.contains(offline.recordID) {
+        pairs.append((
+            DisplayObservation(
+                recordID: offline.recordID, cgDisplayID: offline.cgID, isActive: false,
+                displayClass: offline.displayClass, generation: snapshot.generation),
+            await offlineRecord(for: offline)))
+    }
+    return pairs
+}
+
+/// The registry record for a turned-off display, so it keeps its alias and tags while offline.
+/// An observation id is `cg:<uuid>`, and the registry indexes minted records by that UUID — but a
+/// lookup miss must NOT hide the display: falling back to a synthetic record keeps it listed and
+/// reconnectable, which is the whole point of remembering it.
+func offlineRecord(for offline: ManagedOfflineDisplay) async -> DisplayRecord {
+    let raw = offline.recordID.rawValue
+    let known = raw.hasPrefix("cg:")
+        ? await registry.record(forCGUUID: String(raw.dropFirst("cg:".count)))
+        : await registry.record(for: offline.recordID)
+    guard var record = known else {
+        return DisplayRecord(
+            id: offline.recordID, fingerprint: DisplayFingerprint(modelName: offline.name),
+            displayClass: offline.displayClass)
+    }
+    // Registry fingerprints carry a model name only when the EDID supplied one; the app stored the
+    // OS-provided name when it turned the display off, which is what the user saw and recognizes.
+    if record.alias == nil, record.fingerprint.modelName == nil {
+        record.fingerprint.modelName = offline.name
+    }
+    return record
 }
 
 // MARK: - Selector resolution
@@ -145,8 +190,24 @@ func uniqueDisplay(_ raw: String, in pairs: [ResolvedDisplay],
 
 // MARK: - Output
 
+/// A human-readable name: the user's alias, else the EDID model name, else a class + resolution
+/// label. The raw record id is the last resort only — `cg:37D8832A-2D66-…` identifies nothing to a
+/// human, and these names are what selectors and recovery hints are built from.
 func name(for pair: ResolvedDisplay) -> String {
-    pair.record.alias ?? pair.record.fingerprint.modelName ?? pair.observation.recordID.rawValue
+    if let alias = pair.record.alias, !alias.isEmpty { return alias }
+    if let model = pair.record.fingerprint.modelName, !model.isEmpty { return model }
+    if pair.observation.displayClass == .builtIn { return "Built-in Display" }
+    if let mode = pair.observation.mode {
+        return "\(pair.observation.displayClass.rawValue.capitalized) \(mode.pixelWidth)×\(mode.pixelHeight)"
+    }
+    return pair.observation.recordID.rawValue
+}
+
+/// The shortest selector that will reach this display again — its alias when it has one (stable
+/// and memorable), otherwise the raw CG display id.
+func recoverySelector(for pair: ResolvedDisplay) -> String {
+    if let alias = pair.record.alias, !alias.isEmpty { return "alias:\(alias)" }
+    return pair.observation.cgDisplayID.map(String.init) ?? "id:\(pair.observation.recordID.rawValue)"
 }
 
 func modeString(_ observation: DisplayObservation) -> String? {
@@ -173,22 +234,28 @@ func runList() async {
         struct Row: Encodable {
             var id: String; var recordId: String; var alias: String?; var tags: [String]
             var cgDisplayID: UInt32?; var active: Bool; var main: Bool
+            var managedOffline: Bool
             var displayClass: String; var mode: String?; var origin: String
         }
         emit(pairs.map {
             Row(id: $0.observation.recordID.rawValue, recordId: $0.record.id.rawValue, alias: $0.record.alias,
                 tags: $0.record.tags.sorted(), cgDisplayID: $0.observation.cgDisplayID,
                 active: $0.observation.isActive, main: $0.observation.isMain,
+                managedOffline: managedOfflineIDs.contains($0.observation.recordID),
                 displayClass: $0.observation.displayClass.rawValue, mode: modeString($0.observation),
                 origin: "(\($0.observation.origin.x),\($0.observation.origin.y))")
         })
         return
     }
     for pair in pairs {
+        let isOffline = managedOfflineIDs.contains(pair.observation.recordID)
         let mark = pair.observation.isActive ? "●" : "○"
         let main = pair.observation.isMain ? " [main]" : ""
         let tags = pair.record.tags.isEmpty ? "" : " #\(pair.record.tags.sorted().joined(separator: " #"))"
-        print("\(mark) \(name(for: pair))\(main) \(modeString(pair.observation) ?? "—")\(tags)")
+        // Name the recovery command inline: a turned-off display is invisible to the OS, so
+        // "how do I get it back" should never require reading the docs.
+        let state = isOffline ? "  turned off — `opendisplay reconnect \(recoverySelector(for: pair))`" : ""
+        print("\(mark) \(name(for: pair))\(main) \(modeString(pair.observation) ?? "—")\(tags)\(state)")
     }
 }
 
@@ -243,8 +310,7 @@ func runLid() async {
 func runAlias() async {
     guard let selectorArg, let valueArg else { fail("usage: opendisplay alias <selector> <name>") }
     let pairs = await resolveCurrentDisplays()
-    let snapshot = await observer.currentSnapshot()
-    let target = uniqueDisplay(selectorArg, in: pairs, managedOffline: Set(snapshot.managedOffline.map(\.displayID)))
+    let target = uniqueDisplay(selectorArg, in: pairs, managedOffline: managedOfflineIDs)
     await registry.setAlias(valueArg, for: target.record.id)
     print("aliased \(target.observation.recordID.rawValue) → \"\(valueArg)\"")
 }
@@ -252,8 +318,7 @@ func runAlias() async {
 func runTag() async {
     guard let selectorArg, let valueArg else { fail("usage: opendisplay tag <selector> <tag>") }
     let pairs = await resolveCurrentDisplays()
-    let snapshot = await observer.currentSnapshot()
-    let target = uniqueDisplay(selectorArg, in: pairs, managedOffline: Set(snapshot.managedOffline.map(\.displayID)))
+    let target = uniqueDisplay(selectorArg, in: pairs, managedOffline: managedOfflineIDs)
     await registry.addTag(valueArg, to: target.record.id)
     print("tagged \(name(for: target)) #\(valueArg)")
 }
@@ -270,8 +335,7 @@ func runRecover() async {
 func runDisconnect() async {
     guard let selectorArg else { fail("usage: opendisplay disconnect <selector> [--dry-run] [--json]") }
     let pairs = await resolveCurrentDisplays()
-    let snapshot = await observer.currentSnapshot()
-    let target = uniqueDisplay(selectorArg, in: pairs, managedOffline: Set(snapshot.managedOffline.map(\.displayID)))
+    let target = uniqueDisplay(selectorArg, in: pairs, managedOffline: managedOfflineIDs)
 
     if dryRun {
         let outcome = await gateway.preflightDisconnect(target.observation.recordID, identityConfidence: 1.0)
@@ -290,21 +354,50 @@ func runDisconnect() async {
     let envelope = await gateway.disconnect(
         target.observation.recordID, options: DisconnectOptions(actor: .cli, identityConfidence: 1.0)
     )
+    // Remember what we turned off, exactly as the app does. Without this the display is
+    // unreachable the moment it leaves the online list — including by `reconnect` in this same
+    // CLI a second later — because nothing anywhere records that it exists.
+    if envelope.status == .committed {
+        rememberManagedOffline(ManagedOfflineDisplay(
+            recordID: target.observation.recordID,
+            cgID: target.observation.cgDisplayID ?? 0,
+            name: name(for: target),
+            displayClass: target.observation.displayClass))
+    }
     emitEnvelope(envelope)
 }
 
 func runReconnect() async {
     guard let selectorArg else { fail("usage: opendisplay reconnect <selector> [--json]") }
     let pairs = await resolveCurrentDisplays()
-    let snapshot = await observer.currentSnapshot()
-    let target = uniqueDisplay(selectorArg, in: pairs, managedOffline: Set(snapshot.managedOffline.map(\.displayID)))
+    let target = uniqueDisplay(selectorArg, in: pairs, managedOffline: managedOfflineIDs)
+    let recordID = target.observation.recordID
+    // A disabled display is off the online list, so its CG UUID can't be resolved — reconnect by
+    // raw display id, the same way the app does.
+    let reconnectID = managedOfflineDisplays.first { $0.recordID == recordID }?.reconnectID
+        ?? target.observation.cgDisplayID.map { DisplayRecordID(rawValue: "cgid:\($0)") }
+        ?? recordID
     do {
-        try await lifecycle.reconnect(target.observation.recordID, deadline: Date().addingTimeInterval(15))
-        if asJSON { emit(["status": "committed", "target": target.observation.recordID.rawValue]) }
+        try await lifecycle.reconnect(reconnectID, deadline: Date().addingTimeInterval(15))
+        forgetManagedOffline(recordID)
+        if asJSON { emit(["status": "committed", "target": recordID.rawValue]) }
         else { print("reconnected \(name(for: target))") }
     } catch {
         fail("reconnect failed: \(error)")
     }
+}
+
+/// Adds (replacing any prior entry for the same display) to the shared managed-offline list.
+func rememberManagedOffline(_ display: ManagedOfflineDisplay) {
+    var remaining = managedOfflineDisplays.filter { $0.recordID != display.recordID }
+    remaining.append(display)
+    try? managedOfflineStore?.save(remaining)
+}
+
+/// Drops a display from the shared managed-offline list once it is back online.
+func forgetManagedOffline(_ recordID: DisplayRecordID) {
+    let remaining = managedOfflineDisplays.filter { $0.recordID != recordID }
+    if remaining.count != managedOfflineDisplays.count { try? managedOfflineStore?.save(remaining) }
 }
 
 // MARK: - Scenes
@@ -435,7 +528,7 @@ func runScene() async {
 func runBrightness() async {
     guard let sel = selectorArg else { fail("usage: opendisplay brightness <selector> [0..1]") }
     let pairs = await resolveCurrentDisplays()
-    let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
+    let target = uniqueDisplay(sel, in: pairs, managedOffline: managedOfflineIDs)
     guard let cgID = target.observation.cgDisplayID else { fail("display has no Core Graphics id") }
     let builtIn = target.observation.displayClass == .builtIn
     if let raw = valueArg {
@@ -478,7 +571,7 @@ func runDDC() async {
         fail("unknown feature '\(featureArg)' — \(usage)")
     }
     let pairs = await resolveCurrentDisplays()
-    let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
+    let target = uniqueDisplay(sel, in: pairs, managedOffline: managedOfflineIDs)
     guard let cgID = target.observation.cgDisplayID, let ddc = ExternalDisplayDDC(displayID: cgID) else {
         fail("no DDC for this display (external displays only)")
     }
@@ -563,7 +656,7 @@ func runDDC() async {
 func runEDID() async {
     guard let sel = selectorArg else { fail("usage: opendisplay edid <selector> [--out <path.bin>]") }
     let pairs = await resolveCurrentDisplays()
-    let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
+    let target = uniqueDisplay(sel, in: pairs, managedOffline: managedOfflineIDs)
     guard let cgID = target.observation.cgDisplayID else { fail("no display for selector '\(sel)'") }
     guard let bytes = EDIDReader.rawEDID(for: cgID) else {
         print("edid: unavailable for this display")
@@ -617,7 +710,7 @@ func runFavorite() async {
     let store = (try? SettingsStore.defaultDirectory()).map(FavoritesStore.init(directory:))
     var favorites = store?.load() ?? FavoriteResolutions()
     let pairs = await resolveCurrentDisplays()
-    let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
+    let target = uniqueDisplay(sel, in: pairs, managedOffline: managedOfflineIDs)
     let recordID = target.record.id
     switch sub.lowercased() {
     case "list":
@@ -651,7 +744,7 @@ func runRotateExperimental() async {
     }
     guard [0, 90, 180, 270].contains(degrees) else { fail("angle must be 0, 90, 180 or 270") }
     let pairs = await resolveCurrentDisplays()
-    let target = uniqueDisplay(sel, in: pairs, managedOffline: [])
+    let target = uniqueDisplay(sel, in: pairs, managedOffline: managedOfflineIDs)
     guard let cgID = target.observation.cgDisplayID else { fail("target has no Core Graphics id") }
     let snapshot = await observer.currentSnapshot()
     let active = snapshot.activeDisplays
