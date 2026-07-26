@@ -5,6 +5,22 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.8.1] — 2026-07-23
+
+### Fixed
+- **The `opendisplay` CLI can now see and recover displays the app turned off.** A display that
+  OpenDisplay logically disconnects disappears from macOS's display list entirely, and the CLI
+  had no record of it — so `opendisplay reconnect builtin` answered "no display matches" and the
+  documented recovery path was unusable from the one surface that still works when a display is
+  off. Turned-off displays now appear in `opendisplay list` (marked, with the exact command to
+  bring each one back), resolve through every selector, and reconnect correctly.
+- **`opendisplay disconnect` remembers what it turned off.** Previously a display disconnected
+  from the CLI was unreachable by that same CLI moments later, because nothing recorded it.
+- The app and the CLI now share one on-disk definition of the turned-off-display list, so the two
+  can't disagree about which displays are owed a reconnect. Existing files are read unchanged.
+- CLI display names fall back to a readable "Built-in Display" / class + resolution label instead
+  of a raw `cg:37D8832A-…` identifier.
+
 ## [0.8.0] — 2026-07-23
 
 The last row of the Lunar parity table: **every feature Lunar markets is now matched**.
