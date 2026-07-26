@@ -90,6 +90,13 @@ public actor DisplayRegistry {
         state.records.first { $0.id == id }
     }
 
+    /// The record previously minted for a CG UUID, if any. Recognition normally goes through
+    /// `resolve` (fingerprint first), but a display that is currently turned OFF has no live
+    /// hardware to fingerprint — this index is the only way to recover its alias and tags.
+    public func record(forCGUUID cgUUID: String) -> DisplayRecord? {
+        state.cgUUIDIndex[cgUUID].flatMap(record(for:))
+    }
+
     /// Resolves a fingerprint (+ optional CG UUID) to a stable record, recognizing or minting.
     public func resolve(
         fingerprint: DisplayFingerprint,
