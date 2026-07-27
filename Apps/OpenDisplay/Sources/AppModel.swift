@@ -2369,9 +2369,6 @@ final class AppModel: ObservableObject {
     private func observeTopologyChanges() async {
         let stream = await observer.changes()
         for await _ in stream {
-            #if DEBUG
-            Self.err("TOPOLOGY EVENT received")
-            #endif
             let prior = displays
             // A reconfiguration can mean a monitor was re-plugged or power-cycled — its DDC may have
             // just come back (or gone away), so any negative probe knowledge is stale.
@@ -2513,14 +2510,18 @@ final class AppModel: ObservableObject {
     /// e.g. the last external is physically unplugged while the built-in is logically off — re-enable
     /// the built-in (or the most-recently disabled display) so the user is never left black-screened.
     private func enforceActiveSurfaceInvariant() async {
-        #if DEBUG
-        Self.err(Self.diagnosticState(displays: displays, busy: busy, managedOffline: managedOffline))
-        #endif
         // Count only surfaces the user can actually SEE. macOS answers the loss of every real
         // display by synthesising a placeholder (`.virtual`) rather than reporting zero, so a
         // plain "no active displays" test never becomes true and this net never fired.
-        guard !busy, displays.filter({ $0.isActive && $0.displayClass != .virtual }).isEmpty
-        else { return }
+        let realSurfaces = displays.filter { $0.isActive && $0.displayClass != .virtual }
+        #if DEBUG
+        // Terse normally; the full per-display + gamma dump only when we appear to be stranded,
+        // which is when it is worth reading (and is what made this class of bug diagnosable).
+        if realSurfaces.isEmpty {
+            Self.err(Self.diagnosticState(displays: displays, busy: busy, managedOffline: managedOffline))
+        }
+        #endif
+        guard !busy, realSurfaces.isEmpty else { return }
         let fallback = managedOffline.first(where: { $0.displayClass == .builtIn }) ?? managedOffline.last
         guard let fallback else {
             #if DEBUG
