@@ -2344,7 +2344,18 @@ final class AppModel: ObservableObject {
     func reconnectOffline(_ offline: OfflineDisplay) async {
         busy = true
         defer { busy = false }
-        try? await lifecycle.reconnect(offline.reconnectID, deadline: Date().addingTimeInterval(10))
+        do {
+            try await lifecycle.reconnect(offline.reconnectID, deadline: Date().addingTimeInterval(10))
+        } catch {
+            // Keep the ledger entry: it is the ONLY record that this display exists and is owed a
+            // reconnect. Forgetting it on a failed attempt orphans the display permanently — the
+            // safety net would have nothing left to restore the next time nothing is active.
+            #if DEBUG
+            Self.err("reconnect failed for \(offline.name): \(error) — keeping it owed")
+            #endif
+            await refresh()
+            return
+        }
         managedOffline.removeAll { $0.recordID == offline.recordID }
         persistManagedOffline()
         await refresh()
@@ -2355,6 +2366,9 @@ final class AppModel: ObservableObject {
     private func observeTopologyChanges() async {
         let stream = await observer.changes()
         for await _ in stream {
+            #if DEBUG
+            Self.err("TOPOLOGY EVENT received")
+            #endif
             let prior = displays
             // A reconfiguration can mean a monitor was re-plugged or power-cycled — its DDC may have
             // just come back (or gone away), so any negative probe knowledge is stale.
@@ -2489,9 +2503,17 @@ final class AppModel: ObservableObject {
     /// e.g. the last external is physically unplugged while the built-in is logically off — re-enable
     /// the built-in (or the most-recently disabled display) so the user is never left black-screened.
     private func enforceActiveSurfaceInvariant() async {
+        #if DEBUG
+        Self.err("GUARD CHECK: busy=\(busy) displays=\(displays.count) active=\(displays.filter(\.isActive).count) managedOffline=\(managedOffline.map(\.name))")
+        #endif
         guard !busy, displays.filter(\.isActive).isEmpty else { return }
         let fallback = managedOffline.first(where: { $0.displayClass == .builtIn }) ?? managedOffline.last
-        guard let fallback else { return }
+        guard let fallback else {
+            #if DEBUG
+            Self.err("ACTIVE-SURFACE GUARD: 0 active displays but NOTHING to restore — stranded!")
+            #endif
+            return
+        }
         #if DEBUG
         Self.err("ACTIVE-SURFACE GUARD: 0 active displays — re-enabling \(fallback.name)")
         #endif
