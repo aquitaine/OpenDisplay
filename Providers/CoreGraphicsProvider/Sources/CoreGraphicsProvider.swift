@@ -296,7 +296,10 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
             recordID: recordID(uuid: uuid, id: id),
             cgDisplayID: id,
             cgUUID: uuid,
-            isActive: CGDisplayIsActive(id) != 0,
+            // NOT a bare CGDisplayIsActive: that reads false while the display merely sleeps, which
+            // made an idle Mac indistinguishable from one with no displays — see `DisplayActivity`.
+            isActive: DisplayActivity.isActiveSurface(
+                cgIsActive: CGDisplayIsActive(id) != 0, cgIsAsleep: CGDisplayIsAsleep(id) != 0),
             origin: DisplayOrigin(x: Int(bounds.origin.x), y: Int(bounds.origin.y)),
             mode: CGDisplayCopyDisplayMode(id).map(displayMode(from:)),
             rotation: rotation(of: id),
