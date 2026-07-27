@@ -17,4 +17,23 @@ public enum DisplayActivity {
     public static func isActiveSurface(cgIsActive: Bool, cgIsAsleep: Bool) -> Bool {
         cgIsActive || cgIsAsleep
     }
+
+    /// `CGDisplayVendorNumber` for macOS's synthetic placeholder: the four bytes spell "unkn".
+    public static let placeholderVendor: UInt32 = 0x756E_6B6E
+    /// `CGDisplayModelNumber` for the same: the four bytes spell "virt".
+    public static let placeholderModel: UInt32 = 0x7669_7274
+
+    /// Whether a display is the **phantom** macOS synthesizes to keep the window server alive when
+    /// every real display has gone — e.g. the last external is unplugged while the built-in is
+    /// logically disabled.
+    ///
+    /// This is why the always-one-active safety net could never fire: it waited for the online
+    /// display count to reach zero, and macOS never lets it. It substitutes this placeholder
+    /// instead — active, main, and showing the user absolutely nothing. Captured live: vendor
+    /// "unkn", model "virt", serial 0, and exactly ONE display mode where real panels report
+    /// dozens. The vendor/model tags are macOS's own marker; the single-mode check corroborates.
+    public static func isVirtualPlaceholder(vendorNumber: UInt32, modelNumber: UInt32,
+                                            modeCount: Int) -> Bool {
+        (vendorNumber == placeholderVendor && modelNumber == placeholderModel) || modeCount == 1
+    }
 }

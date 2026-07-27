@@ -214,6 +214,14 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
         CGDisplayRestoreColorSyncSettings()
     }
 
+    /// Last-resort recovery: asks the window server to restore the permanent display configuration,
+    /// undoing session-scoped changes — including a logical disable this process cannot otherwise
+    /// reverse (one made by a *different* process, whose app-scoped transaction we don't own).
+    /// Public Core Graphics, safe to call when nothing is wrong: it is a no-op then.
+    public nonisolated static func restorePermanentConfiguration() {
+        CGRestorePermanentDisplayConfiguration()
+    }
+
     /// Mirrors `displayID` onto the current main display (both show the same content), or stops
     /// mirroring when `enabled` is false. Reversible; public Core Graphics only.
     public func setMirroring(of displayID: CGDirectDisplayID, enabled: Bool) -> Bool {
@@ -287,6 +295,11 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
     ) -> DisplayObservation {
         let uuid = displayUUID(id)
         let isBuiltin = CGDisplayIsBuiltin(id) != 0
+        // Is this macOS's synthetic stand-in for "no displays at all"? It must NOT be mistaken for
+        // a surface the user can see, or the always-one-active safety net never fires.
+        let isPlaceholder = !isBuiltin && DisplayActivity.isVirtualPlaceholder(
+            vendorNumber: CGDisplayVendorNumber(id), modelNumber: CGDisplayModelNumber(id),
+            modeCount: (CGDisplayCopyAllDisplayModes(id, nil) as? [CGDisplayMode])?.count ?? 0)
         let bounds = CGDisplayBounds(id)
         let mirrorMaster = CGDisplayMirrorsDisplay(id)
         let mirrorSourceID = mirrorMaster != 0
@@ -305,8 +318,8 @@ public actor CoreGraphicsProvider: TopologyObserving, DisplayProvider, Lifecycle
             rotation: rotation(of: id),
             isMain: CGDisplayIsMain(id) != 0,
             mirrorSourceID: mirrorSourceID,
-            transport: isBuiltin ? .internalPanel : .unknown,
-            displayClass: isBuiltin ? .builtIn : .external,
+            transport: isBuiltin ? .internalPanel : (isPlaceholder ? .virtual : .unknown),
+            displayClass: isBuiltin ? .builtIn : (isPlaceholder ? .virtual : .external),
             generation: generation,
             observedAt: now
         )

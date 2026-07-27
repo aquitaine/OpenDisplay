@@ -163,8 +163,11 @@ final class AppModel: ObservableObject {
     /// you turned off is exactly the one you may need the CLI to bring back.
     typealias OfflineDisplay = ManagedOfflineDisplay
 
-    /// Count of currently-active displays — the UI disables the off-toggle on the last one.
-    var activeDisplayCount: Int { displays.filter(\.isActive).count }
+    /// Count of currently-active REAL displays — the UI disables the off-toggle on the last one.
+    /// Excludes macOS's `.virtual` placeholder, which is never a surface the user can see.
+    var activeDisplayCount: Int {
+        displays.filter { $0.isActive && $0.displayClass != .virtual }.count
+    }
 
     /// True when any provider isn't fully supported — drives the menu-bar caution banner.
     var isDegraded: Bool { diagnostics.contains { $0.status != "supported" } }
@@ -2408,8 +2411,12 @@ final class AppModel: ObservableObject {
         if enabled { NotificationDelivery.requestAuthorization() }
     }
 
-    /// True when at least one external (non-built-in) display is currently present.
-    var hasExternalDisplay: Bool { displays.contains { $0.displayClass != .builtIn } }
+    /// True when at least one REAL external display is currently present. The `.virtual` exclusion
+    /// matters: macOS's placeholder is not a monitor arriving, and treating it as one would make
+    /// auto-disconnect turn the built-in off at the exact moment it is the only screen left.
+    var hasExternalDisplay: Bool {
+        displays.contains { $0.displayClass != .builtIn && $0.displayClass != .virtual }
+    }
 
     /// On an external-arrival edge (and only then), turn the built-in panel off through the gated
     /// coordinator path (Issue 5). The built-in returns when the last external leaves — that's the
@@ -2423,6 +2430,9 @@ final class AppModel: ObservableObject {
         guard fire, !busy,
               let builtIn = displays.first(where: { $0.displayClass == .builtIn && $0.isActive })
         else { return false }
+        #if DEBUG
+        Self.err("AUTO-DISCONNECT firing: turning off \(displayName(for: builtIn))")
+        #endif
         await setDisplayActive(false, for: builtIn)
         return true
     }
@@ -2504,9 +2514,13 @@ final class AppModel: ObservableObject {
     /// the built-in (or the most-recently disabled display) so the user is never left black-screened.
     private func enforceActiveSurfaceInvariant() async {
         #if DEBUG
-        Self.err("GUARD CHECK: busy=\(busy) displays=\(displays.count) active=\(displays.filter(\.isActive).count) managedOffline=\(managedOffline.map(\.name))")
+        Self.err(Self.diagnosticState(displays: displays, busy: busy, managedOffline: managedOffline))
         #endif
-        guard !busy, displays.filter(\.isActive).isEmpty else { return }
+        // Count only surfaces the user can actually SEE. macOS answers the loss of every real
+        // display by synthesising a placeholder (`.virtual`) rather than reporting zero, so a
+        // plain "no active displays" test never becomes true and this net never fired.
+        guard !busy, displays.filter({ $0.isActive && $0.displayClass != .virtual }).isEmpty
+        else { return }
         let fallback = managedOffline.first(where: { $0.displayClass == .builtIn }) ?? managedOffline.last
         guard let fallback else {
             #if DEBUG
@@ -2518,6 +2532,26 @@ final class AppModel: ObservableObject {
         Self.err("ACTIVE-SURFACE GUARD: 0 active displays — re-enabling \(fallback.name)")
         #endif
         await reconnectOffline(fallback)
+        await escalateIfStillStranded()
+    }
+
+    /// Verifies the rescue actually produced a screen, and escalates if it did not.
+    ///
+    /// A logical re-enable can report success and still leave nothing on screen — most reliably
+    /// when the disable was made by a *different* process (the CLI, or a previous run of this app),
+    /// whose app-scoped transaction this process cannot reverse. Reporting "recovered" while the
+    /// user stares at a dark panel is the worst possible outcome for this safety net, so the result
+    /// is checked against the live topology and, if still stranded, escalated to the public
+    /// permanent-configuration restore, which is not bound to any one process's transaction.
+    private func escalateIfStillStranded() async {
+        await refresh()
+        guard displays.filter({ $0.isActive && $0.displayClass != .virtual }).isEmpty else { return }
+        #if DEBUG
+        Self.err("ACTIVE-SURFACE GUARD: still no real display — escalating to permanent-config restore")
+        #endif
+        CoreGraphicsProvider.restorePermanentConfiguration()
+        try? await Task.sleep(nanoseconds: 1_500_000_000)  // let the window server settle
+        await refresh()
     }
 
     /// Emergency recovery — always available (PRD LIF-010). With live observation and no
@@ -2935,6 +2969,51 @@ final class AppModel: ObservableObject {
 
     private static func err(_ message: String) {
         FileHandle.standardError.write(Data((message + "\n").utf8))
+    }
+
+    /// Full per-display truth at a guard decision: what the app believes AND what Core Graphics
+    /// reports, side by side. Counts alone hid the real failure — "1 active display" can mean a
+    /// panel that is listed but showing nothing.
+    private static func diagnosticState(displays: [DisplayObservation], busy: Bool,
+                                        managedOffline: [OfflineDisplay]) -> String {
+        var onlineCount: UInt32 = 0
+        CGGetOnlineDisplayList(16, nil, &onlineCount)
+        var onlineIDs = [CGDirectDisplayID](repeating: 0, count: Int(onlineCount))
+        CGGetOnlineDisplayList(onlineCount, &onlineIDs, &onlineCount)
+        var activeCount: UInt32 = 0
+        CGGetActiveDisplayList(16, nil, &activeCount)
+
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        var out = "\n[\(stamp)] GUARD busy=\(busy) appDisplays=\(displays.count) "
+        out += "appActive=\(displays.filter(\.isActive).count) "
+        out += "owed=\(managedOffline.map(\.name))\n"
+        out += "  CG: online=\(Int(onlineCount)) active=\(Int(activeCount))\n"
+        for id in onlineIDs.prefix(Int(onlineCount)) {
+            out += "  cgID \(id): CGActive=\(CGDisplayIsActive(id) != 0)"
+            out += " CGAsleep=\(CGDisplayIsAsleep(id) != 0)"
+            out += " CGOnline=\(CGDisplayIsOnline(id) != 0)"
+            out += " CGMain=\(CGDisplayIsMain(id) != 0)"
+            out += " builtIn=\(CGDisplayIsBuiltin(id) != 0)"
+            out += " bounds=\(CGDisplayBounds(id).width)x\(CGDisplayBounds(id).height)\n"
+        }
+        for observation in displays {
+            out += "  app \(observation.cgDisplayID ?? 0): isActive=\(observation.isActive)"
+            out += " class=\(observation.displayClass.rawValue) main=\(observation.isMain)\n"
+        }
+        // A panel can be listed, active, and still show nothing — gamma driven to black (Black Out,
+        // a software dim, a stale XDR boost) or the backlight at zero. Counts can't see that.
+        for id in onlineIDs.prefix(Int(onlineCount)) {
+            var capacity: UInt32 = 0
+            var red = [CGGammaValue](repeating: 0, count: 1024)
+            var green = [CGGammaValue](repeating: 0, count: 1024)
+            var blue = [CGGammaValue](repeating: 0, count: 1024)
+            if CGGetDisplayTransferByTable(id, 1024, &red, &green, &blue, &capacity) == .success,
+               capacity > 1 {
+                let n = Int(capacity)
+                out += "  gamma \(id): mid=\(red[n / 2]) top=\(red[n - 1]) (0 ⇒ black screen)\n"
+            }
+        }
+        return out
     }
 
     /// Records a global-hotkey activation to stderr AND a fixed file, so a manual keypress test can
