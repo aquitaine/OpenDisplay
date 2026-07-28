@@ -5,6 +5,27 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.8.2] — 2026-07-27
+
+### Fixed
+- **Unplugging your last external display no longer leaves you with a black screen.** If OpenDisplay
+  had turned the built-in panel off (for example via "turn the built-in off when an external
+  connects"), pulling the external left nothing on screen and the built-in never came back — the
+  one failure the always-one-display-active guarantee exists to prevent.
+
+  The cause: when the last real display disappears, macOS does not report zero displays. It
+  substitutes a synthetic placeholder to keep the window server alive, so the safety net's "nothing
+  is active any more" condition could never become true and it never fired. OpenDisplay now
+  recognises that placeholder for what it is and counts only displays you can actually see.
+- Recovery now **verifies itself**: re-enabling a display can report success while still showing
+  nothing, so the result is checked against the live topology and escalated to a system-level
+  configuration restore if the screen is still dark.
+- A **sleeping** display is no longer mistaken for a missing one. `CGDisplayIsActive` reads false
+  while a display sleeps, which made an idle Mac look display-less — so ordinary sleep could
+  silently re-enable a built-in you had deliberately turned off and forget it was owed a restore.
+  This also fixes the built-in quietly coming back on, and your preferred layout not sticking.
+- A failed reconnect no longer discards the record of a display owed a restore.
+
 ## [0.8.1] — 2026-07-23
 
 ### Fixed
