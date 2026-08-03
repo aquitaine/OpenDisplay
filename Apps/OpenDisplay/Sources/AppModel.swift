@@ -1364,6 +1364,11 @@ final class AppModel: ObservableObject {
         }
         Self.clearRotationMarker()
         await refresh()
+        // Rotation is part of the topology signature, so this raised a generation like any other
+        // arrangement write. Without the note, Protected Layout would fight the rotation the user
+        // just asked for — and lose badly, since `applyScene` skips rotation writes: it would
+        // re-apply the pre-rotation origins twice and then report that it couldn't restore.
+        await noteLayoutSelfChange()
     }
 
     /// Pending-rotation marker: records which display was being rotated and the angle it was at before,
