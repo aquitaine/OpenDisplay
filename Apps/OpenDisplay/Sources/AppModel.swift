@@ -1146,6 +1146,15 @@ final class AppModel: ObservableObject {
                                      contrastCapable: Set(contrastCapable))
     }
 
+    /// Hands a display its own prior brightness back without leading its group. Restores (FaceLight,
+    /// an app preset leaving) are the machine undoing itself, not the user reaching for a slider —
+    /// fanning one out would drag the whole group to a value nobody asked for.
+    private func restoreBrightnessWithoutLeading(_ value: Float, for observation: DisplayObservation) {
+        let token = groupSyncEcho.begin(leader: observation.recordID)
+        setBrightness(value, for: observation, syncToken: token)
+        groupSyncEcho.end(token)
+    }
+
     /// Stores one group's re-learned offsets back into settings (the offsets persist; the leader
     /// state that produced them is session-only).
     private func persistDisplayGroup(_ group: DisplayGroup) {
@@ -2098,8 +2107,12 @@ final class AppModel: ObservableObject {
         guard let observation = displays.first(where: { $0.recordID.rawValue == write.recordID }) else {
             return
         }
+        // `isGroupSync` for the contrast write: app presets outrank group sync, so a preset must not
+        // mirror itself across the group (brightness already avoids this by taking the silent funnel).
         if let brightness = write.brightness { applyAdaptiveBrightness(brightness, for: observation) }
-        if let contrast = write.contrast { setHardwareControl(.contrast, contrast, for: observation) }
+        if let contrast = write.contrast {
+            setHardwareControl(.contrast, contrast, for: observation, isGroupSync: true)
+        }
         if let code = write.colorPreset { applyAdaptivePreset(code, for: observation) }
     }
 
@@ -2148,7 +2161,9 @@ final class AppModel: ObservableObject {
                                        for observation: DisplayObservation) async {
         let id = observation.recordID
         guard let controller = await ddcController(for: observation) else {
-            if let brightness = prior.brightness { setBrightness(brightness, for: observation) }
+            if let brightness = prior.brightness {
+                restoreBrightnessWithoutLeading(brightness, for: observation)
+            }
             return
         }
         if let level = prior.brightness {
@@ -2343,7 +2358,7 @@ final class AppModel: ObservableObject {
             return
         }
         #endif
-        setBrightness(prior.brightness, for: observation)
+        restoreBrightnessWithoutLeading(prior.brightness, for: observation)
         removeFaceLightOverlay(for: observation)
     }
 
