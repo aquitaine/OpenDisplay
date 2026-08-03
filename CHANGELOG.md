@@ -5,6 +5,32 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.9.0] — 2026-08-03
+
+### Added
+- **Protected layout** (Issue #38) — mark your current display arrangement as protected, and
+  OpenDisplay puts it back when something else moves it. Origins, resolution, refresh, rotation,
+  mirroring, and the main display are captured per *display set* — your laptop-alone layout and
+  your desk layout are protected independently — and re-applied within seconds after hotplug,
+  wake, or a stray arrangement change, with a notification saying exactly what was restored.
+  Restores run through the same checkpointed, verified, audited transaction path as every other
+  change, so the always-one-display-active guarantee holds throughout; a display you deliberately
+  turned off stays off, restore attempts are capped (never a tug-of-war with macOS), and the app's
+  own changes never trigger a restore. Managed from Settings → Arrange, or
+  `opendisplay layout protect|unprotect|status`.
+- **Display groups & brightness sync** (Issue #39) — group displays so moving any member's
+  brightness moves them all. Each member keeps a learned offset: nudge one display to taste and
+  the group remembers the difference instead of fighting you. Optional contrast sync, media-key
+  support (one OSD, on the display you're driving), and a `group:` selector for the CLI
+  (`opendisplay brightness group:desk 0.6`; `opendisplay group create|add|remove|list`).
+  Grouped displays are excluded from Adaptive Display's brightness targeting so the two features
+  can't fight. Groups are configured in Settings → Displays.
+
+### Notes
+- CLI group edits made while the app is running are overwritten when the app next saves its
+  settings — quit the app first, or use Settings → Displays → Groups. A shared on-disk store is
+  planned.
+
 ## [0.8.2] — 2026-07-27
 
 ### Fixed

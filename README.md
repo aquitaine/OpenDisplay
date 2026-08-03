@@ -41,6 +41,12 @@ no Dock icon.
   setups in rooms with natural light.
 - **App Presets** — per-app display presets: your video editor gets full brightness and
   its colour preset, your terminal gets 40%, and everything restores when you switch away.
+- **Protected layout** — mark your arrangement as protected and OpenDisplay puts it back
+  when macOS shuffles it: positions, resolution, rotation, mirroring, and the main display,
+  restored seconds after hotplug or wake. Each display combination keeps its own layout.
+- **Display groups** — group displays so one brightness slider (or media key) moves them
+  all, with per-display offsets the group *learns* from your adjustments instead of
+  fighting them. Optional contrast sync.
 - **FaceLight** — one press turns your monitor into a warm video-call fill light; press
   again and your exact previous brightness, contrast, and dimming come back.
 - **XDR Brightness** (Labs) — one tap drives the MacBook Pro's XDR panel to **2× its normal

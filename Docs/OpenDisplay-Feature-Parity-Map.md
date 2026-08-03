@@ -44,8 +44,8 @@ IOAVService) — higher maintenance risk across macOS releases.
 | Software dimming — overlay | Free | ⬜ Gap | Black NSWindow at adjustable alpha above content. `low` |
 | Combined dimming (gamma + overlay) | Free | ⬜ Gap | Chain the two to go darker than either alone. `low` |
 | Dimming to black / "Black Out" | Free | ✅ Have | OD has Black Out. |
-| Basic brightness syncing across displays | Free | ⬜ Gap | Broadcast one slider to a group. Needs a grouping model (§12). `low–medium` |
-| Advanced brightness & image-adjustment syncing | Pro | ⬜ Gap | Sync brightness + contrast + colour together. `medium` |
+| Basic brightness syncing across displays | Free | ✅ Have | Display groups (0.9.0, #39): any member drives the group with learned per-member offsets. |
+| Advanced brightness & image-adjustment syncing | Pro | 🟡 Partial | Brightness + contrast sync (0.9.0). Colour sync not yet. `medium` |
 | Nits-based normalized brightness syncing | Pro | ⬜ Gap | Needs a per-display nits model so "300 nits" means the same on each panel. `high` |
 
 ## 2. XDR / HDR extra-brightness upscaling — *BetterDisplay's signature pillar*
@@ -164,7 +164,7 @@ IOAVService) — higher maintenance risk across macOS releases.
 | Feature | BD tier | OD status | Notes / API / difficulty |
 |---|---|---|---|
 | Mirror configuration (build mirrored sets) | Pro | ✅ Have | OD has mirroring + a reversible CG fallback. |
-| Mirror protection (keep a mirror set intact) | Pro | ⬜ Gap | Re-apply mirror state on change — aligns with OD's desired-state model. `medium` |
+| Mirror protection (keep a mirror set intact) | Pro | ✅ Have | Protected layout (0.9.0, #38) captures + re-asserts the mirror set (ledger-aware). |
 | Simplify creating mirrored sets (UI) | Pro | 🟡 Partial | UX layer over existing mirroring. `low` |
 
 ## 11. EDID
@@ -181,11 +181,11 @@ IOAVService) — higher maintenance risk across macOS releases.
 
 | Feature | BD tier | OD status | Notes / API / difficulty |
 |---|---|---|---|
-| Display-config protection (res / refresh / VRR / rotation / profile) | Pro | 🟡 Partial | Watch for drift, re-apply desired state. **Directly leverages OD's scene/safety engine.** `medium` |
-| Layout protection with anchor points | Pro | ⬜ Gap | Persist arrangement + re-apply on reconnect. Aligns with scenes. `medium–high` |
+| Display-config protection (res / refresh / VRR / rotation / profile) | Pro | ✅ Have | Protected layout (0.9.0, #38): res/refresh/rotation/mirror/main drift auto-restored via the scene/safety engine. Profiles/VRR not captured. |
+| Layout protection with anchor points | Pro | ✅ Have | Protected layout (0.9.0, #38): arrangement persisted per display set, re-applied on hotplug/wake/launch. |
 | Advanced layout management | Pro | ⬜ Gap | Richer multi-display arrangement tooling. `medium–high` |
-| Custom display groups | Pro | ⬜ Gap | Grouping model feeding syncing (§1) + controls. `medium` |
-| Display group + synchronization (basic) | Free | ⬜ Gap | The basic sync atop grouping. `low–medium` |
+| Custom display groups | Pro | ✅ Have | Display groups (0.9.0, #39): Settings card + CLI `group` verbs, one group per display. |
+| Display group + synchronization (basic) | Free | ✅ Have | 0.9.0 (#39). |
 | Move displays relative to each other from the menu | Free | ✅ Have | OD has the drag-to-arrange canvas. |
 
 > OD's existing scene engine (desired-state diff/plan/idempotency) makes this category *cheaper for
