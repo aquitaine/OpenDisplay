@@ -28,6 +28,19 @@ public enum DisplayConfigDrifter {
         case mainChanged(from: DisplayRecordID?, to: DisplayRecordID?)
         case disconnected(DisplayRecordID)
         case appeared(DisplayRecordID)
+
+        /// The display this change is about — `mainChanged` names the display that BECAME main, so
+        /// callers (audit targets, notification copy) can attribute every change to one display.
+        public var displayID: DisplayRecordID? {
+            switch self {
+            case .originMoved(let id), .modeChanged(let id), .rotationChanged(let id),
+                 .mirrorChanged(let id), .activeChanged(let id), .disconnected(let id),
+                 .appeared(let id):
+                return id
+            case .mainChanged(_, let to):
+                return to
+            }
+        }
     }
 
     public struct DriftAnalysis: Hashable, Sendable, Codable {

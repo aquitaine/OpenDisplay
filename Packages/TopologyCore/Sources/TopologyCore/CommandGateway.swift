@@ -83,6 +83,47 @@ public actor CommandGateway {
         return envelope
     }
 
+    /// Protects the live arrangement for the current display set, or drops that set's protection
+    /// (Batch-4 #A). Routed here rather than written straight to disk by each surface so the CLI's
+    /// `layout protect`/`unprotect` land in the same audit trail as everything else, and so the
+    /// fingerprint the app and the CLI key on can never diverge.
+    ///
+    /// Persistence is read-modify-write on the shared settings file: only the protected-layout keys
+    /// are touched, so a concurrent settings edit elsewhere loses nothing else.
+    public func applyLayoutProtection(_ change: LayoutProtectionChange, store: SettingsStore,
+                                      actor: Actor = .cli) async -> ResultEnvelope {
+        let snapshot = await observer.currentSnapshot()
+        var settings = store.load()
+        let fingerprint = LayoutProtectionPolicy.fingerprint(for: snapshot)
+        var status: ResultEnvelope.Status = .committed
+        switch change {
+        case .protect:
+            let captured = LayoutProtectionPolicy.capture(snapshot, at: Date())
+            settings.protectedLayouts[captured.fingerprint] = captured.config
+        case .unprotect:
+            status = settings.protectedLayouts.removeValue(forKey: fingerprint) == nil
+                ? .noOp : .committed
+        }
+        var errors: [ResultEnvelope.ErrorInfo] = []
+        if status == .committed {
+            do { try store.save(settings) } catch {
+                status = .failed
+                errors = [.init(code: "settingsWriteFailed", message: "\(error)")]
+            }
+        }
+        let envelope = ResultEnvelope(
+            transactionId: "txn_layoutProtection", status: status, actor: actor,
+            requestedAt: Date(), topologyGeneration: snapshot.generation.value,
+            targets: LayoutProtectionPolicy.members(of: snapshot).map {
+                .init(displayId: $0.rawValue, alias: nil, identityConfidence: 1.0,
+                      operations: [.init(field: change.rawValue, verification: .verified)])
+            },
+            errors: errors
+        )
+        await record(envelope, command: "layout\(change.rawValue.capitalized)")
+        return envelope
+    }
+
     private func record(_ envelope: ResultEnvelope, command: String) async {
         await auditLog?.append(AuditEntry(
             timestamp: envelope.requestedAt, actor: envelope.actor, command: command,

@@ -114,6 +114,14 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// for SDR content via `XDRBrightnessPolicy`. Only this opt-in toggle persists — the boost
     /// level itself is session-only, so a relaunch always starts at normal brightness. Default off.
     public var xdrBrightnessEnabled: Bool
+    /// Protected Layout (Batch-4 #A): when on, an arrangement the user marked protected is put back
+    /// automatically after macOS (or another app) moves it. Default off.
+    public var layoutProtectionEnabled: Bool
+    /// The protected arrangements, keyed by their display-set fingerprint
+    /// (`LayoutProtectionPolicy.fingerprint`) so "laptop alone" and "laptop + Desk" each keep their
+    /// own protected layout instead of overwriting one another. Re-protecting a set replaces its
+    /// entry; removing protection drops the key.
+    public var protectedLayouts: [String: ProtectedConfig]
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
@@ -150,7 +158,9 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         appPresetsEnabled: Bool = false,
         appPresets: [AppPresetPolicy.AppPreset] = [],
         appPresetPriorStateByDisplay: [String: AppPresetPolicy.PriorState] = [:],
-        xdrBrightnessEnabled: Bool = false
+        xdrBrightnessEnabled: Bool = false,
+        layoutProtectionEnabled: Bool = false,
+        protectedLayouts: [String: ProtectedConfig] = [:]
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
@@ -187,6 +197,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.appPresets = appPresets
         self.appPresetPriorStateByDisplay = appPresetPriorStateByDisplay
         self.xdrBrightnessEnabled = xdrBrightnessEnabled
+        self.layoutProtectionEnabled = layoutProtectionEnabled
+        self.protectedLayouts = protectedLayouts
     }
 
     public static let `default` = OpenDisplaySettings()
@@ -225,6 +237,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case appPresets
         case appPresetPriorStateByDisplay
         case xdrBrightnessEnabled
+        case layoutProtectionEnabled
+        case protectedLayouts
     }
 
     /// Tolerant decoder: every missing OR undecodable key falls back to its default and unknown
@@ -307,6 +321,10 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
             ?? defaults.appPresetPriorStateByDisplay
         xdrBrightnessEnabled = container.lenient(Bool.self, forKey: .xdrBrightnessEnabled)
             ?? defaults.xdrBrightnessEnabled
+        layoutProtectionEnabled = container.lenient(Bool.self, forKey: .layoutProtectionEnabled)
+            ?? defaults.layoutProtectionEnabled
+        protectedLayouts = container.lenient([String: ProtectedConfig].self, forKey: .protectedLayouts)
+            ?? defaults.protectedLayouts
     }
 }
 
