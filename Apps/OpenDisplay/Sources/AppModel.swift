@@ -291,8 +291,11 @@ final class AppModel: ObservableObject {
     /// Protected Layout (Batch-4 #A): the pure policy's threaded state — which generation the
     /// suppression/debounce/retry counters belong to. Session-only; a relaunch starts clean.
     private var layoutProtectionState = LayoutProtectionPolicy.State()
-    /// One-shot re-evaluation armed by the policy's `recheckAfter` — the stability debounce.
-    private var layoutProtectionDebounceTask: Task<Void, Never>?
+    /// One-shot re-evaluation armed by the policy's `recheckAfter` — the stability debounce. A
+    /// `RecheckTimer` rather than a bare `Task` because the work it fires begins by cancelling the
+    /// pending re-check: the timer keeps waiting and working in separate tasks so a debounce-driven
+    /// restore can never be running inside the task it just cancelled.
+    private let layoutProtectionRecheck = RecheckTimer()
     /// Wake observer token, held while layout protection is on (a wake is one of the three triggers).
     private var layoutProtectionWakeObserver: NSObjectProtocol?
 
@@ -380,7 +383,7 @@ final class AppModel: ObservableObject {
                 self?.xdrTrigger.disengage()  // process-bound anyway; one line for tidiness
                 self?.mediaKeyTapRetry?.cancel()
                 self?.mediaKeyTap?.stop()
-                self?.layoutProtectionDebounceTask?.cancel()
+                self?.layoutProtectionRecheck.cancel()
                 #if !PUBLIC_API_ONLY
                 self?.adaptiveLoop?.cancel()
                 self?.stopAppPresetObserver()
@@ -2628,8 +2631,7 @@ final class AppModel: ObservableObject {
                 NSWorkspace.shared.notificationCenter.removeObserver(observer)
                 layoutProtectionWakeObserver = nil
             }
-            layoutProtectionDebounceTask?.cancel()
-            layoutProtectionDebounceTask = nil
+            layoutProtectionRecheck.cancel()
             return
         }
         if layoutProtectionWakeObserver == nil {
@@ -2654,8 +2656,7 @@ final class AppModel: ObservableObject {
     /// debounce, retry cap — is the pure `LayoutProtectionPolicy`; this only reads the world and
     /// performs the writes.
     func evaluateLayoutProtection(trigger: LayoutProtectionPolicy.Trigger) async {
-        layoutProtectionDebounceTask?.cancel()
-        layoutProtectionDebounceTask = nil
+        layoutProtectionRecheck.cancel()
         let snapshot = await observer.currentSnapshot()
         let fingerprint = LayoutProtectionPolicy.fingerprint(for: snapshot)
         // Republish only on a real change: this runs on every topology event, and reassigning a
@@ -2673,9 +2674,7 @@ final class AppModel: ObservableObject {
             NotificationDelivery.post(note)
         }
         if let delay = evaluation.recheckAfter {
-            layoutProtectionDebounceTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
-                guard !Task.isCancelled else { return }
+            layoutProtectionRecheck.arm(after: delay) { [weak self] in
                 await self?.evaluateLayoutProtection(trigger: trigger)
             }
             return
@@ -2761,6 +2760,7 @@ final class AppModel: ObservableObject {
 
     /// Re-applies the protected mirror relationships. `DesiredState` carries no mirror field, so this
     /// rides alongside the scene apply exactly as the arrangement-revert path does.
+    ///
     private func restoreProtectedMirroring(_ config: ProtectedConfig) async {
         var changed = false
         for observation in config.snapshot.observations {
