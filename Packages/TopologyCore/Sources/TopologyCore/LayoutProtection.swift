@@ -236,8 +236,18 @@ public enum LayoutProtectionPolicy {
     /// Two rules do the filtering. A display that appeared or disconnected means a *different* set
     /// is on the desk, and that set's own protected layout (if any) is the one that applies —
     /// restoring this one would drag a departed display's geometry onto the displays actually
-    /// present. And an `activeChanged` explained by the managed-offline ledger is not drift at all:
-    /// it is the user's standing decision that this display stays off.
+    /// present. And any change to a display in the managed-offline ledger is not drift at all: it is
+    /// the user's standing decision that this display stays off.
+    ///
+    /// The ledger rule covers `mirrorChanged` as well as the obvious `activeChanged`, because
+    /// "turned off" has two shapes. The public lifecycle provider has no API to truly remove a
+    /// display, so it approximates the disconnect by MIRRORING the display onto main — the only
+    /// path in the public-API-only build, and the fallback in the full one. A display turned off
+    /// that way is still enumerated, still in the protected set, and differs from the protected
+    /// snapshot in exactly one field: its mirror source. Treating that as drift would un-mirror it,
+    /// putting back the display the user turned off — and, worse, the app would then see it "come
+    /// back on its own" and drop its ledger entry, which is the only record that it is owed a
+    /// reconnect at all.
     public static func actionableDrift(protected: TopologySnapshot,
                                        current: TopologySnapshot,
                                        context: Context) -> DisplayConfigDrifter.DriftAnalysis? {
@@ -248,9 +258,9 @@ public enum LayoutProtectionPolicy {
             switch change {
             case .appeared, .disconnected:
                 return nil
-            case .activeChanged(let displayID):
+            case .activeChanged(let displayID), .mirrorChanged(let displayID):
                 if !context.managedOfflineIDs.contains(displayID) { actionable.append(change) }
-            case .originMoved, .modeChanged, .rotationChanged, .mirrorChanged, .mainChanged:
+            case .originMoved, .modeChanged, .rotationChanged, .mainChanged:
                 actionable.append(change)
             }
         }

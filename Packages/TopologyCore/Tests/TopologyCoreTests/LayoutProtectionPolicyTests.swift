@@ -167,6 +167,26 @@ final class LayoutProtectionPolicyTests: XCTestCase {
         XCTAssertEqual(decision, .clean)
     }
 
+    /// The public lifecycle provider turns a display off by MIRRORING it onto main, so a display the
+    /// user turned off differs from the protected snapshot in its mirror source alone. Restoring
+    /// that would un-mirror it — turning back on the display the user turned off — and the app would
+    /// then drop its ledger entry as "came back on its own", orphaning it.
+    func testMirrorChangeExplainedByTheLedgerIsNotDrift() {
+        let protectedSnapshot = snap([obs("A", main: true), obs("B")])
+        let current = snap([obs("A", main: true), obs("B", mirror: "A")])
+        let decision = decide(protected: protectedSnapshot, current: current,
+                              context: context(managedOffline: [.init(rawValue: "B")])).decision
+        XCTAssertEqual(decision, .clean)
+    }
+
+    func testAGenuineMirrorChangeStillRestoresWhileALedgerOneIsLeftAlone() {
+        let protectedSnapshot = snap([obs("A", main: true), obs("B"), obs("C")])
+        let current = snap([obs("A", main: true), obs("B", mirror: "A"), obs("C", mirror: "A")])
+        let decision = decide(protected: protectedSnapshot, current: current,
+                              context: context(managedOffline: [.init(rawValue: "B")])).decision
+        XCTAssertEqual(decision, .restore(.init(changes: [.mirrorChanged(.init(rawValue: "C"))])))
+    }
+
     func testLedgerExplainedDisplayStaysOffWhileOtherDriftStillRestores() {
         let protectedSnapshot = snap([obs("A", main: true), obs("B", origin: .init(x: 1920, y: 0))])
         let current = snap([obs("A", main: true),

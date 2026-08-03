@@ -2723,7 +2723,7 @@ final class AppModel: ObservableObject {
         await appendLayoutProtectionAudit(status: "attempted", analysis: analysis)
         await restoreProtectedActiveState(config, analysis: analysis)
         await applyScene(LayoutProtectionPolicy.restoreScene(for: config))
-        await restoreProtectedMirroring(config)
+        await restoreProtectedMirroring(config, analysis: analysis)
 
         let settled = await observer.awaitStableGeneration(after: generation)
         // Suppress the generation our writes raised — or, when they raised none, clear the
@@ -2761,13 +2761,21 @@ final class AppModel: ObservableObject {
     /// Re-applies the protected mirror relationships. `DesiredState` carries no mirror field, so this
     /// rides alongside the scene apply exactly as the arrangement-revert path does.
     ///
-    private func restoreProtectedMirroring(_ config: ProtectedConfig) async {
+    /// Driven strictly by the changes the policy marked actionable, never by a fresh comparison
+    /// against the stored snapshot: a display the user turned off is mirrored onto main by the
+    /// public lifecycle provider, so comparing mirror state directly would un-mirror — turn back
+    /// on — exactly the display that must stay off. The policy filters those out; reading its
+    /// answer is what keeps that guarantee from being quietly re-derived here.
+    private func restoreProtectedMirroring(_ config: ProtectedConfig,
+                                           analysis: DisplayConfigDrifter.DriftAnalysis) async {
         var changed = false
-        for observation in config.snapshot.observations {
-            guard let cgID = observation.cgDisplayID,
-                  let live = displays.first(where: { $0.recordID == observation.recordID }),
-                  live.isMirrored != observation.isMirrored else { continue }
-            _ = await observer.setMirroring(of: cgID, enabled: observation.isMirrored)
+        for change in analysis.changes {
+            guard case .mirrorChanged(let id) = change,
+                  let wanted = config.snapshot.observation(for: id),
+                  let live = displays.first(where: { $0.recordID == id }),
+                  let cgID = live.cgDisplayID,
+                  live.isMirrored != wanted.isMirrored else { continue }
+            _ = await observer.setMirroring(of: cgID, enabled: wanted.isMirrored)
             changed = true
         }
         if changed { await refresh() }
