@@ -87,3 +87,26 @@ mutating command, and they share `settings.json` with the app — the CLI and th
 looking at the same layouts. Automatic restore itself is the app's job: `status` prints whether
 the master toggle (Settings → Arrange → "Put my arrangement back when it changes") is on, one line
 per stored layout, and the last automatic restore with its outcome.
+## Display groups (Issue #39)
+
+```
+opendisplay group list [--json]
+opendisplay group create <name>
+opendisplay group delete <name>
+opendisplay group add|remove <name> <selector>
+opendisplay brightness group:<name> <0..1>
+```
+
+A group is a user-defined set of displays whose brightness moves together, each member at its own
+learned offset. `group:<name>` is a selector like `alias:`/`tag:`, so it also reaches the verbs that
+want exactly one display — those report the group as ambiguous rather than picking a member.
+
+`brightness group:<name> <level>` targets the group itself: `level` becomes the group's base and
+every present member is written at `clamp01(level + offset)` through the same `GroupSyncPolicy` the
+app fans out with — including the precedence ladder, so a member FaceLight or an app preset is
+currently holding is skipped rather than overwritten. Absent and skipped members are listed by name.
+
+A display belongs to at most one group — `group add` moves it out of whichever group held it and
+says so. Groups live in the app's `settings.json`, so a group mutation made while OpenDisplay is
+running is overwritten the next time the app saves its settings: quit the app first, or make the
+change in Settings → Displays → Groups.

@@ -93,6 +93,11 @@ let managedOfflineStore = (try? ManagedOfflineStore.defaultDirectory()).map(Mana
 let managedOfflineDisplays = managedOfflineStore?.load() ?? []
 let managedOfflineIDs = Set(managedOfflineDisplays.map(\.recordID))
 
+/// The app's settings file — read for the Display Groups the `group:` selector and `group` verbs
+/// work on. Group mutations re-read it immediately before writing, since the app owns the same file.
+let settingsStore = (try? SettingsStore.defaultDirectory()).map(SettingsStore.init(directory:))
+let displayGroups = settingsStore?.load().displayGroups ?? []
+
 /// Resolves every live display's fingerprint into the registry (recognizing or minting), so the
 /// registry learns the current displays and we can map observations <-> records for this run.
 ///
@@ -123,16 +128,20 @@ func resolveCurrentDisplays() async -> [ResolvedDisplay] {
     return pairs
 }
 
+/// The registry record behind a display that isn't being observed right now. An observation id is
+/// `cg:<uuid>` while the registry mints its own ids and indexes them by that UUID, so a display the
+/// OS no longer reports at all — turned off, or merely unplugged — is only reachable through the
+/// UUID index.
+func registryRecord(for recordID: DisplayRecordID) async -> DisplayRecord? {
+    guard let cgUUID = recordID.cgUUID else { return await registry.record(for: recordID) }
+    return await registry.record(forCGUUID: cgUUID)
+}
+
 /// The registry record for a turned-off display, so it keeps its alias and tags while offline.
-/// An observation id is `cg:<uuid>`, and the registry indexes minted records by that UUID — but a
-/// lookup miss must NOT hide the display: falling back to a synthetic record keeps it listed and
+/// A lookup miss must NOT hide the display: falling back to a synthetic record keeps it listed and
 /// reconnectable, which is the whole point of remembering it.
 func offlineRecord(for offline: ManagedOfflineDisplay) async -> DisplayRecord {
-    let raw = offline.recordID.rawValue
-    let known = raw.hasPrefix("cg:")
-        ? await registry.record(forCGUUID: String(raw.dropFirst("cg:".count)))
-        : await registry.record(for: offline.recordID)
-    guard var record = known else {
+    guard var record = await registryRecord(for: offline.recordID) else {
         return DisplayRecord(
             id: offline.recordID, fingerprint: DisplayFingerprint(modelName: offline.name),
             displayClass: offline.displayClass)
@@ -147,6 +156,19 @@ func offlineRecord(for offline: ManagedOfflineDisplay) async -> DisplayRecord {
 
 // MARK: - Selector resolution
 
+/// The group a `group:<name>` selector names, or nil when the selector isn't one. An unknown group
+/// name is fatal rather than an empty match — silently matching nothing would read as "no displays
+/// are in that group" when the truth is that the group doesn't exist.
+func groupSelector(_ raw: String, in groups: [DisplayGroup] = displayGroups) -> DisplayGroup? {
+    let prefix = "group:"
+    guard raw.hasPrefix(prefix) else { return nil }
+    let wanted = String(raw.dropFirst(prefix.count))
+    guard let group = DisplayGroupStore.group(named: wanted, in: groups) else {
+        fail("no display group named '\(wanted)' (list them with: opendisplay group list)")
+    }
+    return group
+}
+
 func reachability(of observation: DisplayObservation, managedOffline: Set<DisplayRecordID>) -> Reachability {
     if managedOffline.contains(observation.recordID) { return .managedOffline }
     return observation.isActive ? .active : .discoveredInactive
@@ -156,6 +178,13 @@ func resolveObservation(_ raw: String, in pairs: [ResolvedDisplay],
                         managedOffline: Set<DisplayRecordID>) -> [DisplayObservation] {
     if let cgID = UInt32(raw) {
         return pairs.filter { $0.observation.cgDisplayID == cgID }.map(\.observation)
+    }
+    // `group:<name>` is resolved here rather than in `DisplaySelector`: groups are an app setting,
+    // not part of the shared automation schema, and this keeps the schema free of a concept only
+    // this surface can look up.
+    if let group = groupSelector(raw) {
+        return pairs.filter { group.contains($0.observation.recordID) || group.contains($0.record.id) }
+            .map(\.observation)
     }
     let selector: DisplaySelector
     do { selector = try DisplaySelector.parse(raw) } catch { fail("could not parse selector '\(raw)': \(error)") }
@@ -191,16 +220,20 @@ func uniqueDisplay(_ raw: String, in pairs: [ResolvedDisplay],
 // MARK: - Output
 
 /// A human-readable name: the user's alias, else the EDID model name, else a class + resolution
-/// label. The raw record id is the last resort only — `cg:37D8832A-2D66-…` identifies nothing to a
-/// human, and these names are what selectors and recovery hints are built from.
+/// label — never the raw record id, which identifies nothing to a human, and these names are what
+/// selectors and recovery hints are built from. One ladder shared with the app, so a display reads
+/// the same in both surfaces (`DisplayRecord.friendlyName`).
 func name(for pair: ResolvedDisplay) -> String {
-    if let alias = pair.record.alias, !alias.isEmpty { return alias }
-    if let model = pair.record.fingerprint.modelName, !model.isEmpty { return model }
-    if pair.observation.displayClass == .builtIn { return "Built-in Display" }
-    if let mode = pair.observation.mode {
-        return "\(pair.observation.displayClass.rawValue.capitalized) \(mode.pixelWidth)×\(mode.pixelHeight)"
-    }
-    return pair.observation.recordID.rawValue
+    pair.record.friendlyName(mode: pair.observation.mode)
+}
+
+/// The name for a group member, which may be a display that isn't here right now: the live name
+/// when it is connected, else the registry's remembered record — the bridge that keeps an unplugged
+/// member from printing as `cg:37D8832A-2D66-…`. The raw id survives only for a display the
+/// registry has never seen at all.
+func memberLabel(_ member: DisplayRecordID, in pairs: [ResolvedDisplay]) async -> String {
+    if let pair = pairs.first(where: { $0.observation.recordID == member }) { return name(for: pair) }
+    return await registryRecord(for: member)?.friendlyName() ?? member.rawValue
 }
 
 /// The shortest selector that will reach this display again — its alias when it has one (stable
@@ -524,27 +557,69 @@ func runScene() async {
 
 // MARK: - Control commands
 
+func percentLabel(_ level: Float) -> String { "\(Int((level * 100).rounded()))%" }
+
+/// Writes one display's brightness through whichever route it has, returning the line to print.
+func applyBrightness(_ level: Float, to target: ResolvedDisplay) async -> String {
+    let label = name(for: target)
+    guard let cgID = target.observation.cgDisplayID else { return "\(label): no Core Graphics id" }
+    if target.observation.displayClass == .builtIn {
+        let ok = DisplayServicesBrightnessProvider().setBrightness(level, for: cgID)
+        return ok ? "\(label): brightness = \(percentLabel(level))"
+                  : "\(label): failed (DisplayServices unavailable)"
+    }
+    guard let ddc = ExternalDisplayDDC(displayID: cgID) else {
+        return "\(label): no brightness control for this display"
+    }
+    let maxValue = await ddc.read(.brightness)?.max ?? 100
+    let ok = await ddc.write(.brightness, Int((level * Float(maxValue)).rounded()))
+    return ok ? "\(label): brightness = \(percentLabel(level)) (DDC)" : "\(label): DDC write failed"
+}
+
+/// `opendisplay brightness group:<name> <0..1>` — the group itself is the target, so `level` is the
+/// group's new base level and every present member takes it with its own learned offset, decided by
+/// the same `GroupSyncPolicy` the app fans out through.
+///
+/// That includes the precedence ladder: group sync sits below FaceLight and App Presets, and both
+/// record the displays they are holding in the settings file this process just read. Fanning out
+/// without that set would have the CLI overwrite a fill light the app is mid-way through owing a
+/// restore for — the one case where "same policy" has to mean the same world, not just the same
+/// arithmetic. Re-read at write time, since the app owns the file and may have toggled FaceLight
+/// since launch.
+func runGroupBrightness(_ group: DisplayGroup, in pairs: [ResolvedDisplay]) async {
+    guard let raw = valueArg, let level = Float(raw), (0...1).contains(level) else {
+        fail("usage: opendisplay brightness group:\(group.name) <0..1>")
+    }
+    let present = pairs.filter { $0.observation.isActive }.map(\.observation.recordID)
+    let governed = GroupSyncPolicy.governedDisplays(in: settingsStore?.load() ?? OpenDisplaySettings())
+    let world = GroupSyncPolicy.World(present: Set(present), governed: governed)
+    let fanOut = GroupSyncPolicy.groupWrites(level, group: group, world: world)
+    // Skips first, so a group where every member was skipped explains itself before the failure.
+    for member in fanOut.absent { print("  · skipped (absent): \(await memberLabel(member, in: pairs))") }
+    for member in fanOut.governed {
+        print("  · skipped (FaceLight or an app preset owns it): \(await memberLabel(member, in: pairs))")
+    }
+    guard !fanOut.isEmpty else { fail("no writable displays in group '\(group.name)'") }
+    for write in fanOut.writes {
+        guard let target = pairs.first(where: { $0.observation.recordID == write.member }) else { continue }
+        print(await applyBrightness(write.value, to: target))
+    }
+}
+
 /// Get or set a display's brightness (0..1). Built-in via DisplayServices, external via DDC.
 func runBrightness() async {
     guard let sel = selectorArg else { fail("usage: opendisplay brightness <selector> [0..1]") }
     let pairs = await resolveCurrentDisplays()
+    if let group = groupSelector(sel) {
+        await runGroupBrightness(group, in: pairs)
+        return
+    }
     let target = uniqueDisplay(sel, in: pairs, managedOffline: managedOfflineIDs)
     guard let cgID = target.observation.cgDisplayID else { fail("display has no Core Graphics id") }
     let builtIn = target.observation.displayClass == .builtIn
     if let raw = valueArg {
         guard let level = Float(raw), (0...1).contains(level) else { fail("brightness value must be 0..1") }
-        if builtIn {
-            let ok = DisplayServicesBrightnessProvider().setBrightness(level, for: cgID)
-            print(ok ? "\(name(for: target)): brightness = \(Int((level * 100).rounded()))%"
-                     : "failed (DisplayServices unavailable)")
-        } else if let ddc = ExternalDisplayDDC(displayID: cgID) {
-            let maxValue = await ddc.read(.brightness)?.max ?? 100
-            let ok = await ddc.write(.brightness, Int((level * Float(maxValue)).rounded()))
-            print(ok ? "\(name(for: target)): brightness = \(Int((level * 100).rounded()))% (DDC)"
-                     : "DDC write failed")
-        } else {
-            fail("no brightness control for this display")
-        }
+        print(await applyBrightness(level, to: target))
     } else if builtIn, let value = DisplayServicesBrightnessProvider().brightness(for: cgID) {
         print("\(Int((value * 100).rounded()))%")
     } else if !builtIn, let ddc = ExternalDisplayDDC(displayID: cgID),
@@ -825,6 +900,104 @@ func lastLayoutProtectionEntry() async -> AuditEntry? {
     return await auditLog.recent(limit: 200).last { $0.command == "layoutProtection" }
 }
 
+// MARK: - Display Groups (Issue #39)
+
+/// Re-reads settings, applies one group mutation, and writes back. The app owns the same file, so
+/// the read has to happen at mutation time — a groups list captured at launch would clobber
+/// everything the app changed in between.
+func mutateDisplayGroups(_ change: ([DisplayGroup]) -> [DisplayGroup]?) -> Bool {
+    guard let settingsStore else { fail("settings directory unavailable") }
+    var settings = settingsStore.load()
+    guard let updated = change(settings.displayGroups) else { return false }
+    settings.displayGroups = updated
+    do { try settingsStore.save(settings) } catch { fail("could not save settings: \(error)") }
+    return true
+}
+
+func runGroup() async {
+    let sub = positional.count > 1 ? positional[1] : "list"
+    let nameArg: String? = positional.count > 2 ? positional[2] : nil
+    let selector: String? = positional.count > 3 ? positional[3] : nil
+    let groups = settingsStore?.load().displayGroups ?? []
+
+    switch sub {
+    case "list":
+        await runGroupList(groups)
+
+    case "create":
+        guard let nameArg else { fail("usage: opendisplay group create <name>") }
+        let created = mutateDisplayGroups { DisplayGroupStore.create(named: nameArg, in: $0) }
+        _ = await gateway.recordGroupChange("groupCreate", targets: [], committed: created)
+        guard created else { fail("a group named '\(nameArg)' already exists") }
+        print("created group \"\(nameArg)\"")
+
+    case "delete":
+        guard let nameArg, let group = DisplayGroupStore.group(named: nameArg, in: groups) else {
+            fail("no display group named '\(nameArg ?? "")'")
+        }
+        _ = mutateDisplayGroups { DisplayGroupStore.delete(id: group.id, from: $0) }
+        _ = await gateway.recordGroupChange("groupDelete",
+                                            targets: group.memberRecordIDs.map(\.rawValue))
+        print("deleted group \"\(group.name)\"")
+
+    case "add", "remove":
+        guard let nameArg, let selector else {
+            fail("usage: opendisplay group \(sub) <name> <selector>")
+        }
+        await runGroupMembership(sub, groupName: nameArg, selector: selector, groups: groups)
+
+    default:
+        fail("unknown group subcommand '\(sub)' (try: list, create, delete, add, remove)", code: 2)
+    }
+}
+
+func runGroupList(_ groups: [DisplayGroup]) async {
+    if asJSON {
+        emit(groups)
+        return
+    }
+    guard !groups.isEmpty else {
+        print("no display groups (create one with: opendisplay group create <name>)")
+        return
+    }
+    let pairs = await resolveCurrentDisplays()
+    for group in groups {
+        let channels = [group.syncBrightness ? "brightness" : nil,
+                        group.syncContrast ? "contrast" : nil].compactMap { $0 }
+        print("\(group.name)  (\(group.memberRecordIDs.count) displays · syncs \(channels.joined(separator: " + ")))")
+        for member in group.memberRecordIDs {
+            let pair = pairs.first { $0.observation.recordID == member }
+            let label = await memberLabel(member, in: pairs)
+            let offset = group.offset(for: member)
+            let offsetNote = offset == 0 ? "" : String(format: "  %+.0f%%", offset * 100)
+            print("  \(pair == nil ? "○" : "●") \(label)\(offsetNote)")
+        }
+    }
+}
+
+func runGroupMembership(_ sub: String, groupName: String, selector: String,
+                        groups: [DisplayGroup]) async {
+    guard let group = DisplayGroupStore.group(named: groupName, in: groups) else {
+        fail("no display group named '\(groupName)'")
+    }
+    let pairs = await resolveCurrentDisplays()
+    let target = uniqueDisplay(selector, in: pairs, managedOffline: managedOfflineIDs)
+    let member = target.observation.recordID
+    let isAdding = sub == "add"
+    _ = mutateDisplayGroups {
+        isAdding ? DisplayGroupStore.addMember(member, to: group.id, in: $0)
+                 : DisplayGroupStore.removeMember(member, from: group.id, in: $0)
+    }
+    _ = await gateway.recordGroupChange(isAdding ? "groupAdd" : "groupRemove",
+                                        targets: [member.rawValue])
+    // A display belongs to one group, so `add` may have moved it — say where it came from.
+    let previous = DisplayGroupStore.group(containing: member, in: groups)
+    let moved = isAdding && previous != nil && previous?.id != group.id
+    let from = moved ? " (moved from \"\(previous?.name ?? "")\")" : ""
+    print(isAdding ? "added \(name(for: target)) to \"\(group.name)\"\(from)"
+                   : "removed \(name(for: target)) from \"\(group.name)\"")
+}
+
 // MARK: - Experimental rotation helper (short-lived, gated, isolated)
 
 /// EXPERIMENTAL rotation writer. Gated behind OPENDISPLAY_EXPERIMENTAL_ROTATION=1 so it never runs by
@@ -956,6 +1129,7 @@ case "disconnect": await runDisconnect()
 case "reconnect": await runReconnect()
 case "scene": await runScene()
 case "layout": await runLayout()
+case "group": await runGroup()
 case "brightness": await runBrightness()
 case "ddc": await runDDC()
 case "edid": await runEDID()
@@ -978,6 +1152,8 @@ case "help", "--help", "-h":
       opendisplay recover [--json]
       opendisplay scene <list|save|show|plan|apply|delete> [name] [--json]
       opendisplay layout <protect|unprotect|status> [--json]
+      opendisplay group <list|create|delete> [name] [--json]
+      opendisplay group <add|remove> <name> <selector>
       opendisplay brightness <selector> [0..1]
       opendisplay ddc <selector> <brightness|contrast|volume|input|colour|sharpness|red|green|blue|mute|power|caps> [value]
       opendisplay ddc <selector> vcp <0xNN> [value]   # any raw MCCS feature code
@@ -987,8 +1163,12 @@ case "help", "--help", "-h":
     lux/lid exit non-zero when the sensor/state is unavailable. listen streams line-delimited JSON
     (one event per line) until Ctrl-C; see Tools/opendisplay/README.md for the event schema.
 
-    SELECTORS: id:<recordID> · alias:<name> · tag:<tag> · main · builtin · state:<active|managedOffline> · <cgDisplayID>
+    SELECTORS: id:<recordID> · alias:<name> · tag:<tag> · group:<name> · main · builtin · state:<active|managedOffline> · <cgDisplayID>
+
+    group:<name> matches every member of a display group. `brightness group:desk 0.6` sets the
+    group's base level and each member follows it at its own learned offset.
     """)
 default:
     fail("unknown command '\(command)' (try: list, diagnose, lux, lid, listen, alias, tag, disconnect, reconnect, recover, scene, layout, brightness, ddc, help)", code: 2)
+    fail("unknown command '\(command)' (try: list, diagnose, lux, lid, listen, alias, tag, disconnect, reconnect, recover, scene, group, brightness, ddc, help)", code: 2)
 }

@@ -257,6 +257,34 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertFalse(SettingsStore(directory: directory).load().displayNotificationsEnabled)
     }
 
+    func testDisplayGroupsDefaultEmptyAndRoundTrip() throws {
+        XCTAssertTrue(OpenDisplaySettings.default.displayGroups.isEmpty)
+        let store = SettingsStore(directory: directory)
+        var desk = DisplayGroup(name: "Desk",
+                                memberRecordIDs: [DisplayRecordID(rawValue: "cgid:1"),
+                                                  DisplayRecordID(rawValue: "cgid:2")],
+                                syncContrast: true)
+        desk.setOffset(0.15, for: DisplayRecordID(rawValue: "cgid:2"))
+        try store.save(OpenDisplaySettings(displayGroups: [desk]))
+        XCTAssertEqual(store.load().displayGroups, [desk])
+    }
+
+    func testDisplayGroupsDefaultEmptyOnAFileFromBeforeTheKeyExisted() throws {
+        try Data(#"{"persistencePolicy":"reconnectOnQuit","confirmationCountdownSeconds":5}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        let loaded = SettingsStore(directory: directory).load()
+        XCTAssertTrue(loaded.displayGroups.isEmpty)
+        XCTAssertEqual(loaded.confirmationCountdownSeconds, 5)
+    }
+
+    func testAnUndecodableDisplayGroupsValueLosesOnlyThatKey() throws {
+        try Data(#"{"confirmationCountdownSeconds":9,"displayGroups":"not-an-array"}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        let loaded = SettingsStore(directory: directory).load()
+        XCTAssertTrue(loaded.displayGroups.isEmpty)
+        XCTAssertEqual(loaded.confirmationCountdownSeconds, 9)
+    }
+
     func testHotkeyShortcutsDefaultAndRoundTrip() throws {
         XCTAssertEqual(OpenDisplaySettings.default.hotkeyShortcuts, .defaults)
         let store = SettingsStore(directory: directory)

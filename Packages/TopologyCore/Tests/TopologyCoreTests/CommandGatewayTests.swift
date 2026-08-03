@@ -153,6 +153,30 @@ final class CommandGatewayTests: XCTestCase {
         XCTAssertEqual(store.load().protectedLayouts, [otherProtection.fingerprint: otherProtection.config])
     }
 
+    func testGroupChangesAreAuditedLikeEveryOtherCommand() async {
+        let system = SimulatedDisplaySystem(observations: [obs("builtin", main: true, klass: .builtIn)])
+        let audit = InMemoryAuditLog()
+        let gateway = CommandGateway(observer: system, lifecycleProvider: system,
+                                     checkpoints: InMemoryCheckpointStore(), auditLog: audit)
+        let envelope = await gateway.recordGroupChange("groupAdd", targets: ["ext"])
+        XCTAssertEqual(envelope.status, .committed)
+        XCTAssertEqual(envelope.targets.map(\.displayId), ["ext"])
+        let entries = await audit.all
+        XCTAssertEqual(entries.first?.command, "groupAdd")
+        XCTAssertEqual(entries.first?.actor, .cli)
+    }
+
+    func testARefusedGroupChangeIsAuditedAsANoOp() async {
+        let system = SimulatedDisplaySystem(observations: [obs("builtin", main: true, klass: .builtIn)])
+        let audit = InMemoryAuditLog()
+        let gateway = CommandGateway(observer: system, lifecycleProvider: system,
+                                     checkpoints: InMemoryCheckpointStore(), auditLog: audit)
+        let envelope = await gateway.recordGroupChange("groupCreate", targets: [], committed: false)
+        XCTAssertEqual(envelope.status, .noOp)
+        let entries = await audit.all
+        XCTAssertEqual(entries.first?.status, "noOp")
+    }
+
     func testEnvelopeMappingCoversEveryResult() {
         let target = DisplayRecordID(rawValue: "d")
         let tx = TransactionID(rawValue: "txn_1")

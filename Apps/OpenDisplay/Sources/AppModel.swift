@@ -96,6 +96,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var recentActivity: [AuditEntry] = []
     /// Identity records for the current displays, keyed by the observation's record id.
     @Published private(set) var records: [DisplayRecordID: DisplayRecord] = [:]
+    /// Every display the registry remembers — including ones that aren't plugged in right now —
+    /// keyed by the same observation record id `records` uses. This is what lets the Groups card
+    /// offer (and name) a display that is currently unplugged or turned off.
+    @Published private(set) var registryKnownRecords: [DisplayRecordID: DisplayRecord] = [:]
     @Published private(set) var scenes: [Scene] = []
     /// Non-fatal note from the last scene apply (e.g. rotation skipped) — shown in the Scenes tab.
     @Published var sceneWarning: String?
@@ -230,6 +234,16 @@ final class AppModel: ObservableObject {
     /// doesn't ripple into DDC writes; nil when the sensor is unreadable (lid closed).
     private var ambientLuxEMA: Double?
     #endif
+    /// Display Groups (Issue #39): the pure policy's per-group state (which member currently leads,
+    /// at what level, and when it last fanned out). Keyed by `DisplayGroup.id`; session-only, since a
+    /// leader event is an interaction, not a setting. The learned offsets it produces DO persist.
+    private var groupSyncStates: [UUID: GroupSyncPolicy.GroupSyncState] = [:]
+    /// Tags every write OpenDisplay issues itself (a group fan-out, a FaceLight restore) so it never
+    /// re-enters `setBrightness` as a leader event — see `GroupSyncPolicy.SyncEcho`.
+    private var groupSyncEcho = GroupSyncPolicy.SyncEcho()
+    /// The coalescing timer behind `persistDisplayGroupsSoon` — one pending disk write for a whole
+    /// slider drag, replaced on every tick and flushed on quit.
+    private var groupPersistTask: Task<Void, Never>?
     private var hotKeys: [GlobalHotKey] = []
     private var registry: DisplayRegistry?
     private var sceneLibrary: SceneLibrary?
@@ -378,6 +392,9 @@ final class AppModel: ObservableObject {
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             CoreGraphicsProvider.restoreGamma()
             MainActor.assumeIsolated {
+                // A group offset learned or dragged in the last second is still only in memory —
+                // write it before the process goes away (see `persistDisplayGroupsSoon`).
+                self?.flushPendingGroupPersist()
                 self?.sleepGuard.releaseAll()
                 self?.xdrRampTask?.cancel()
                 self?.xdrTrigger.disengage()  // process-bound anyway; one line for tidiness
@@ -511,7 +528,11 @@ final class AppModel: ObservableObject {
         guard let registry else { return }
         let observer = self.observer
         let observations = snapshot.observations.filter { $0.cgDisplayID != nil }
-        guard !observations.isEmpty else { if !records.isEmpty { records = [:] }; return }
+        guard !observations.isEmpty else {
+            if !records.isEmpty { records = [:] }
+            await refreshRegistryKnownRecords()
+            return
+        }
         // EDID fingerprint reads are nonisolated CG/IOKit accessors — gather them OFF the main actor,
         // then resolve the whole set in ONE batched (single disk-write) registry call.
         let prepared: [(DisplayRecordID, DisplayFingerprint, String?, DisplayClass)] =
@@ -527,6 +548,15 @@ final class AppModel: ObservableObject {
         var byID: [DisplayRecordID: DisplayRecord] = [:]
         for (input, record) in zip(prepared, resolved) { byID[input.0] = record }
         records = byID
+        await refreshRegistryKnownRecords()
+    }
+
+    /// Reloads the remembered-display index (every display the registry has ever minted a record
+    /// for, keyed by observation id). Refreshed with `records` and on an empty snapshot alike: a
+    /// display that isn't here is precisely the one the Groups card needs this index to name.
+    private func refreshRegistryKnownRecords() async {
+        guard let registry else { return }
+        registryKnownRecords = await registry.recordsByObservationID()
     }
 
     private func setUpScenes() async {
@@ -1005,7 +1035,14 @@ final class AppModel: ObservableObject {
     /// Sets a display's brightness (0...1) through whichever route was resolved for it, updating the
     /// cache optimistically. Native writes are immediate; DDC writes are coalesced so a fast slider
     /// drag never floods the I2C bus; the software route maps onto gamma dimming with a usable floor.
-    func setBrightness(_ value: Float, for observation: DisplayObservation) {
+    ///
+    /// This is the USER funnel — sliders and media keys — so a write here is what makes a display
+    /// its group's leader (Issue #39). `syncToken` marks the write as OpenDisplay's own hand instead
+    /// (a group fan-out, a FaceLight restore); those never lead. `SetBrightnessIntent` does NOT come
+    /// through here (it writes DisplayServices/DDC directly), so a Shortcuts-driven change leads no
+    /// group yet — routing the intent through this funnel is its own change.
+    func setBrightness(_ value: Float, for observation: DisplayObservation,
+                       syncToken: GroupSyncPolicy.SyncEcho.Token? = nil) {
         guard let cgID = observation.cgDisplayID else { return }
         let id = observation.recordID
         brightness[id] = value
@@ -1041,7 +1078,160 @@ final class AppModel: ObservableObject {
             writeGamma(level: gamma, id: id, cgID: cgID)  // brightness emulation keeps the warmth
         }
         presentOSD(kind: .brightness, value: value, for: observation)  // Batch-3 #4
+        syncGroupBrightness(value, from: observation, token: syncToken)  // Issue #39 — one OSD, above
     }
+
+    // MARK: - Display Groups (Issue #39): brightness/contrast fan-out
+
+    /// Fans a leader's brightness out to the rest of its group, or re-learns a follower's offset when
+    /// the write is the user correcting what sync just did. Everything is decided by the pure
+    /// `GroupSyncPolicy`; this only reads the world, issues the follower writes through the SILENT
+    /// path (no per-follower OSD — the leader already showed one — and no manual-cooldown teaching),
+    /// and persists a re-learned offset.
+    private func syncGroupBrightness(_ value: Float, from observation: DisplayObservation,
+                                     token: GroupSyncPolicy.SyncEcho.Token?) {
+        let leader = observation.recordID
+        guard let group = DisplayGroupStore.group(containing: leader, in: settings.displayGroups)
+        else { return }
+        let write = GroupSyncPolicy.ManualWrite(value: value, display: leader, token: token,
+                                                now: Date(), world: groupSyncWorld())
+        let result = GroupSyncPolicy.classify(write, group: group,
+                                              state: groupSyncStates[group.id] ?? .init(),
+                                              echo: groupSyncEcho)
+        groupSyncStates[group.id] = result.state
+        switch result.outcome {
+        case .echo, .governed, .syncDisabled:
+            return
+        case .followerCorrection:
+            storeDisplayGroupOffsets(result.group)
+        case .leader(let fanOut):
+            applyFollowerBrightness(fanOut, leader: leader)
+        }
+    }
+
+    /// Issues one fan-out's follower writes under an echo token, so a write that finds its way back
+    /// into `setBrightness` (a cache-driven binding, a re-entrant slider) can't become a leader event
+    /// of its own. The token closes as soon as the writes are queued — the coalescing DDC/gamma
+    /// writers own them from there.
+    private func applyFollowerBrightness(_ fanOut: GroupSyncPolicy.FanOut, leader: DisplayRecordID) {
+        guard !fanOut.isEmpty else { return }
+        let token = groupSyncEcho.begin(leader: leader, followers: fanOut.writes.map(\.member))
+        for follower in fanOut.writes {
+            guard let observation = displays.first(where: { $0.recordID == follower.member })
+            else { continue }
+            applySilentBrightness(follower.value, for: observation)
+        }
+        groupSyncEcho.end(token)
+    }
+
+    /// A follower's brightness write: same per-member method resolution the user funnel does
+    /// (native DisplayServices, coalesced DDC, or software gamma), with no OSD and no adaptive note.
+    private func applySilentBrightness(_ value: Float, for observation: DisplayObservation) {
+        guard let cgID = observation.cgDisplayID else { return }
+        let id = observation.recordID
+        brightness[id] = value  // keep the visible slider honest
+        #if PUBLIC_API_ONLY
+        let method = BrightnessMethod.software
+        #else
+        let method = brightnessMethod[id] ?? (observation.displayClass == .builtIn ? .native : .hardware)
+        #endif
+        switch method {
+        case .native:
+            #if !PUBLIC_API_ONLY
+            let control = brightnessControl
+            Task.detached(priority: .userInitiated) { _ = control.setBrightness(value, for: cgID) }
+            #endif
+        case .hardware:
+            #if !PUBLIC_API_ONLY
+            applyAdaptiveBrightness(value, for: observation)  // the existing coalesced DDC writer
+            #endif
+        case .software:
+            let gamma = max(0.15, value)
+            softwareDim[id] = gamma
+            writeGamma(level: gamma, id: id, cgID: cgID)
+        }
+    }
+
+    /// Fans a leader's contrast out to the rest of its group — a flat mirror with no offset learning
+    /// (`GroupSyncPolicy.contrastFanOut`), skipping members whose panel reports no contrast channel.
+    private func syncGroupContrast(_ value: Float, from observation: DisplayObservation) {
+        #if !PUBLIC_API_ONLY
+        let leader = observation.recordID
+        guard let group = DisplayGroupStore.group(containing: leader, in: settings.displayGroups)
+        else { return }
+        let write = GroupSyncPolicy.ManualWrite(value: value, display: leader, now: Date(),
+                                                world: groupSyncWorld())
+        let fanOut = GroupSyncPolicy.contrastFanOut(write, group: group, echo: groupSyncEcho)
+        guard !fanOut.isEmpty else { return }
+        let token = groupSyncEcho.begin(leader: leader, followers: fanOut.writes.map(\.member))
+        for follower in fanOut.writes {
+            guard let target = displays.first(where: { $0.recordID == follower.member }) else { continue }
+            setHardwareControl(.contrast, follower.value, for: target, isGroupSync: true)
+        }
+        groupSyncEcho.end(token)
+        #endif
+    }
+
+    /// The world one group decision sees: which members are usable right now, which a
+    /// higher-precedence writer owns (FaceLight, an app preset), and which have a contrast channel.
+    private func groupSyncWorld() -> GroupSyncPolicy.World {
+        let present = displays.filter(\.isActive).map(\.recordID)
+        // The persisted FaceLight/app-preset ledgers (shared with the CLI's fan-out), plus the app's
+        // own live preset set — which is ahead of the ledger for a preset applied this instant.
+        var governed = GroupSyncPolicy.governedDisplays(in: settings)
+        #if !PUBLIC_API_ONLY
+        governed.formUnion(appPresetActiveDisplays)
+        #endif
+        // A contrast level in the cache IS the probe's verdict that the channel works — the same
+        // signal `toggleFaceLight` uses to decide whether a display gets a contrast write at all.
+        let contrastCapable = present.filter { ddcControlLevel[$0]?[HardwareControl.contrast.vcp] != nil }
+        return GroupSyncPolicy.World(present: Set(present), governed: governed,
+                                     contrastCapable: Set(contrastCapable))
+    }
+
+    /// Hands a display its own prior brightness back without leading its group. Restores (FaceLight,
+    /// an app preset leaving) are the machine undoing itself, not the user reaching for a slider —
+    /// fanning one out would drag the whole group to a value nobody asked for.
+    private func restoreBrightnessWithoutLeading(_ value: Float, for observation: DisplayObservation) {
+        let token = groupSyncEcho.begin(leader: observation.recordID)
+        setBrightness(value, for: observation, syncToken: token)
+        groupSyncEcho.end(token)
+    }
+
+    /// Stores one group's re-learned offsets back into settings (the offsets persist; the leader
+    /// state that produced them is session-only). In memory immediately — the next fan-out reads the
+    /// new offset — with the disk write coalesced, since a correction arrives once per slider tick.
+    private func storeDisplayGroupOffsets(_ group: DisplayGroup) {
+        settings.displayGroups = DisplayGroupStore.update(group, in: settings.displayGroups)
+        persistDisplayGroupsSoon()
+    }
+
+    /// Coalesces the settings write behind a learned or hand-set group offset. Offsets change at
+    /// slider-tick rate, and `persistSettings` is a synchronous whole-file JSON encode on the main
+    /// actor — one per tick is disk spam mid-drag, the same reason the adaptive learned offsets
+    /// persist at tick-time rather than per slider move. The in-memory value is authoritative the
+    /// instant it is set; the disk catches up `groupPersistDelay` after the hand stops (or at quit,
+    /// via the `willTerminate` flush).
+    private func persistDisplayGroupsSoon() {
+        groupPersistTask?.cancel()
+        groupPersistTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.groupPersistDelay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.flushPendingGroupPersist()
+        }
+    }
+
+    /// Writes a pending coalesced group-offset change out now. Idempotent: with nothing pending it
+    /// just re-saves the settings we already hold.
+    private func flushPendingGroupPersist() {
+        groupPersistTask?.cancel()
+        groupPersistTask = nil
+        persistSettings()
+    }
+
+    /// How long the coalescing timer waits. Comfortably longer than the gap between two slider ticks
+    /// and short enough that a change is on disk before anyone reaches for the power button.
+    private static let groupPersistDelay: TimeInterval = 1.5
 
     #if !PUBLIC_API_ONLY
     /// Returns (and caches) the DDC controller for an external display, building it OFF the main actor
@@ -1154,8 +1344,10 @@ final class AppModel: ObservableObject {
     }
 
     /// Sets a DDC hardware control (0...1), updating the cache optimistically and coalescing the
-    /// I2C writes the same way brightness does.
-    func setHardwareControl(_ control: HardwareControl, _ value: Float, for observation: DisplayObservation) {
+    /// I2C writes the same way brightness does. `isGroupSync` marks a write this model is fanning out
+    /// on a group's behalf, so it doesn't mirror straight back (Issue #39).
+    func setHardwareControl(_ control: HardwareControl, _ value: Float,
+                            for observation: DisplayObservation, isGroupSync: Bool = false) {
         #if !PUBLIC_API_ONLY
         guard observation.displayClass != .builtIn else { return }
         let id = observation.recordID
@@ -1166,6 +1358,7 @@ final class AppModel: ObservableObject {
             ddcControlWriter[key] = Task { [weak self] in await self?.drainHardwareWrites(key, control, observation) }
         }
         if control == .volume { presentOSD(kind: .volume, value: value, for: observation) }  // Batch-3 #4
+        if control == .contrast, !isGroupSync { syncGroupContrast(value, from: observation) }  // Issue #39
         #endif
     }
 
@@ -1552,6 +1745,10 @@ final class AppModel: ObservableObject {
             // An active app preset is the last writer on this display (Issue #33 precedence) — leave it
             // alone so adaptive/clock never fights the preset it just applied.
             if appPresetActiveDisplays.contains(id) { continue }
+            // A grouped display's brightness is driven by its group (Issue #39) — the two features
+            // are mutually exclusive per display, so adaptive leaves brightness alone here. Warmth is
+            // orthogonal (groups never touch the colour preset) and keeps running.
+            let groupDrivesBrightness = DisplayGroupStore.isGroupGoverned(id, in: settings.displayGroups)
             if warmthOn, colorPreset[id] == nil { await refreshColorPreset(for: observation) }
 
             let state = adaptiveStates[id] ?? seededAdaptiveState(for: id)
@@ -1566,7 +1763,8 @@ final class AppModel: ObservableObject {
                 currentPreset: colorPreset[id],
                 dayPreset: settings.adaptiveDayPresetByDisplay[id.rawValue],
                 nightShiftActive: nightShiftActive,
-                brightnessSyncEnabled: brightnessGoverned, warmthEnabled: warmthOn,
+                brightnessSyncEnabled: brightnessGoverned && !groupDrivesBrightness,
+                warmthEnabled: warmthOn,
                 scheduleOverride: clockTarget, locationElevationDegrees: locationElevation)
             let decision = AdaptiveDisplayPolicy.evaluate(input, config: config, state: state)
 
@@ -1985,8 +2183,12 @@ final class AppModel: ObservableObject {
         guard let observation = displays.first(where: { $0.recordID.rawValue == write.recordID }) else {
             return
         }
+        // `isGroupSync` for the contrast write: app presets outrank group sync, so a preset must not
+        // mirror itself across the group (brightness already avoids this by taking the silent funnel).
         if let brightness = write.brightness { applyAdaptiveBrightness(brightness, for: observation) }
-        if let contrast = write.contrast { setHardwareControl(.contrast, contrast, for: observation) }
+        if let contrast = write.contrast {
+            setHardwareControl(.contrast, contrast, for: observation, isGroupSync: true)
+        }
         if let code = write.colorPreset { applyAdaptivePreset(code, for: observation) }
     }
 
@@ -2035,7 +2237,9 @@ final class AppModel: ObservableObject {
                                        for observation: DisplayObservation) async {
         let id = observation.recordID
         guard let controller = await ddcController(for: observation) else {
-            if let brightness = prior.brightness { setBrightness(brightness, for: observation) }
+            if let brightness = prior.brightness {
+                restoreBrightnessWithoutLeading(brightness, for: observation)
+            }
             return
         }
         if let level = prior.brightness {
@@ -2052,6 +2256,112 @@ final class AppModel: ObservableObject {
         }
     }
     #endif
+
+    // MARK: - Display Groups (Issue #39): settings surface
+
+    /// The group a display belongs to, or nil when it is ungrouped.
+    func displayGroup(containing member: DisplayRecordID) -> DisplayGroup? {
+        DisplayGroupStore.group(containing: member, in: settings.displayGroups)
+    }
+
+    /// The "synced with <group>" caption for a display's detail row, or nil when it isn't grouped.
+    func groupSyncCaption(for observation: DisplayObservation) -> String? {
+        displayGroup(containing: observation.recordID).map { "Synced with \($0.name)" }
+    }
+
+    /// A name for a group member that may not be present right now: its live/aliased name when the
+    /// display is here, else the remembered registry record's friendly name (alias → model → class
+    /// label). `records` only ever holds the displays of the current snapshot, so an absent member
+    /// is named from the registry index instead — otherwise the row reads `cg:37D8832A-2D66-…`,
+    /// which tells the user nothing about which monitor they are about to group. The raw id survives
+    /// only for a display the registry has never seen at all.
+    func groupMemberName(for member: DisplayRecordID) -> String {
+        if let observation = displays.first(where: { $0.recordID == member }) {
+            return displayName(for: observation)
+        }
+        guard let record = records[member] ?? registryKnownRecords[member] else {
+            return member.rawValue
+        }
+        return record.friendlyName()
+    }
+
+    /// The displays a group's membership list can offer: everything connected right now, plus every
+    /// display the registry remembers (spec req 4). Without the remembered half, a monitor that is
+    /// unplugged — or that the app itself turned off — simply cannot be added to a group until it
+    /// comes back, which is the moment a user is most likely to be setting groups up.
+    var groupMemberCandidates: [DisplayRecordID] {
+        let connected = displays.map(\.recordID)
+        let remembered = registryKnownRecords.keys.filter { !connected.contains($0) }
+        // Dictionary order is not stable across reads; sort by the name shown so the rows don't
+        // reshuffle under the user's cursor between refreshes.
+        return connected + remembered.sorted { groupMemberName(for: $0) < groupMemberName(for: $1) }
+    }
+
+    /// Creates a group; false when the name is blank or already taken (names are the CLI's handle on
+    /// a group, so they have to stay unambiguous).
+    @discardableResult
+    func createDisplayGroup(named name: String) -> Bool {
+        guard let created = DisplayGroupStore.create(named: name, in: settings.displayGroups)
+        else { return false }
+        settings.displayGroups = created
+        persistSettings()
+        return true
+    }
+
+    func deleteDisplayGroup(_ group: DisplayGroup) {
+        settings.displayGroups = DisplayGroupStore.delete(id: group.id, from: settings.displayGroups)
+        groupSyncStates[group.id] = nil
+        persistSettings()
+    }
+
+    @discardableResult
+    func renameDisplayGroup(_ group: DisplayGroup, to name: String) -> Bool {
+        let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return false }
+        let clash = DisplayGroupStore.group(named: cleaned, in: settings.displayGroups)
+        guard clash == nil || clash?.id == group.id else { return false }
+        var renamed = group
+        renamed.name = cleaned
+        updateDisplayGroup(renamed)
+        return true
+    }
+
+    /// Adds or removes a member. Joining resets the group's leader state: the display that led before
+    /// may no longer be in the group, and a stale base level would misread the next nudge as a
+    /// correction against a level nobody is at.
+    func setDisplayGroupMembership(_ member: DisplayRecordID, in group: DisplayGroup, isMember: Bool) {
+        settings.displayGroups = isMember
+            ? DisplayGroupStore.addMember(member, to: group.id, in: settings.displayGroups)
+            : DisplayGroupStore.removeMember(member, from: group.id, in: settings.displayGroups)
+        groupSyncStates.removeAll()
+        persistSettings()
+    }
+
+    /// The settings ± slider. Dragging it is dozens of ticks, so the offset lands in memory per tick
+    /// and the disk write is coalesced — same rule as an offset the group learns from a correction
+    /// (see `storeDisplayGroupOffsets`).
+    func setDisplayGroupOffset(_ offset: Float, for member: DisplayRecordID, in group: DisplayGroup) {
+        var edited = group
+        edited.setOffset(offset, for: member)
+        storeDisplayGroupOffsets(edited)
+    }
+
+    func setDisplayGroupSyncBrightness(_ enabled: Bool, for group: DisplayGroup) {
+        var edited = group
+        edited.syncBrightness = enabled
+        updateDisplayGroup(edited)
+    }
+
+    func setDisplayGroupSyncContrast(_ enabled: Bool, for group: DisplayGroup) {
+        var edited = group
+        edited.syncContrast = enabled
+        updateDisplayGroup(edited)
+    }
+
+    private func updateDisplayGroup(_ group: DisplayGroup) {
+        settings.displayGroups = DisplayGroupStore.update(group, in: settings.displayGroups)
+        persistSettings()
+    }
 
     // MARK: - FaceLight: video-call fill light
 
@@ -2072,10 +2382,16 @@ final class AppModel: ObservableObject {
         settings.faceLightPriorStateByDisplay[id.rawValue] = outcome.priorStateToPersist
         persistSettings()
 
-        if let brightnessWrite = outcome.brightnessWrite { setBrightness(brightnessWrite, for: observation) }
-        if let contrastWrite = outcome.contrastWrite {
-            setHardwareControl(.contrast, contrastWrite, for: observation)
+        // FaceLight outranks group sync, so neither its max-out nor its restore may lead the group
+        // (a restore lands after the ledger clears, so the governed check alone wouldn't catch it).
+        let token = groupSyncEcho.begin(leader: id)
+        if let brightnessWrite = outcome.brightnessWrite {
+            setBrightness(brightnessWrite, for: observation, syncToken: token)
         }
+        if let contrastWrite = outcome.contrastWrite {
+            setHardwareControl(.contrast, contrastWrite, for: observation, isGroupSync: true)
+        }
+        groupSyncEcho.end(token)
         applyFaceLightOverlay(isActive: outcome.isNowActive, cgID: cgID)
     }
 
@@ -2139,7 +2455,7 @@ final class AppModel: ObservableObject {
             return
         }
         #endif
-        setBrightness(prior.brightness, for: observation)
+        restoreBrightnessWithoutLeading(prior.brightness, for: observation)
         removeFaceLightOverlay(for: observation)
     }
 

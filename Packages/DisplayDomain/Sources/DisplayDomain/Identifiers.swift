@@ -17,6 +17,26 @@ public struct DisplayRecordID: Hashable, Sendable, Codable, CustomStringConverti
         return DisplayRecordID(rawValue: "disp_\(stamp)_\(suffix)")
     }
 
+    /// The id observers mint for a display whose persistent Core Graphics UUID is available. Group
+    /// membership, the settings ledgers, and the audit log all carry this form, so anything that has
+    /// to look such a display up in the registry (which indexes by the bare UUID) goes through here
+    /// and `cgUUID` rather than re-spelling the prefix. ::
+    ///
+    ///     DisplayRecordID.forCGUUID("U1").cgUUID
+    ///     ok: "U1"
+    public static func forCGUUID(_ uuid: String) -> DisplayRecordID {
+        DisplayRecordID(rawValue: "\(cgUUIDPrefix)\(uuid)")
+    }
+
+    /// The Core Graphics UUID inside a `cg:<uuid>` id, or nil for any other id form — a UUID-less
+    /// `cgid:<n>` observation, or a registry-minted `disp_…` record id.
+    public var cgUUID: String? {
+        guard rawValue.hasPrefix(Self.cgUUIDPrefix) else { return nil }
+        return String(rawValue.dropFirst(Self.cgUUIDPrefix.count))
+    }
+
+    private static let cgUUIDPrefix = "cg:"
+
     public var description: String { rawValue }
 }
 

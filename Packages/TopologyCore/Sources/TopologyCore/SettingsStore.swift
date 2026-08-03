@@ -122,6 +122,11 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// own protected layout instead of overwriting one another. Re-protecting a set replaces its
     /// entry; removing protection drops the key.
     public var protectedLayouts: [String: ProtectedConfig]
+    /// Display Groups (Issue #39): user-defined sets whose brightness (and optionally contrast) move
+    /// together, any member driving the rest. A display belongs to at most one group — the invariant
+    /// `DisplayGroupStore` enforces on every mutation. Empty by default; a grouped display is
+    /// excluded from Adaptive Display targeting, so the two features never write against each other.
+    public var displayGroups: [DisplayGroup]
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
@@ -160,7 +165,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         appPresetPriorStateByDisplay: [String: AppPresetPolicy.PriorState] = [:],
         xdrBrightnessEnabled: Bool = false,
         layoutProtectionEnabled: Bool = false,
-        protectedLayouts: [String: ProtectedConfig] = [:]
+        protectedLayouts: [String: ProtectedConfig] = [:],
+        displayGroups: [DisplayGroup] = []
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
@@ -199,6 +205,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.xdrBrightnessEnabled = xdrBrightnessEnabled
         self.layoutProtectionEnabled = layoutProtectionEnabled
         self.protectedLayouts = protectedLayouts
+        self.displayGroups = displayGroups
     }
 
     public static let `default` = OpenDisplaySettings()
@@ -239,6 +246,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case xdrBrightnessEnabled
         case layoutProtectionEnabled
         case protectedLayouts
+        case displayGroups
     }
 
     /// Tolerant decoder: every missing OR undecodable key falls back to its default and unknown
@@ -325,6 +333,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
             ?? defaults.layoutProtectionEnabled
         protectedLayouts = container.lenient([String: ProtectedConfig].self, forKey: .protectedLayouts)
             ?? defaults.protectedLayouts
+        displayGroups = container.lenient([DisplayGroup].self, forKey: .displayGroups)
+            ?? defaults.displayGroups
     }
 }
 

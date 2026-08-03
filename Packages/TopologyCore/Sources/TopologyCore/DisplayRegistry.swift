@@ -97,6 +97,19 @@ public actor DisplayRegistry {
         state.cgUUIDIndex[cgUUID].flatMap(record(for:))
     }
 
+    /// Every remembered display keyed by the OBSERVATION id (`cg:<uuid>`) rather than the registry's
+    /// own minted id — the form group membership, the settings ledgers, and the UI hold. A display
+    /// that isn't plugged in has no observation to carry its name, so this is what lets a membership
+    /// list offer it (and name it) instead of hiding it until it comes back.
+    public func recordsByObservationID() -> [DisplayRecordID: DisplayRecord] {
+        var byObservationID: [DisplayRecordID: DisplayRecord] = [:]
+        for (cgUUID, recordID) in state.cgUUIDIndex {
+            guard let known = record(for: recordID) else { continue }
+            byObservationID[.forCGUUID(cgUUID)] = known
+        }
+        return byObservationID
+    }
+
     /// Resolves a fingerprint (+ optional CG UUID) to a stable record, recognizing or minting.
     public func resolve(
         fingerprint: DisplayFingerprint,

@@ -176,4 +176,23 @@ public struct DisplayRecord: Hashable, Sendable, Codable, Identifiable {
     public var displayName: String {
         alias ?? fingerprint.modelName ?? id.rawValue
     }
+
+    /// A name a person can act on for a display that may not be plugged in right now: the alias,
+    /// else the EDID model name, else a class (+ resolution when there is a live mode) label. Never
+    /// the raw record id — `cg:37D8832A-2D66-…` in a group-membership checkbox identifies nothing to
+    /// the human reading it, and an absent display is exactly when a name matters most. ::
+    ///
+    ///     friendlyName(mode: 3840×2160) on an unaliased external
+    ///     ok: "External 3840×2160"
+    ///
+    ///     friendlyName() on the same display while it is unplugged
+    ///     ok: "External display"
+    public func friendlyName(mode: DisplayMode? = nil) -> String {
+        if let alias, !alias.isEmpty { return alias }
+        if let modelName = fingerprint.modelName, !modelName.isEmpty { return modelName }
+        if displayClass == .builtIn { return "Built-in Display" }
+        let classLabel = displayClass.rawValue.capitalized
+        guard let mode else { return "\(classLabel) display" }
+        return "\(classLabel) \(mode.pixelWidth)×\(mode.pixelHeight)"
+    }
 }
