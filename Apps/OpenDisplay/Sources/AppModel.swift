@@ -2584,7 +2584,8 @@ final class AppModel: ObservableObject {
     // MARK: - Protected Layout (Batch-4 #A)
 
     /// The display-set key the current topology protects under (`LayoutProtectionPolicy`).
-    private(set) var currentLayoutFingerprint = ""
+    /// Published so the Arrange tab's status line follows a hotplug without a reopen.
+    @Published private(set) var currentLayoutFingerprint = ""
     /// The protected layout for the display set that is on the desk right now, or nil when this set
     /// isn't protected. Drives the Arrange tab's status line and its Update/Remove buttons.
     var protectedLayoutForCurrentSet: ProtectedConfig? {
@@ -2656,7 +2657,10 @@ final class AppModel: ObservableObject {
         layoutProtectionDebounceTask?.cancel()
         layoutProtectionDebounceTask = nil
         let snapshot = await observer.currentSnapshot()
-        currentLayoutFingerprint = LayoutProtectionPolicy.fingerprint(for: snapshot)
+        let fingerprint = LayoutProtectionPolicy.fingerprint(for: snapshot)
+        // Republish only on a real change: this runs on every topology event, and reassigning a
+        // @Published value re-evaluates every observing view.
+        if currentLayoutFingerprint != fingerprint { currentLayoutFingerprint = fingerprint }
         guard settings.layoutProtectionEnabled else { return }
         let protected = settings.protectedLayouts[currentLayoutFingerprint]
         let evaluation = LayoutProtectionPolicy.decide(
@@ -2723,8 +2727,11 @@ final class AppModel: ObservableObject {
         await restoreProtectedMirroring(config)
 
         let settled = await observer.awaitStableGeneration(after: generation)
-        layoutProtectionState = LayoutProtectionPolicy.noteSelfChange(
-            generation: settled.generation, state: layoutProtectionState)
+        // Suppress the generation our writes raised — or, when they raised none, clear the
+        // suppression `applyScene` optimistically took, so a restore that didn't land can be retried
+        // instead of silencing the drift it failed to fix.
+        layoutProtectionState = LayoutProtectionPolicy.noteRestoreOutcome(
+            before: generation, after: settled.generation, state: layoutProtectionState)
         let residual = LayoutProtectionPolicy.actionableDrift(
             protected: config.snapshot, current: settled, context: layoutProtectionContext())
         let restored = !(residual?.hasDrifted ?? false)

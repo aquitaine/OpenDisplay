@@ -241,6 +241,20 @@ final class LayoutProtectionPolicyTests: XCTestCase {
         XCTAssertEqual(evaluation.decision, .restore(.init(changes: [.originMoved(.init(rawValue: "A"))])))
     }
 
+    func testALandedRestoreSuppressesTheGenerationItsOwnWritesRaised() {
+        let state = LayoutProtectionPolicy.noteRestoreOutcome(
+            before: .init(4), after: .init(5), state: LayoutProtectionPolicy.State())
+        XCTAssertEqual(state.suppressedGeneration, .init(5))
+    }
+
+    func testARestoreThatChangedNothingLeavesTheRetryPathOpen() {
+        var state = LayoutProtectionPolicy.State()
+        state.suppressedGeneration = .init(4)
+        let after = LayoutProtectionPolicy.noteRestoreOutcome(before: .init(4), after: .init(4),
+                                                             state: state)
+        XCTAssertNil(after.suppressedGeneration, "a restore that didn't land must not silence itself")
+    }
+
     // MARK: - Anti-fight guard: debounce
 
     func testDriftIsIgnoredUntilTheTopologyHasBeenQuiet() {

@@ -296,6 +296,20 @@ public enum LayoutProtectionPolicy {
         return state
     }
 
+    /// Records what a restore's own writes actually did to the world: suppress the generation they
+    /// raised, or — when they raised none, which means the restore did not land — clear the
+    /// suppression entirely.
+    ///
+    /// That second half matters more than it looks. Marking the unchanged generation as "ours" would
+    /// silence the very drift we just failed to fix, and the retry cap would never be reached: the
+    /// layout would sit broken with the app quietly certain it had already handled it.
+    public static func noteRestoreOutcome(before: TopologyGeneration, after: TopologyGeneration,
+                                          state: State) -> State {
+        var state = state
+        state.suppressedGeneration = after > before ? after : nil
+        return state
+    }
+
     // MARK: - Restore plan
 
     /// The one-shot scene that puts the protected arrangement back. Members are optional so a
