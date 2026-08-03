@@ -38,7 +38,7 @@ private struct DisplayGroupSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ODRow(group.name) {
+            ODRow("Group name", secondary: memberSummary) {
                 HStack(spacing: ODSpacing.sm) {
                     TextField("Group name", text: $draftName)
                         .textFieldStyle(.roundedBorder).frame(width: 140)
@@ -66,6 +66,14 @@ private struct DisplayGroupSection: View {
             }
         }
         .onAppear { draftName = group.name }
+    }
+
+    /// "3 displays · 2 connected", so a group whose members are partly unplugged reads honestly.
+    private var memberSummary: String {
+        let connected = group.memberRecordIDs.filter { member in
+            model.displays.contains { $0.recordID == member }
+        }
+        return "\(group.memberRecordIDs.count) displays \u{00B7} \(connected.count) connected"
     }
 
     /// Every display that could sit in this group: the ones connected right now, plus members that
