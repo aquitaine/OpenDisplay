@@ -114,6 +114,11 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// for SDR content via `XDRBrightnessPolicy`. Only this opt-in toggle persists — the boost
     /// level itself is session-only, so a relaunch always starts at normal brightness. Default off.
     public var xdrBrightnessEnabled: Bool
+    /// Display Groups (Issue #39): user-defined sets whose brightness (and optionally contrast) move
+    /// together, any member driving the rest. A display belongs to at most one group — the invariant
+    /// `DisplayGroupStore` enforces on every mutation. Empty by default; a grouped display is
+    /// excluded from Adaptive Display targeting, so the two features never write against each other.
+    public var displayGroups: [DisplayGroup]
 
     public init(
         persistencePolicy: PersistencePolicy = .reconnectOnQuit,
@@ -150,7 +155,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         appPresetsEnabled: Bool = false,
         appPresets: [AppPresetPolicy.AppPreset] = [],
         appPresetPriorStateByDisplay: [String: AppPresetPolicy.PriorState] = [:],
-        xdrBrightnessEnabled: Bool = false
+        xdrBrightnessEnabled: Bool = false,
+        displayGroups: [DisplayGroup] = []
     ) {
         self.persistencePolicy = persistencePolicy
         self.confirmationCountdownSeconds = confirmationCountdownSeconds
@@ -187,6 +193,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.appPresets = appPresets
         self.appPresetPriorStateByDisplay = appPresetPriorStateByDisplay
         self.xdrBrightnessEnabled = xdrBrightnessEnabled
+        self.displayGroups = displayGroups
     }
 
     public static let `default` = OpenDisplaySettings()
@@ -225,6 +232,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case appPresets
         case appPresetPriorStateByDisplay
         case xdrBrightnessEnabled
+        case displayGroups
     }
 
     /// Tolerant decoder: every missing OR undecodable key falls back to its default and unknown
@@ -307,6 +315,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
             ?? defaults.appPresetPriorStateByDisplay
         xdrBrightnessEnabled = container.lenient(Bool.self, forKey: .xdrBrightnessEnabled)
             ?? defaults.xdrBrightnessEnabled
+        displayGroups = container.lenient([DisplayGroup].self, forKey: .displayGroups)
+            ?? defaults.displayGroups
     }
 }
 
