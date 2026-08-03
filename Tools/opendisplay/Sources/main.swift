@@ -729,6 +729,102 @@ func runFavorite() async {
     }
 }
 
+// MARK: - Protected layout (Batch-4 #A)
+
+/// `layout protect|unprotect|status`. Protection is keyed by the display set on the desk right now,
+/// so the CLI protects exactly what `list` shows — and the app, reading the same settings file
+/// through the same fingerprint, is looking at the same layout. The two writes route through
+/// `CommandGateway`, so they land in the audit trail with every other command.
+func runLayout() async {
+    let sub = positional.count > 1 ? positional[1] : "status"
+    guard let store = (try? SettingsStore.defaultDirectory()).map(SettingsStore.init(directory:)) else {
+        fail("settings directory unavailable")
+    }
+    switch sub {
+    case "protect", "unprotect":
+        let change: LayoutProtectionChange = sub == "protect" ? .protect : .unprotect
+        let envelope = await gateway.applyLayoutProtection(change, store: store, actor: .cli)
+        if asJSON { emit(envelope); return }
+        switch envelope.status {
+        case .committed:
+            let count = envelope.targets.count
+            print(change == .protect
+                  ? "protected this layout (\(count) display\(count == 1 ? "" : "s"))"
+                  : "removed protection for this display set")
+        case .noOp:
+            print("this display set isn't protected")
+        default:
+            emitEnvelope(envelope)
+        }
+        if change == .protect && !store.load().layoutProtectionEnabled {
+            print("note: turn on \u{201C}Put my arrangement back when it changes\u{201D} in "
+                  + "OpenDisplay \u{2192} Arrange for it to be restored automatically")
+        }
+    case "status":
+        await runLayoutStatus(store: store)
+    default:
+        fail("unknown layout subcommand '\(sub)' (try: protect, unprotect, status)", code: 2)
+    }
+}
+
+/// Per-fingerprint protection plus the last automatic restore, so "why didn't my layout come back?"
+/// is answerable without opening the app.
+func runLayoutStatus(store: SettingsStore) async {
+    let settings = store.load()
+    let snapshot = await observer.currentSnapshot()
+    let currentFingerprint = LayoutProtectionPolicy.fingerprint(for: snapshot)
+    let pairs = await resolveCurrentDisplays()
+    let namesByID = Dictionary(pairs.map { ($0.observation.recordID, name(for: $0)) },
+                               uniquingKeysWith: { _, latest in latest })
+    func members(of config: ProtectedConfig) -> [String] {
+        config.snapshot.observations.map { namesByID[$0.recordID] ?? $0.recordID.rawValue }.sorted()
+    }
+    let lastRestore = await lastLayoutProtectionEntry()
+
+    if asJSON {
+        struct Layout: Encodable {
+            var fingerprint: String; var current: Bool; var displays: [String]; var capturedAt: Date
+        }
+        struct Status: Encodable {
+            var enabled: Bool; var currentFingerprint: String; var currentSetProtected: Bool
+            var layouts: [Layout]; var lastRestoreAt: Date?; var lastRestoreStatus: String?
+        }
+        emit(Status(
+            enabled: settings.layoutProtectionEnabled, currentFingerprint: currentFingerprint,
+            currentSetProtected: settings.protectedLayouts[currentFingerprint] != nil,
+            layouts: settings.protectedLayouts.sorted { $0.key < $1.key }.map {
+                Layout(fingerprint: $0.key, current: $0.key == currentFingerprint,
+                       displays: members(of: $0.value), capturedAt: $0.value.capturedAt)
+            },
+            lastRestoreAt: lastRestore?.timestamp, lastRestoreStatus: lastRestore?.status))
+        return
+    }
+
+    print("automatic restore: \(settings.layoutProtectionEnabled ? "on" : "off")")
+    if settings.protectedLayouts.isEmpty {
+        print("no protected layouts (protect this one with: opendisplay layout protect)")
+    }
+    for (fingerprint, config) in settings.protectedLayouts.sorted(by: { $0.key < $1.key }) {
+        let mark = fingerprint == currentFingerprint ? "\u{25CF}" : "\u{25CB}"
+        let here = fingerprint == currentFingerprint ? "  [this display set]" : ""
+        print("\(mark) \(members(of: config).joined(separator: " + "))  captured "
+              + "\(ISO8601DateFormatter().string(from: config.capturedAt))\(here)")
+    }
+    if settings.protectedLayouts[currentFingerprint] == nil, !settings.protectedLayouts.isEmpty {
+        print("this display set isn't protected")
+    }
+    if let lastRestore {
+        print("last restore: \(ISO8601DateFormatter().string(from: lastRestore.timestamp)) "
+              + "\u{2014} \(lastRestore.status)")
+    }
+}
+
+/// The newest protected-layout entry in the shared audit trail, or nil when none has run.
+func lastLayoutProtectionEntry() async -> AuditEntry? {
+    guard let auditLog else { return nil }
+    return await auditLog.recent(limit: 200).last { $0.command == "layoutProtection" }
+}
+
 // MARK: - Experimental rotation helper (short-lived, gated, isolated)
 
 /// EXPERIMENTAL rotation writer. Gated behind OPENDISPLAY_EXPERIMENTAL_ROTATION=1 so it never runs by
@@ -859,6 +955,7 @@ case "recover": await runRecover()
 case "disconnect": await runDisconnect()
 case "reconnect": await runReconnect()
 case "scene": await runScene()
+case "layout": await runLayout()
 case "brightness": await runBrightness()
 case "ddc": await runDDC()
 case "edid": await runEDID()
@@ -880,6 +977,7 @@ case "help", "--help", "-h":
       opendisplay reconnect <selector> [--json]
       opendisplay recover [--json]
       opendisplay scene <list|save|show|plan|apply|delete> [name] [--json]
+      opendisplay layout <protect|unprotect|status> [--json]
       opendisplay brightness <selector> [0..1]
       opendisplay ddc <selector> <brightness|contrast|volume|input|colour|sharpness|red|green|blue|mute|power|caps> [value]
       opendisplay ddc <selector> vcp <0xNN> [value]   # any raw MCCS feature code
@@ -892,5 +990,5 @@ case "help", "--help", "-h":
     SELECTORS: id:<recordID> · alias:<name> · tag:<tag> · main · builtin · state:<active|managedOffline> · <cgDisplayID>
     """)
 default:
-    fail("unknown command '\(command)' (try: list, diagnose, lux, lid, listen, alias, tag, disconnect, reconnect, recover, scene, brightness, ddc, help)", code: 2)
+    fail("unknown command '\(command)' (try: list, diagnose, lux, lid, listen, alias, tag, disconnect, reconnect, recover, scene, layout, brightness, ddc, help)", code: 2)
 }

@@ -114,11 +114,113 @@ private struct ArrangeSection: View {
                 DisplayArrangementView()
                 Text("Drag a display to reposition it. Changes apply immediately; save the layout as a scene under Scenes.")
                     .font(.caption).foregroundStyle(.secondary)
+                ODDivider()
+                ProtectedLayoutCard()
             }
             .padding(ODSpacing.lg)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .navigationTitle("Arrange Displays")
+    }
+}
+
+// MARK: - Protected layout (Batch-4 #A)
+
+/// "Keep this arrangement": protects the layout for the display set currently on the desk, and lists
+/// the other sets that already have one. Protection is per display set, so laptop-alone and
+/// laptop-plus-desk each keep their own arrangement.
+private struct ProtectedLayoutCard: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: ODSpacing.sm) {
+            Text("Protected layout").font(.title3)
+            Toggle(isOn: Binding(
+                get: { model.settings.layoutProtectionEnabled },
+                set: { model.setLayoutProtectionEnabled($0) }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Put my arrangement back when it changes")
+                    Text("When macOS (or another app) moves a display, changes its resolution, or "
+                         + "hands \u{201C}main\u{201D} to the other screen, the protected arrangement is "
+                         + "restored. A display you turned off yourself stays off.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if model.settings.layoutProtectionEnabled {
+                CurrentLayoutProtectionRow()
+                OtherProtectedLayoutsList()
+            }
+        }
+    }
+}
+
+private struct CurrentLayoutProtectionRow: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        ODCard {
+            ODRow("This display set", secondary: status) {
+                HStack(spacing: 8) {
+                    Button(model.protectedLayoutForCurrentSet == nil ? "Protect Current Layout" : "Update") {
+                        Task { await model.protectCurrentLayout() }
+                    }
+                    .controlSize(.small).disabled(model.busy)
+                    if model.protectedLayoutForCurrentSet != nil {
+                        Button("Remove") {
+                            model.removeProtectedLayout(fingerprint: model.currentLayoutFingerprint)
+                        }
+                        .controlSize(.small)
+                    }
+                }
+            }
+        }
+    }
+
+    private var status: String {
+        guard let protected = model.protectedLayoutForCurrentSet else { return "Not protected" }
+        let count = protected.snapshot.observations.count
+        return "Protected \u{00B7} \(count) display\(count == 1 ? "" : "s") \u{00B7} captured "
+            + protected.capturedAt.formatted(.dateTime.month(.abbreviated).day())
+    }
+}
+
+/// The layouts stored for display sets that aren't on the desk right now — a docked setup you
+/// protected last week is still listed (and removable) while you're on the road.
+private struct OtherProtectedLayoutsList: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        let others = model.settings.protectedLayouts
+            .filter { $0.key != model.currentLayoutFingerprint }
+            .sorted { $0.key < $1.key }
+        if !others.isEmpty {
+            VStack(alignment: .leading, spacing: ODSpacing.xs) {
+                Text("Other protected layouts").font(.caption).foregroundStyle(.secondary)
+                ODCard {
+                    ForEach(Array(others.enumerated()), id: \.element.key) { index, entry in
+                        if index > 0 { ODDivider() }
+                        ODRow(memberNames(of: entry.value),
+                              secondary: "captured " + entry.value.capturedAt.formatted(
+                                .dateTime.month(.abbreviated).day())) {
+                            Button(role: .destructive) {
+                                model.removeProtectedLayout(fingerprint: entry.key)
+                            } label: { Image(systemName: "trash") }
+                                .buttonStyle(.borderless)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Names the members from the stored snapshot — those displays are absent, so the live
+    /// registry has nothing to name them with.
+    private func memberNames(of config: ProtectedConfig) -> String {
+        let names = config.snapshot.observations
+            .map { model.displayName(for: $0) }
+            .sorted()
+        return names.joined(separator: " + ")
     }
 }
 
