@@ -37,6 +37,9 @@ struct DisplayDetailView: View {
                 UseAsCard(display: display)
                 IdentityCard(display: display)
                 InformationCard(display: display)
+                // Display-agnostic, but the Displays tab is where it belongs (Issue #39) and this is
+                // the tab's only scrolling surface.
+                DisplayGroupsCard()
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -320,6 +323,12 @@ private struct ControlsCard: View {
                         }
                     }
                 }
+            }
+            if let caption = model.groupSyncCaption(for: display) {
+                ODDivider()
+                Text(caption)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 10).padding(.vertical, 4)
             }
             #if !PUBLIC_API_ONLY
             if let status = model.adaptiveStatusLine(for: display) {

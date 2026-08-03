@@ -393,7 +393,8 @@ private struct HealthSection: View {
                              + "already adjusts from the ambient light sensor \u{2014} over DDC. Moving a slider "
                              + "teaches it your preferred offset and pauses it for a minute. With the lid "
                              + "closed it follows the schedule below instead. Brightness changed with the "
-                             + "monitor\u{2019}s own buttons can\u{2019}t be seen and may be overridden.")
+                             + "monitor\u{2019}s own buttons can\u{2019}t be seen and may be overridden. "
+                             + "Displays in a group are left out \u{2014} their group drives them instead.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }

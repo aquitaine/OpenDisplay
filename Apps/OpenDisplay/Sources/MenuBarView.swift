@@ -263,11 +263,17 @@ private struct DisplayCard: View {
                     accessibilityLabel: "Brightness")
                 if model.xdrCapable(display) { xdrBoostToggle }
             }
-            if let caption = model.brightnessCaption(for: display) {
+            ForEach(brightnessCaptions, id: \.self) { caption in
                 Text(caption).font(.system(size: 9)).foregroundStyle(.tertiary)
                     .padding(.leading, 32).padding(.bottom, 2)
             }
         }
+    }
+
+    /// What is worth saying under the slider: how brightness reaches this panel ("Hardware · DDC"),
+    /// and — for a grouped display — that moving it moves the rest of its group (Issue #39).
+    private var brightnessCaptions: [String] {
+        [model.brightnessCaption(for: display), model.groupSyncCaption(for: display)].compactMap { $0 }
     }
 
     /// XDR Brightness (Labs, Issue #35): a compact sun badge at the end of the brightness row that

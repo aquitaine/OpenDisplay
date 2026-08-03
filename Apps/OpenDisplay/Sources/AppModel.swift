@@ -1990,91 +1990,6 @@ final class AppModel: ObservableObject {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    // MARK: - Display Groups (Issue #39): settings surface
-
-    /// The group a display belongs to, or nil when it is ungrouped.
-    func displayGroup(containing member: DisplayRecordID) -> DisplayGroup? {
-        DisplayGroupStore.group(containing: member, in: settings.displayGroups)
-    }
-
-    /// The "synced with <group>" caption for a display's detail row, or nil when it isn't grouped.
-    func groupSyncCaption(for observation: DisplayObservation) -> String? {
-        displayGroup(containing: observation.recordID).map { "Synced with \($0.name)" }
-    }
-
-    /// A name for a group member that may not be present right now: its live/aliased name when the
-    /// display is here, else the remembered registry name, else the raw record id.
-    func groupMemberName(for member: DisplayRecordID) -> String {
-        if let observation = displays.first(where: { $0.recordID == member }) {
-            return displayName(for: observation)
-        }
-        let record = records[member]
-        return record?.alias ?? record?.fingerprint.modelName ?? member.rawValue
-    }
-
-    /// Creates a group; false when the name is blank or already taken (names are the CLI's handle on
-    /// a group, so they have to stay unambiguous).
-    @discardableResult
-    func createDisplayGroup(named name: String) -> Bool {
-        guard let created = DisplayGroupStore.create(named: name, in: settings.displayGroups)
-        else { return false }
-        settings.displayGroups = created
-        persistSettings()
-        return true
-    }
-
-    func deleteDisplayGroup(_ group: DisplayGroup) {
-        settings.displayGroups = DisplayGroupStore.delete(id: group.id, from: settings.displayGroups)
-        groupSyncStates[group.id] = nil
-        persistSettings()
-    }
-
-    @discardableResult
-    func renameDisplayGroup(_ group: DisplayGroup, to name: String) -> Bool {
-        let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else { return false }
-        let clash = DisplayGroupStore.group(named: cleaned, in: settings.displayGroups)
-        guard clash == nil || clash?.id == group.id else { return false }
-        var renamed = group
-        renamed.name = cleaned
-        updateDisplayGroup(renamed)
-        return true
-    }
-
-    /// Adds or removes a member. Joining resets the group's leader state: the display that led before
-    /// may no longer be in the group, and a stale base level would misread the next nudge as a
-    /// correction against a level nobody is at.
-    func setDisplayGroupMembership(_ member: DisplayRecordID, in group: DisplayGroup, isMember: Bool) {
-        settings.displayGroups = isMember
-            ? DisplayGroupStore.addMember(member, to: group.id, in: settings.displayGroups)
-            : DisplayGroupStore.removeMember(member, from: group.id, in: settings.displayGroups)
-        groupSyncStates.removeAll()
-        persistSettings()
-    }
-
-    func setDisplayGroupOffset(_ offset: Float, for member: DisplayRecordID, in group: DisplayGroup) {
-        var edited = group
-        edited.setOffset(offset, for: member)
-        updateDisplayGroup(edited)
-    }
-
-    func setDisplayGroupSyncBrightness(_ enabled: Bool, for group: DisplayGroup) {
-        var edited = group
-        edited.syncBrightness = enabled
-        updateDisplayGroup(edited)
-    }
-
-    func setDisplayGroupSyncContrast(_ enabled: Bool, for group: DisplayGroup) {
-        var edited = group
-        edited.syncContrast = enabled
-        updateDisplayGroup(edited)
-    }
-
-    private func updateDisplayGroup(_ group: DisplayGroup) {
-        settings.displayGroups = DisplayGroupStore.update(group, in: settings.displayGroups)
-        persistSettings()
-    }
-
     /// Starts or stops the frontmost-app observer — running only while App Presets is on with at least
     /// one preset (mirrors `reconcileAdaptiveLoop`). Idempotent.
     func reconcileAppPresetObserver() {
@@ -2250,6 +2165,91 @@ final class AppModel: ObservableObject {
         }
     }
     #endif
+
+    // MARK: - Display Groups (Issue #39): settings surface
+
+    /// The group a display belongs to, or nil when it is ungrouped.
+    func displayGroup(containing member: DisplayRecordID) -> DisplayGroup? {
+        DisplayGroupStore.group(containing: member, in: settings.displayGroups)
+    }
+
+    /// The "synced with <group>" caption for a display's detail row, or nil when it isn't grouped.
+    func groupSyncCaption(for observation: DisplayObservation) -> String? {
+        displayGroup(containing: observation.recordID).map { "Synced with \($0.name)" }
+    }
+
+    /// A name for a group member that may not be present right now: its live/aliased name when the
+    /// display is here, else the remembered registry name, else the raw record id.
+    func groupMemberName(for member: DisplayRecordID) -> String {
+        if let observation = displays.first(where: { $0.recordID == member }) {
+            return displayName(for: observation)
+        }
+        let record = records[member]
+        return record?.alias ?? record?.fingerprint.modelName ?? member.rawValue
+    }
+
+    /// Creates a group; false when the name is blank or already taken (names are the CLI's handle on
+    /// a group, so they have to stay unambiguous).
+    @discardableResult
+    func createDisplayGroup(named name: String) -> Bool {
+        guard let created = DisplayGroupStore.create(named: name, in: settings.displayGroups)
+        else { return false }
+        settings.displayGroups = created
+        persistSettings()
+        return true
+    }
+
+    func deleteDisplayGroup(_ group: DisplayGroup) {
+        settings.displayGroups = DisplayGroupStore.delete(id: group.id, from: settings.displayGroups)
+        groupSyncStates[group.id] = nil
+        persistSettings()
+    }
+
+    @discardableResult
+    func renameDisplayGroup(_ group: DisplayGroup, to name: String) -> Bool {
+        let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return false }
+        let clash = DisplayGroupStore.group(named: cleaned, in: settings.displayGroups)
+        guard clash == nil || clash?.id == group.id else { return false }
+        var renamed = group
+        renamed.name = cleaned
+        updateDisplayGroup(renamed)
+        return true
+    }
+
+    /// Adds or removes a member. Joining resets the group's leader state: the display that led before
+    /// may no longer be in the group, and a stale base level would misread the next nudge as a
+    /// correction against a level nobody is at.
+    func setDisplayGroupMembership(_ member: DisplayRecordID, in group: DisplayGroup, isMember: Bool) {
+        settings.displayGroups = isMember
+            ? DisplayGroupStore.addMember(member, to: group.id, in: settings.displayGroups)
+            : DisplayGroupStore.removeMember(member, from: group.id, in: settings.displayGroups)
+        groupSyncStates.removeAll()
+        persistSettings()
+    }
+
+    func setDisplayGroupOffset(_ offset: Float, for member: DisplayRecordID, in group: DisplayGroup) {
+        var edited = group
+        edited.setOffset(offset, for: member)
+        updateDisplayGroup(edited)
+    }
+
+    func setDisplayGroupSyncBrightness(_ enabled: Bool, for group: DisplayGroup) {
+        var edited = group
+        edited.syncBrightness = enabled
+        updateDisplayGroup(edited)
+    }
+
+    func setDisplayGroupSyncContrast(_ enabled: Bool, for group: DisplayGroup) {
+        var edited = group
+        edited.syncContrast = enabled
+        updateDisplayGroup(edited)
+    }
+
+    private func updateDisplayGroup(_ group: DisplayGroup) {
+        settings.displayGroups = DisplayGroupStore.update(group, in: settings.displayGroups)
+        persistSettings()
+    }
 
     // MARK: - FaceLight: video-call fill light
 
