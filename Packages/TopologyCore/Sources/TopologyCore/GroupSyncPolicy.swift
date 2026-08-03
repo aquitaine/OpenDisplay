@@ -201,6 +201,23 @@ public enum GroupSyncPolicy {
         }
     }
 
+    /// The displays a higher-precedence writer owns right now, read from the persisted restore
+    /// ledgers: FaceLight and App Presets each key a display in only while they are holding it and
+    /// owe it its prior state back. Group sync sits below both, so every surface that fans a write
+    /// out — the app's funnel and the CLI's `group:<name>` selector alike — builds `World.governed`
+    /// from here and skips them. ::
+    ///
+    ///     governedDisplays(in: settings with faceLight{desk} + appPreset{side})
+    ///     ok: [desk, side] — a group write reaches neither
+    ///
+    ///     governedDisplays(in: settings with both ledgers empty)
+    ///     ok: [] — nothing outranks the group, every present member is written
+    public static func governedDisplays(in settings: OpenDisplaySettings) -> Set<DisplayRecordID> {
+        let owners = Set(settings.faceLightPriorStateByDisplay.keys)
+            .union(settings.appPresetPriorStateByDisplay.keys)
+        return Set(owners.map(DisplayRecordID.init(rawValue:)))
+    }
+
     /// How long after a fan-out a move on another member still reads as a correction rather than a
     /// fresh leader event. Long enough to look at the monitor and drag its slider, short enough that
     /// walking up later and reaching for any display still moves the whole group — which is the

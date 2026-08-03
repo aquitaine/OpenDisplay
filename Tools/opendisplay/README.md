@@ -85,7 +85,8 @@ want exactly one display — those report the group as ambiguous rather than pic
 
 `brightness group:<name> <level>` targets the group itself: `level` becomes the group's base and
 every present member is written at `clamp01(level + offset)` through the same `GroupSyncPolicy` the
-app fans out with. Absent members are listed and skipped.
+app fans out with — including the precedence ladder, so a member FaceLight or an app preset is
+currently holding is skipped rather than overwritten. Absent and skipped members are listed by name.
 
 A display belongs to at most one group — `group add` moves it out of whichever group held it and
 says so. Groups live in the app's `settings.json`, so a group mutation made while OpenDisplay is

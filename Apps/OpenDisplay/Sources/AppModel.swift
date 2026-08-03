@@ -241,6 +241,9 @@ final class AppModel: ObservableObject {
     /// Tags every write OpenDisplay issues itself (a group fan-out, a FaceLight restore) so it never
     /// re-enters `setBrightness` as a leader event — see `GroupSyncPolicy.SyncEcho`.
     private var groupSyncEcho = GroupSyncPolicy.SyncEcho()
+    /// The coalescing timer behind `persistDisplayGroupsSoon` — one pending disk write for a whole
+    /// slider drag, replaced on every tick and flushed on quit.
+    private var groupPersistTask: Task<Void, Never>?
     private var hotKeys: [GlobalHotKey] = []
     private var registry: DisplayRegistry?
     private var sceneLibrary: SceneLibrary?
@@ -377,6 +380,9 @@ final class AppModel: ObservableObject {
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             CoreGraphicsProvider.restoreGamma()
             MainActor.assumeIsolated {
+                // A group offset learned or dragged in the last second is still only in memory —
+                // write it before the process goes away (see `persistDisplayGroupsSoon`).
+                self?.flushPendingGroupPersist()
                 self?.sleepGuard.releaseAll()
                 self?.xdrRampTask?.cancel()
                 self?.xdrTrigger.disengage()  // process-bound anyway; one line for tidiness
@@ -1081,7 +1087,7 @@ final class AppModel: ObservableObject {
         case .echo, .governed, .syncDisabled:
             return
         case .followerCorrection:
-            persistDisplayGroup(result.group)
+            storeDisplayGroupOffsets(result.group)
         case .leader(let fanOut):
             applyFollowerBrightness(fanOut, leader: leader)
         }
@@ -1154,7 +1160,9 @@ final class AppModel: ObservableObject {
     /// higher-precedence writer owns (FaceLight, an app preset), and which have a contrast channel.
     private func groupSyncWorld() -> GroupSyncPolicy.World {
         let present = displays.filter(\.isActive).map(\.recordID)
-        var governed = Set(settings.faceLightPriorStateByDisplay.keys.map(DisplayRecordID.init(rawValue:)))
+        // The persisted FaceLight/app-preset ledgers (shared with the CLI's fan-out), plus the app's
+        // own live preset set — which is ahead of the ledger for a preset applied this instant.
+        var governed = GroupSyncPolicy.governedDisplays(in: settings)
         #if !PUBLIC_API_ONLY
         governed.formUnion(appPresetActiveDisplays)
         #endif
@@ -1175,11 +1183,39 @@ final class AppModel: ObservableObject {
     }
 
     /// Stores one group's re-learned offsets back into settings (the offsets persist; the leader
-    /// state that produced them is session-only).
-    private func persistDisplayGroup(_ group: DisplayGroup) {
+    /// state that produced them is session-only). In memory immediately — the next fan-out reads the
+    /// new offset — with the disk write coalesced, since a correction arrives once per slider tick.
+    private func storeDisplayGroupOffsets(_ group: DisplayGroup) {
         settings.displayGroups = DisplayGroupStore.update(group, in: settings.displayGroups)
+        persistDisplayGroupsSoon()
+    }
+
+    /// Coalesces the settings write behind a learned or hand-set group offset. Offsets change at
+    /// slider-tick rate, and `persistSettings` is a synchronous whole-file JSON encode on the main
+    /// actor — one per tick is disk spam mid-drag, the same reason the adaptive learned offsets
+    /// persist at tick-time rather than per slider move. The in-memory value is authoritative the
+    /// instant it is set; the disk catches up `groupPersistDelay` after the hand stops (or at quit,
+    /// via the `willTerminate` flush).
+    private func persistDisplayGroupsSoon() {
+        groupPersistTask?.cancel()
+        groupPersistTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.groupPersistDelay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.flushPendingGroupPersist()
+        }
+    }
+
+    /// Writes a pending coalesced group-offset change out now. Idempotent: with nothing pending it
+    /// just re-saves the settings we already hold.
+    private func flushPendingGroupPersist() {
+        groupPersistTask?.cancel()
+        groupPersistTask = nil
         persistSettings()
     }
+
+    /// How long the coalescing timer waits. Comfortably longer than the gap between two slider ticks
+    /// and short enough that a change is on disk before anyone reaches for the power button.
+    private static let groupPersistDelay: TimeInterval = 1.5
 
     #if !PUBLIC_API_ONLY
     /// Returns (and caches) the DDC controller for an external display, building it OFF the main actor
@@ -2280,10 +2316,13 @@ final class AppModel: ObservableObject {
         persistSettings()
     }
 
+    /// The settings ± slider. Dragging it is dozens of ticks, so the offset lands in memory per tick
+    /// and the disk write is coalesced — same rule as an offset the group learns from a correction
+    /// (see `storeDisplayGroupOffsets`).
     func setDisplayGroupOffset(_ offset: Float, for member: DisplayRecordID, in group: DisplayGroup) {
         var edited = group
         edited.setOffset(offset, for: member)
-        updateDisplayGroup(edited)
+        storeDisplayGroupOffsets(edited)
     }
 
     func setDisplayGroupSyncBrightness(_ enabled: Bool, for group: DisplayGroup) {

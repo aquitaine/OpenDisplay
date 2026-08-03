@@ -165,6 +165,45 @@ final class GroupSyncPolicyTests: XCTestCase {
         XCTAssertEqual(result.outcome, .syncDisabled)
     }
 
+    // MARK: - Reading `governed` out of the persisted ledgers
+
+    private func settings(faceLight: [DisplayRecordID] = [],
+                          appPreset: [DisplayRecordID] = []) -> OpenDisplaySettings {
+        var stored = OpenDisplaySettings()
+        for held in faceLight {
+            stored.faceLightPriorStateByDisplay[held.rawValue] = FaceLightPolicy.PriorState(brightness: 0.4)
+        }
+        for held in appPreset {
+            stored.appPresetPriorStateByDisplay[held.rawValue] = AppPresetPolicy.PriorState(brightness: 0.4)
+        }
+        return stored
+    }
+
+    func testNothingIsGovernedWhenBothRestoreLedgersAreEmpty() {
+        XCTAssertTrue(Policy.governedDisplays(in: settings()).isEmpty)
+    }
+
+    func testBothRestoreLedgersContributeTheDisplaysTheyAreHolding() {
+        let governed = Policy.governedDisplays(in: settings(faceLight: [desk], appPreset: [side]))
+        XCTAssertEqual(governed, [desk, side])
+    }
+
+    func testADisplayHeldByBothLedgersIsCountedOnce() {
+        let governed = Policy.governedDisplays(in: settings(faceLight: [desk], appPreset: [desk]))
+        XCTAssertEqual(governed, [desk])
+    }
+
+    /// The CLI's `group:<name>` fan-out builds its world this way, so the same skip the app applies
+    /// has to fall out of the ledgers alone — no live app state involved.
+    func testAGroupWriteBuiltFromTheLedgersSkipsTheHeldDisplay() {
+        let governed = Policy.governedDisplays(in: settings(faceLight: [side]))
+        let fannedOut = Policy.groupWrites(0.6, group: group(),
+                                           world: Policy.World(present: [builtIn, desk, side],
+                                                               governed: governed))
+        assertWrites(fannedOut, [builtIn: 0.6, desk: 0.6])
+        XCTAssertEqual(fannedOut.governed, [side])
+    }
+
     // MARK: - Echo suppression
 
     func testAWriteTaggedWithALiveTokenIsIgnoredAsALeader() {

@@ -579,19 +579,31 @@ func applyBrightness(_ level: Float, to target: ResolvedDisplay) async -> String
 /// `opendisplay brightness group:<name> <0..1>` — the group itself is the target, so `level` is the
 /// group's new base level and every present member takes it with its own learned offset, decided by
 /// the same `GroupSyncPolicy` the app fans out through.
+///
+/// That includes the precedence ladder: group sync sits below FaceLight and App Presets, and both
+/// record the displays they are holding in the settings file this process just read. Fanning out
+/// without that set would have the CLI overwrite a fill light the app is mid-way through owing a
+/// restore for — the one case where "same policy" has to mean the same world, not just the same
+/// arithmetic. Re-read at write time, since the app owns the file and may have toggled FaceLight
+/// since launch.
 func runGroupBrightness(_ group: DisplayGroup, in pairs: [ResolvedDisplay]) async {
     guard let raw = valueArg, let level = Float(raw), (0...1).contains(level) else {
         fail("usage: opendisplay brightness group:\(group.name) <0..1>")
     }
     let present = pairs.filter { $0.observation.isActive }.map(\.observation.recordID)
-    let world = GroupSyncPolicy.World(present: Set(present))
+    let governed = GroupSyncPolicy.governedDisplays(in: settingsStore?.load() ?? OpenDisplaySettings())
+    let world = GroupSyncPolicy.World(present: Set(present), governed: governed)
     let fanOut = GroupSyncPolicy.groupWrites(level, group: group, world: world)
-    guard !fanOut.isEmpty else { fail("no present displays in group '\(group.name)'") }
+    // Skips first, so a group where every member was skipped explains itself before the failure.
+    for member in fanOut.absent { print("  · skipped (absent): \(await memberLabel(member, in: pairs))") }
+    for member in fanOut.governed {
+        print("  · skipped (FaceLight or an app preset owns it): \(await memberLabel(member, in: pairs))")
+    }
+    guard !fanOut.isEmpty else { fail("no writable displays in group '\(group.name)'") }
     for write in fanOut.writes {
         guard let target = pairs.first(where: { $0.observation.recordID == write.member }) else { continue }
         print(await applyBrightness(write.value, to: target))
     }
-    for member in fanOut.absent { print("  · skipped (absent): \(member.rawValue)") }
 }
 
 /// Get or set a display's brightness (0..1). Built-in via DisplayServices, external via DDC.
