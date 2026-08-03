@@ -68,3 +68,22 @@ from the same `CGDisplayRegisterReconfigurationCallback` source the app itself w
 
 Out of scope for this pass: volume/mute OSD events (the `OSDBroadcast` channel carries them, but
 `listen` only forwards `brightness` today — a natural follow-up `event` kind, not a schema change).
+
+## Protected layout (Issue #38)
+
+```
+opendisplay layout protect      # keep the arrangement this display set has right now
+opendisplay layout unprotect    # forget this display set's protected arrangement
+opendisplay layout status [--json]
+```
+
+Protection is keyed by the **display set** on the desk — the sorted record ids of the displays
+present — so "laptop alone" and "laptop + Desk" each keep their own protected arrangement instead
+of overwriting one another. `protect` captures origins, mode, rotation, mirror state, main, and
+active state; re-protecting the same set replaces its entry.
+
+The writes route through `CommandGateway`, so they land in the audit trail like every other
+mutating command, and they share `settings.json` with the app — the CLI and the Arrange tab are
+looking at the same layouts. Automatic restore itself is the app's job: `status` prints whether
+the master toggle (Settings → Arrange → "Put my arrangement back when it changes") is on, one line
+per stored layout, and the last automatic restore with its outcome.

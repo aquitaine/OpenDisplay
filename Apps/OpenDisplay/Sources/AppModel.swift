@@ -288,6 +288,17 @@ final class AppModel: ObservableObject {
     /// Remembered pre-mute DDC volume per display, so a mute toggle can restore the prior level.
     private var preMuteVolume: [DisplayRecordID: Float] = [:]
 
+    /// Protected Layout (Batch-4 #A): the pure policy's threaded state — which generation the
+    /// suppression/debounce/retry counters belong to. Session-only; a relaunch starts clean.
+    private var layoutProtectionState = LayoutProtectionPolicy.State()
+    /// One-shot re-evaluation armed by the policy's `recheckAfter` — the stability debounce. A
+    /// `RecheckTimer` rather than a bare `Task` because the work it fires begins by cancelling the
+    /// pending re-check: the timer keeps waiting and working in separate tasks so a debounce-driven
+    /// restore can never be running inside the task it just cancelled.
+    private let layoutProtectionRecheck = RecheckTimer()
+    /// Wake observer token, held while layout protection is on (a wake is one of the three triggers).
+    private var layoutProtectionWakeObserver: NSObjectProtocol?
+
     init() {
         let observer = CoreGraphicsProvider()
         self.observer = observer
@@ -336,6 +347,7 @@ final class AppModel: ObservableObject {
             reconcileAppPresetObserver()  // observe the frontmost app if App Presets is enabled
             #endif
             autoDisconnectPolicy.seed(externalPresent: hasExternalDisplay)  // don't treat a pre-attached external as an arrival
+            reconcileLayoutProtectionObserver()  // Batch-4 #A: arm the wake trigger + check the launch arrangement
             await autoCheckForUpdatesIfDue()
             await writeBaselineCheckpoint()
             if let marker = Self.readRotationMarker() {
@@ -371,6 +383,7 @@ final class AppModel: ObservableObject {
                 self?.xdrTrigger.disengage()  // process-bound anyway; one line for tidiness
                 self?.mediaKeyTapRetry?.cancel()
                 self?.mediaKeyTap?.stop()
+                self?.layoutProtectionRecheck.cancel()
                 #if !PUBLIC_API_ONLY
                 self?.adaptiveLoop?.cancel()
                 self?.stopAppPresetObserver()
@@ -558,6 +571,7 @@ final class AppModel: ObservableObject {
         guard let cgID = observation.cgDisplayID else { return }
         _ = observer.applyArrangement([.init(displayID: cgID, origin: origin, mode: nil)])
         await refresh()
+        await noteLayoutSelfChange()
     }
 
     /// Mirrors a display onto the main display (both show the same content) or stops mirroring.
@@ -567,6 +581,7 @@ final class AppModel: ObservableObject {
         // Reversible and never unreadable, so (like set-main) it applies directly without the revert gate.
         _ = await observer.setMirroring(of: cgID, enabled: on)
         await refresh()
+        await noteLayoutSelfChange()
     }
 
     /// Sets a display's software dim, 1 (none) down toward 0, expressed through the configured
@@ -785,6 +800,7 @@ final class AppModel: ObservableObject {
         }
         _ = observer.applyArrangement(targets)
         await refresh()
+        await noteLayoutSelfChange()
         sceneWarning = rotationSkipped
             ? "Applied. Rotation in this scene was skipped — not supported on this macOS version."
             : nil
@@ -1348,6 +1364,11 @@ final class AppModel: ObservableObject {
         }
         Self.clearRotationMarker()
         await refresh()
+        // Rotation is part of the topology signature, so this raised a generation like any other
+        // arrangement write. Without the note, Protected Layout would fight the rotation the user
+        // just asked for — and lose badly, since `applyScene` skips rotation writes: it would
+        // re-apply the pre-rotation origins twice and then report that it couldn't restore.
+        await noteLayoutSelfChange()
     }
 
     /// Pending-rotation marker: records which display was being rotated and the angle it was at before,
@@ -2209,6 +2230,7 @@ final class AppModel: ObservableObject {
         }
         _ = observer.applyArrangement(targets)
         await refresh()
+        await noteLayoutSelfChange()
     }
 
     // MARK: - Timed auto-revert safety gate (Issue 6)
@@ -2227,6 +2249,7 @@ final class AppModel: ObservableObject {
         let before = await observer.currentSnapshot().observations
         await apply()
         await refresh()
+        await noteLayoutSelfChange()
         beginRevertWindow(before: before, message: message)
     }
 
@@ -2298,6 +2321,7 @@ final class AppModel: ObservableObject {
             _ = await observer.setMirroring(of: cgID, enabled: obs.isMirrored)
         }
         await refresh()
+        await noteLayoutSelfChange()
     }
 
     /// Pending-revert marker (mirrors the rotation marker): the prior arrangement, persisted so a
@@ -2383,6 +2407,7 @@ final class AppModel: ObservableObject {
             #endif
             let autoDisconnected = await applyAutoDisconnectBuiltInIfNeeded()  // external arrived → built-in off
             postDisplayNotifications(prior: prior, builtInAutoDisconnected: autoDisconnected)  // Batch-2 #5
+            await evaluateLayoutProtection(trigger: .topologyChange)  // Batch-4 #A: put a drifted layout back
         }
     }
 
@@ -2562,6 +2587,220 @@ final class AppModel: ObservableObject {
         defer { busy = false }
         _ = await coordinator.reconnectAll()
         await refresh()
+    }
+
+    // MARK: - Protected Layout (Batch-4 #A)
+
+    /// The display-set key the current topology protects under (`LayoutProtectionPolicy`).
+    /// Published so the Arrange tab's status line follows a hotplug without a reopen.
+    @Published private(set) var currentLayoutFingerprint = ""
+    /// The protected layout for the display set that is on the desk right now, or nil when this set
+    /// isn't protected. Drives the Arrange tab's status line and its Update/Remove buttons.
+    var protectedLayoutForCurrentSet: ProtectedConfig? {
+        settings.protectedLayouts[currentLayoutFingerprint]
+    }
+
+    /// Marks the live arrangement as the one to keep for this display set. Re-protecting overwrites,
+    /// so the same button serves as "Update".
+    func protectCurrentLayout() async {
+        let snapshot = await observer.currentSnapshot()
+        let captured = LayoutProtectionPolicy.capture(snapshot, at: Date())
+        settings.protectedLayouts[captured.fingerprint] = captured.config
+        persistSettings()
+        currentLayoutFingerprint = captured.fingerprint
+        // The freshly captured arrangement IS the protected one, so nothing is owed a restore —
+        // clear the retry budget a previous failure may have spent.
+        layoutProtectionState = LayoutProtectionPolicy.State()
+    }
+
+    /// Forgets one stored layout (the current set's, or another set's from the list).
+    func removeProtectedLayout(fingerprint: String) {
+        guard settings.protectedLayouts.removeValue(forKey: fingerprint) != nil else { return }
+        persistSettings()
+    }
+
+    /// Master toggle for Protected Layout. Turning it on arms the wake observer and checks the
+    /// current arrangement straight away; turning it off drops both.
+    func setLayoutProtectionEnabled(_ enabled: Bool) {
+        guard settings.layoutProtectionEnabled != enabled else { return }
+        settings.layoutProtectionEnabled = enabled
+        persistSettings()
+        reconcileLayoutProtectionObserver()
+    }
+
+    /// Starts or stops the wake observer to match the toggle (mirrors `reconcileAppPresetObserver`).
+    /// Idempotent, so it is safe on every settings change.
+    func reconcileLayoutProtectionObserver() {
+        guard settings.layoutProtectionEnabled else {
+            if let observer = layoutProtectionWakeObserver {
+                NSWorkspace.shared.notificationCenter.removeObserver(observer)
+                layoutProtectionWakeObserver = nil
+            }
+            layoutProtectionRecheck.cancel()
+            return
+        }
+        if layoutProtectionWakeObserver == nil {
+            layoutProtectionWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    Task { await self.evaluateLayoutProtection(trigger: .wake) }
+                }
+            }
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.evaluateLayoutProtection(trigger: .launch)
+        }
+    }
+
+    /// One protection check: measure the live arrangement against this display set's protected one
+    /// and put it back when it has drifted. Driven by every topology event, by wake, and once at
+    /// launch. All the deciding — which drifts matter, the managed-offline rule, suppression,
+    /// debounce, retry cap — is the pure `LayoutProtectionPolicy`; this only reads the world and
+    /// performs the writes.
+    func evaluateLayoutProtection(trigger: LayoutProtectionPolicy.Trigger) async {
+        layoutProtectionRecheck.cancel()
+        let snapshot = await observer.currentSnapshot()
+        let fingerprint = LayoutProtectionPolicy.fingerprint(for: snapshot)
+        // Republish only on a real change: this runs on every topology event, and reassigning a
+        // @Published value re-evaluates every observing view.
+        if currentLayoutFingerprint != fingerprint { currentLayoutFingerprint = fingerprint }
+        guard settings.layoutProtectionEnabled else { return }
+        let protected = settings.protectedLayouts[currentLayoutFingerprint]
+        let evaluation = LayoutProtectionPolicy.decide(
+            current: snapshot, protected: protected, trigger: trigger,
+            context: layoutProtectionContext(), state: layoutProtectionState)
+        layoutProtectionState = evaluation.state
+        if evaluation.shouldNotifyFailure,
+           let note = LayoutProtectionPolicy.failureNotification(
+            enabled: settings.displayNotificationsEnabled) {
+            NotificationDelivery.post(note)
+        }
+        if let delay = evaluation.recheckAfter {
+            layoutProtectionRecheck.arm(after: delay) { [weak self] in
+                await self?.evaluateLayoutProtection(trigger: trigger)
+            }
+            return
+        }
+        guard case .restore(let analysis) = evaluation.decision, let protected else { return }
+        layoutProtectionState = LayoutProtectionPolicy.noteRestoreAttempt(state: layoutProtectionState)
+        await restoreProtectedLayout(protected, analysis: analysis, before: snapshot.generation)
+    }
+
+    /// Marks whatever the app just wrote as OpenDisplay's own doing, so Protected Layout never
+    /// undoes a change the user asked *this app* for. The CG generation is recomputed on read and
+    /// covers origin/mode/rotation/mirror/main, so the fresh snapshot already carries the generation
+    /// our write raised — no waiting needed.
+    private func noteLayoutSelfChange() async {
+        guard settings.layoutProtectionEnabled else { return }
+        let snapshot = await observer.currentSnapshot()
+        layoutProtectionState = LayoutProtectionPolicy.noteSelfChange(
+            generation: snapshot.generation, state: layoutProtectionState)
+    }
+
+    /// The observed world the policy reasons over.
+    private func layoutProtectionContext() -> LayoutProtectionPolicy.Context {
+        LayoutProtectionPolicy.Context(
+            now: Date(),
+            isEnabled: settings.layoutProtectionEnabled,
+            asleepDisplayIDs: sleepingDisplayIDs(),
+            managedOfflineIDs: Set(managedOffline.map(\.recordID)))
+    }
+
+    /// Displays macOS reports as asleep right now. The observer already folds sleep into `isActive`
+    /// (`DisplayActivity.isActiveSurface`); passing the set explicitly keeps the policy correct even
+    /// for a snapshot that came from somewhere else, and makes the 0.8.2 rule impossible to lose.
+    private func sleepingDisplayIDs() -> Set<DisplayRecordID> {
+        Set(displays.filter { observation in
+            observation.cgDisplayID.map { CGDisplayIsAsleep($0) != 0 } ?? false
+        }.map(\.recordID))
+    }
+
+    /// Puts the protected arrangement back: geometry through the existing `applyScene` path, on/off
+    /// differences through the same lifecycle calls the menu uses, and mirror state alongside (the
+    /// scene model has no mirror field). Audits the attempt and its outcome, suppresses the
+    /// generation our own writes raise, and tells the user what moved.
+    private func restoreProtectedLayout(_ config: ProtectedConfig,
+                                        analysis: DisplayConfigDrifter.DriftAnalysis,
+                                        before generation: TopologyGeneration) async {
+        await appendLayoutProtectionAudit(status: "attempted", analysis: analysis)
+        await restoreProtectedActiveState(config, analysis: analysis)
+        await applyScene(LayoutProtectionPolicy.restoreScene(for: config))
+        await restoreProtectedMirroring(config, analysis: analysis)
+
+        let settled = await observer.awaitStableGeneration(after: generation)
+        // Suppress the generation our writes raised — or, when they raised none, clear the
+        // suppression `applyScene` optimistically took, so a restore that didn't land can be retried
+        // instead of silencing the drift it failed to fix.
+        layoutProtectionState = LayoutProtectionPolicy.noteRestoreOutcome(
+            before: generation, after: settled.generation, state: layoutProtectionState)
+        let residual = LayoutProtectionPolicy.actionableDrift(
+            protected: config.snapshot, current: settled, context: layoutProtectionContext())
+        let restored = !(residual?.hasDrifted ?? false)
+        await appendLayoutProtectionAudit(status: restored ? "committed" : "partial", analysis: analysis)
+        guard restored, let note = LayoutProtectionPolicy.restoreNotification(
+            for: analysis, names: layoutProtectionDisplayNames(), enabled: settings.displayNotificationsEnabled)
+        else { return }
+        NotificationDelivery.post(note)
+    }
+
+    /// Restores the on/off differences the policy asked for through the paths the menu already uses —
+    /// `reconnectOffline` to bring one back, the gated coordinator disconnect to put one away — so
+    /// the safety net, the ledger, and the audit trail behave exactly as they always do. Displays the
+    /// user deliberately turned off never reach here: the policy filtered them out.
+    private func restoreProtectedActiveState(_ config: ProtectedConfig,
+                                             analysis: DisplayConfigDrifter.DriftAnalysis) async {
+        for change in analysis.changes {
+            guard case .activeChanged(let id) = change,
+                  let wanted = config.snapshot.observation(for: id)?.isActive else { continue }
+            if wanted, let offline = managedOffline.first(where: { $0.recordID == id }) {
+                await reconnectOffline(offline)
+            } else if !wanted, let live = displays.first(where: { $0.recordID == id && $0.isActive }) {
+                await setDisplayActive(false, for: live)
+            }
+        }
+    }
+
+    /// Re-applies the protected mirror relationships. `DesiredState` carries no mirror field, so this
+    /// rides alongside the scene apply exactly as the arrangement-revert path does.
+    ///
+    /// Driven strictly by the changes the policy marked actionable, never by a fresh comparison
+    /// against the stored snapshot: a display the user turned off is mirrored onto main by the
+    /// public lifecycle provider, so comparing mirror state directly would un-mirror — turn back
+    /// on — exactly the display that must stay off. The policy filters those out; reading its
+    /// answer is what keeps that guarantee from being quietly re-derived here.
+    private func restoreProtectedMirroring(_ config: ProtectedConfig,
+                                           analysis: DisplayConfigDrifter.DriftAnalysis) async {
+        var changed = false
+        for change in analysis.changes {
+            guard case .mirrorChanged(let id) = change,
+                  let wanted = config.snapshot.observation(for: id),
+                  let live = displays.first(where: { $0.recordID == id }),
+                  let cgID = live.cgDisplayID,
+                  live.isMirrored != wanted.isMirrored else { continue }
+            _ = await observer.setMirroring(of: cgID, enabled: wanted.isMirrored)
+            changed = true
+        }
+        if changed { await refresh() }
+    }
+
+    /// Display names for the restore notification, covering displays that have since left.
+    private func layoutProtectionDisplayNames() -> [DisplayRecordID: String] {
+        Dictionary(displays.map { ($0.recordID, displayName(for: $0)) },
+                   uniquingKeysWith: { _, latest in latest })
+    }
+
+    /// Records a protected-layout restore in the shared audit trail. `command: "layoutProtection"`
+    /// with the `system` actor — the app acted on its own, on the user's standing instruction.
+    private func appendLayoutProtectionAudit(status: String,
+                                             analysis: DisplayConfigDrifter.DriftAnalysis) async {
+        guard let directory = try? DiskAuditLog.defaultDirectory() else { return }
+        await DiskAuditLog(directory: directory).append(AuditEntry(
+            timestamp: Date(), actor: .system, command: "layoutProtection",
+            transactionId: "txn_layoutProtection", status: status,
+            targets: analysis.changes.compactMap(\.displayID).map(\.rawValue)))
     }
 
     // MARK: - Quit-time revert

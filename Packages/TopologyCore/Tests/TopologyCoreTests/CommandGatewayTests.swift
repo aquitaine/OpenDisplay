@@ -102,6 +102,57 @@ final class CommandGatewayTests: XCTestCase {
         XCTAssertEqual(entries.first?.status, "noOp")
     }
 
+    func testLayoutProtectCapturesTheCurrentSetAndIsAudited() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("od-layout-gateway-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SettingsStore(directory: directory)
+        let system = SimulatedDisplaySystem(
+            observations: [obs("builtin", main: true, klass: .builtIn), obs("ext")])
+        let audit = InMemoryAuditLog()
+        let gateway = CommandGateway(observer: system, lifecycleProvider: system,
+                                     checkpoints: InMemoryCheckpointStore(), auditLog: audit)
+
+        let envelope = await gateway.applyLayoutProtection(.protect, store: store, actor: .cli)
+        XCTAssertEqual(envelope.status, .committed)
+        XCTAssertEqual(envelope.targets.map(\.displayId), ["builtin", "ext"])
+
+        let snapshot = await system.currentSnapshot()
+        XCTAssertNotNil(LayoutProtectionPolicy.protectedLayout(
+            for: snapshot, in: store.load().protectedLayouts))
+        let entries = await audit.all
+        XCTAssertEqual(entries.map(\.command), ["layoutProtect"])
+        XCTAssertEqual(entries.first?.status, "committed")
+    }
+
+    func testLayoutUnprotectRemovesOnlyTheCurrentSetAndNoOpsWhenUnprotected() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("od-layout-gateway-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SettingsStore(directory: directory)
+        // Another display set's protection is already stored; unprotecting here must leave it alone.
+        var seeded = OpenDisplaySettings.default
+        let otherSet = TopologySnapshot(generation: .initial, observations: [obs("laptop-alone")])
+        let otherProtection = LayoutProtectionPolicy.capture(otherSet, at: Date())
+        seeded.protectedLayouts = [otherProtection.fingerprint: otherProtection.config]
+        try store.save(seeded)
+
+        let system = SimulatedDisplaySystem(
+            observations: [obs("builtin", main: true, klass: .builtIn), obs("ext")])
+        let gateway = CommandGateway(observer: system, lifecycleProvider: system,
+                                     checkpoints: InMemoryCheckpointStore())
+        let nothingToRemove = await gateway.applyLayoutProtection(.unprotect, store: store)
+        XCTAssertEqual(nothingToRemove.status, .noOp)
+
+        _ = await gateway.applyLayoutProtection(.protect, store: store)
+        XCTAssertEqual(store.load().protectedLayouts.count, 2)
+        let removed = await gateway.applyLayoutProtection(.unprotect, store: store)
+        XCTAssertEqual(removed.status, .committed)
+        XCTAssertEqual(store.load().protectedLayouts, [otherProtection.fingerprint: otherProtection.config])
+    }
+
     func testEnvelopeMappingCoversEveryResult() {
         let target = DisplayRecordID(rawValue: "d")
         let tx = TransactionID(rawValue: "txn_1")

@@ -110,6 +110,50 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(store.load().xdrBrightnessEnabled)
     }
 
+    func testLayoutProtectionDefaultsOffAndRoundTrips() throws {
+        let defaults = OpenDisplaySettings.default
+        XCTAssertFalse(defaults.layoutProtectionEnabled)
+        XCTAssertTrue(defaults.protectedLayouts.isEmpty)
+        let store = SettingsStore(directory: directory)
+        let snapshot = TopologySnapshot(
+            generation: .init(4),
+            observations: [DisplayObservation(recordID: .init(rawValue: "cgid:1"), isActive: true,
+                                              origin: .init(x: 1920, y: 0), isMain: true,
+                                              displayClass: .external, generation: .init(4))])
+        let captured = LayoutProtectionPolicy.capture(snapshot, at: Date(timeIntervalSince1970: 1000))
+        let settings = OpenDisplaySettings(
+            layoutProtectionEnabled: true,
+            protectedLayouts: [captured.fingerprint: captured.config])
+        try store.save(settings)
+        let loaded = store.load()
+        XCTAssertTrue(loaded.layoutProtectionEnabled)
+        XCTAssertEqual(loaded.protectedLayouts[captured.fingerprint], captured.config)
+        XCTAssertEqual(loaded.protectedLayouts[captured.fingerprint]?.snapshot.observations.first?.origin,
+                       DisplayOrigin(x: 1920, y: 0))
+    }
+
+    func testLayoutProtectionFieldsDefaultWhenAbsentFromAnOlderFile() throws {
+        // A settings file written before Protected Layout existed must load unchanged, with the new
+        // keys defaulting off/empty rather than throwing the whole file away.
+        let json = #"""
+        {"persistencePolicy":"reconnectOnWake","confirmationCountdownSeconds":7,
+         "displayNotificationsEnabled":true,
+         "adaptiveBrightnessOffsetByDisplay":{"cgid:3":0.25}}
+        """#
+        try Data(json.utf8).write(to: directory.appendingPathComponent("settings.json"))
+        let store = SettingsStore(directory: directory)
+        let loaded = store.load()
+        XCTAssertFalse(loaded.layoutProtectionEnabled)
+        XCTAssertTrue(loaded.protectedLayouts.isEmpty)
+        XCTAssertEqual(loaded.persistencePolicy, .reconnectOnWake)
+        XCTAssertEqual(loaded.confirmationCountdownSeconds, 7)
+        XCTAssertTrue(loaded.displayNotificationsEnabled)
+        XCTAssertEqual(loaded.adaptiveBrightnessOffsetByDisplay["cgid:3"], 0.25)
+        // …and the old settings survive the round-trip the new keys now take part in.
+        try store.save(loaded)
+        XCTAssertEqual(store.load(), loaded)
+    }
+
     func testAdaptiveFieldsDefaultOffAndRoundTrip() throws {
         // Both behaviors default OFF (opt-in Labs feature); tunables have sane defaults.
         let defaults = OpenDisplaySettings.default
