@@ -116,6 +116,21 @@ final class GroupSyncPolicyTests: XCTestCase {
         XCTAssertEqual(result.state.lastFanOutAt, epoch)
     }
 
+    // MARK: - Targeting the group itself (the `group:<name>` selector)
+
+    func testTargetingTheGroupWritesEveryMemberIncludingTheOneALeaderWouldHaveBeen() {
+        let fannedOut = Policy.groupWrites(0.5, group: group(offsets: [desk: 0.2]), world: world())
+        assertWrites(fannedOut, [builtIn: 0.5, desk: 0.7, side: 0.5])
+    }
+
+    func testTargetingTheGroupStillSkipsAbsentAndGovernedMembers() {
+        let fannedOut = Policy.groupWrites(0.5, group: group(),
+                                           world: world(present: [builtIn, desk], governed: [desk]))
+        assertWrites(fannedOut, [builtIn: 0.5])
+        XCTAssertEqual(fannedOut.absent, [side])
+        XCTAssertEqual(fannedOut.governed, [desk])
+    }
+
     // MARK: - Absent + governed members
 
     func testAnAbsentMemberIsSkippedAndReportedRatherThanWritten() {

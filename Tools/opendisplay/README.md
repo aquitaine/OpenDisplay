@@ -68,3 +68,26 @@ from the same `CGDisplayRegisterReconfigurationCallback` source the app itself w
 
 Out of scope for this pass: volume/mute OSD events (the `OSDBroadcast` channel carries them, but
 `listen` only forwards `brightness` today — a natural follow-up `event` kind, not a schema change).
+
+## Display groups (Issue #39)
+
+```
+opendisplay group list [--json]
+opendisplay group create <name>
+opendisplay group delete <name>
+opendisplay group add|remove <name> <selector>
+opendisplay brightness group:<name> <0..1>
+```
+
+A group is a user-defined set of displays whose brightness moves together, each member at its own
+learned offset. `group:<name>` is a selector like `alias:`/`tag:`, so it also reaches the verbs that
+want exactly one display — those report the group as ambiguous rather than picking a member.
+
+`brightness group:<name> <level>` targets the group itself: `level` becomes the group's base and
+every present member is written at `clamp01(level + offset)` through the same `GroupSyncPolicy` the
+app fans out with. Absent members are listed and skipped.
+
+A display belongs to at most one group — `group add` moves it out of whichever group held it and
+says so. Groups live in the app's `settings.json`, so a group mutation made while OpenDisplay is
+running is overwritten the next time the app saves its settings: quit the app first, or make the
+change in Settings → Displays → Groups.

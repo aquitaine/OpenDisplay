@@ -83,6 +83,25 @@ public actor CommandGateway {
         return envelope
     }
 
+    /// Records a Display Groups mutation (`group create|delete|add|remove`) and returns its envelope.
+    /// Groups are settings rather than a staged lifecycle transaction — there is no checkpoint or
+    /// hardware verification to run — but every command surface still reports through the gateway, so
+    /// the audit trail stays complete and the CLI keeps one result shape for all of its verbs.
+    public func recordGroupChange(_ command: String, actor: Actor = .cli, targets: [String],
+                                  committed: Bool = true) async -> ResultEnvelope {
+        let snapshot = await observer.currentSnapshot()
+        let envelope = ResultEnvelope(
+            transactionId: "txn_\(command)", status: committed ? .committed : .noOp, actor: actor,
+            requestedAt: Date(), topologyGeneration: snapshot.generation.value,
+            targets: targets.map {
+                ResultEnvelope.TargetResult(
+                    displayId: $0, alias: nil, identityConfidence: 1.0,
+                    operations: [.init(field: command, verification: .notApplicable)])
+            })
+        await record(envelope, command: command)
+        return envelope
+    }
+
     private func record(_ envelope: ResultEnvelope, command: String) async {
         await auditLog?.append(AuditEntry(
             timestamp: envelope.requestedAt, actor: envelope.actor, command: command,

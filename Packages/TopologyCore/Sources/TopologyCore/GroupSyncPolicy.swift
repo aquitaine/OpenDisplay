@@ -213,6 +213,14 @@ public enum GroupSyncPolicy {
     /// follower, the leader excluded, absent and governed members reported rather than written.
     public static func followerWrites(leader: DisplayRecordID, value: Float,
                                       group: DisplayGroup, world: World) -> FanOut {
+        groupWrites(value, group: group, world: world, excluding: leader)
+    }
+
+    /// Every member's write when the GROUP ITSELF is the target — the `group:<name>` CLI selector,
+    /// where no display was touched and `value` is simply the group's new base level. Same offset,
+    /// clamp, and skip rules as a leader fan-out; nothing is excluded unless the caller names it.
+    public static func groupWrites(_ value: Float, group: DisplayGroup, world: World,
+                                   excluding leader: DisplayRecordID? = nil) -> FanOut {
         var fanOut = FanOut()
         for member in group.memberRecordIDs where member != leader {
             guard world.present.contains(member) else { fanOut.absent.append(member); continue }
