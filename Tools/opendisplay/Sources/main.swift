@@ -128,16 +128,20 @@ func resolveCurrentDisplays() async -> [ResolvedDisplay] {
     return pairs
 }
 
+/// The registry record behind a display that isn't being observed right now. An observation id is
+/// `cg:<uuid>` while the registry mints its own ids and indexes them by that UUID, so a display the
+/// OS no longer reports at all — turned off, or merely unplugged — is only reachable through the
+/// UUID index.
+func registryRecord(for recordID: DisplayRecordID) async -> DisplayRecord? {
+    guard let cgUUID = recordID.cgUUID else { return await registry.record(for: recordID) }
+    return await registry.record(forCGUUID: cgUUID)
+}
+
 /// The registry record for a turned-off display, so it keeps its alias and tags while offline.
-/// An observation id is `cg:<uuid>`, and the registry indexes minted records by that UUID — but a
-/// lookup miss must NOT hide the display: falling back to a synthetic record keeps it listed and
+/// A lookup miss must NOT hide the display: falling back to a synthetic record keeps it listed and
 /// reconnectable, which is the whole point of remembering it.
 func offlineRecord(for offline: ManagedOfflineDisplay) async -> DisplayRecord {
-    let raw = offline.recordID.rawValue
-    let known = raw.hasPrefix("cg:")
-        ? await registry.record(forCGUUID: String(raw.dropFirst("cg:".count)))
-        : await registry.record(for: offline.recordID)
-    guard var record = known else {
+    guard var record = await registryRecord(for: offline.recordID) else {
         return DisplayRecord(
             id: offline.recordID, fingerprint: DisplayFingerprint(modelName: offline.name),
             displayClass: offline.displayClass)
@@ -216,16 +220,20 @@ func uniqueDisplay(_ raw: String, in pairs: [ResolvedDisplay],
 // MARK: - Output
 
 /// A human-readable name: the user's alias, else the EDID model name, else a class + resolution
-/// label. The raw record id is the last resort only — `cg:37D8832A-2D66-…` identifies nothing to a
-/// human, and these names are what selectors and recovery hints are built from.
+/// label — never the raw record id, which identifies nothing to a human, and these names are what
+/// selectors and recovery hints are built from. One ladder shared with the app, so a display reads
+/// the same in both surfaces (`DisplayRecord.friendlyName`).
 func name(for pair: ResolvedDisplay) -> String {
-    if let alias = pair.record.alias, !alias.isEmpty { return alias }
-    if let model = pair.record.fingerprint.modelName, !model.isEmpty { return model }
-    if pair.observation.displayClass == .builtIn { return "Built-in Display" }
-    if let mode = pair.observation.mode {
-        return "\(pair.observation.displayClass.rawValue.capitalized) \(mode.pixelWidth)×\(mode.pixelHeight)"
-    }
-    return pair.observation.recordID.rawValue
+    pair.record.friendlyName(mode: pair.observation.mode)
+}
+
+/// The name for a group member, which may be a display that isn't here right now: the live name
+/// when it is connected, else the registry's remembered record — the bridge that keeps an unplugged
+/// member from printing as `cg:37D8832A-2D66-…`. The raw id survives only for a display the
+/// registry has never seen at all.
+func memberLabel(_ member: DisplayRecordID, in pairs: [ResolvedDisplay]) async -> String {
+    if let pair = pairs.first(where: { $0.observation.recordID == member }) { return name(for: pair) }
+    return await registryRecord(for: member)?.friendlyName() ?? member.rawValue
 }
 
 /// The shortest selector that will reach this display again — its alias when it has one (stable
@@ -851,7 +859,7 @@ func runGroupList(_ groups: [DisplayGroup]) async {
         print("\(group.name)  (\(group.memberRecordIDs.count) displays · syncs \(channels.joined(separator: " + ")))")
         for member in group.memberRecordIDs {
             let pair = pairs.first { $0.observation.recordID == member }
-            let label = pair.map(name(for:)) ?? member.rawValue
+            let label = await memberLabel(member, in: pairs)
             let offset = group.offset(for: member)
             let offsetNote = offset == 0 ? "" : String(format: "  %+.0f%%", offset * 100)
             print("  \(pair == nil ? "○" : "●") \(label)\(offsetNote)")

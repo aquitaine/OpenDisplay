@@ -76,11 +76,13 @@ private struct DisplayGroupSection: View {
         return "\(group.memberRecordIDs.count) displays \u{00B7} \(connected.count) connected"
     }
 
-    /// Every display that could sit in this group: the ones connected right now, plus members that
-    /// aren't present (unplugged, turned off) so their membership stays visible and removable.
+    /// Every display that could sit in this group: the ones connected right now plus every display
+    /// the registry remembers (so an unplugged monitor can still be ticked into the group), and
+    /// finally this group's own members even if the registry has forgotten them — a member must
+    /// always stay visible and removable.
     private var candidateMembers: [DisplayRecordID] {
-        let live = model.displays.map(\.recordID)
-        return live + group.memberRecordIDs.filter { !live.contains($0) }
+        let offerable = model.groupMemberCandidates
+        return offerable + group.memberRecordIDs.filter { !offerable.contains($0) }
     }
 
     /// Renaming can be refused (blank, or a name another group already holds) — put the field back to
@@ -114,12 +116,16 @@ private struct DisplayGroupMemberRow: View {
 
     private var isMember: Bool { group.contains(member) }
 
-    /// Names the two states worth explaining: a member that isn't plugged in, and a display another
-    /// group already owns (ticking this one moves it here, since a display belongs to one group).
+    /// Names the two states worth explaining: a display another group already owns (ticking this one
+    /// moves it here, since a display belongs to one group), and a display that isn't plugged in —
+    /// which the list now offers from the registry, so the row has to say so.
     private var membershipNote: String? {
-        if isMember, !model.displays.contains(where: { $0.recordID == member }) { return "Not connected" }
         if !isMember, let other = model.displayGroup(containing: member) { return "In \(other.name)" }
-        return nil
+        return isConnected ? nil : "Not connected"
+    }
+
+    private var isConnected: Bool {
+        model.displays.contains { $0.recordID == member }
     }
 
     private var offsetLabel: String {

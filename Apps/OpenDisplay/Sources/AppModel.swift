@@ -96,6 +96,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var recentActivity: [AuditEntry] = []
     /// Identity records for the current displays, keyed by the observation's record id.
     @Published private(set) var records: [DisplayRecordID: DisplayRecord] = [:]
+    /// Every display the registry remembers — including ones that aren't plugged in right now —
+    /// keyed by the same observation record id `records` uses. This is what lets the Groups card
+    /// offer (and name) a display that is currently unplugged or turned off.
+    @Published private(set) var registryKnownRecords: [DisplayRecordID: DisplayRecord] = [:]
     @Published private(set) var scenes: [Scene] = []
     /// Non-fatal note from the last scene apply (e.g. rotation skipped) — shown in the Scenes tab.
     @Published var sceneWarning: String?
@@ -505,7 +509,11 @@ final class AppModel: ObservableObject {
         guard let registry else { return }
         let observer = self.observer
         let observations = snapshot.observations.filter { $0.cgDisplayID != nil }
-        guard !observations.isEmpty else { if !records.isEmpty { records = [:] }; return }
+        guard !observations.isEmpty else {
+            if !records.isEmpty { records = [:] }
+            await refreshRegistryKnownRecords()
+            return
+        }
         // EDID fingerprint reads are nonisolated CG/IOKit accessors — gather them OFF the main actor,
         // then resolve the whole set in ONE batched (single disk-write) registry call.
         let prepared: [(DisplayRecordID, DisplayFingerprint, String?, DisplayClass)] =
@@ -521,6 +529,15 @@ final class AppModel: ObservableObject {
         var byID: [DisplayRecordID: DisplayRecord] = [:]
         for (input, record) in zip(prepared, resolved) { byID[input.0] = record }
         records = byID
+        await refreshRegistryKnownRecords()
+    }
+
+    /// Reloads the remembered-display index (every display the registry has ever minted a record
+    /// for, keyed by observation id). Refreshed with `records` and on an empty snapshot alike: a
+    /// display that isn't here is precisely the one the Groups card needs this index to name.
+    private func refreshRegistryKnownRecords() async {
+        guard let registry else { return }
+        registryKnownRecords = await registry.recordsByObservationID()
     }
 
     private func setUpScenes() async {
@@ -997,9 +1014,11 @@ final class AppModel: ObservableObject {
     /// cache optimistically. Native writes are immediate; DDC writes are coalesced so a fast slider
     /// drag never floods the I2C bus; the software route maps onto gamma dimming with a usable floor.
     ///
-    /// This is the USER funnel — sliders, media keys, the CLI, App Intents — so a write here is what
-    /// makes a display its group's leader (Issue #39). `syncToken` marks the write as OpenDisplay's
-    /// own hand instead (a group fan-out, a FaceLight restore); those never lead.
+    /// This is the USER funnel — sliders and media keys — so a write here is what makes a display
+    /// its group's leader (Issue #39). `syncToken` marks the write as OpenDisplay's own hand instead
+    /// (a group fan-out, a FaceLight restore); those never lead. `SetBrightnessIntent` does NOT come
+    /// through here (it writes DisplayServices/DDC directly), so a Shortcuts-driven change leads no
+    /// group yet — routing the intent through this funnel is its own change.
     func setBrightness(_ value: Float, for observation: DisplayObservation,
                        syncToken: GroupSyncPolicy.SyncEcho.Token? = nil) {
         guard let cgID = observation.cgDisplayID else { return }
@@ -2194,13 +2213,31 @@ final class AppModel: ObservableObject {
     }
 
     /// A name for a group member that may not be present right now: its live/aliased name when the
-    /// display is here, else the remembered registry name, else the raw record id.
+    /// display is here, else the remembered registry record's friendly name (alias → model → class
+    /// label). `records` only ever holds the displays of the current snapshot, so an absent member
+    /// is named from the registry index instead — otherwise the row reads `cg:37D8832A-2D66-…`,
+    /// which tells the user nothing about which monitor they are about to group. The raw id survives
+    /// only for a display the registry has never seen at all.
     func groupMemberName(for member: DisplayRecordID) -> String {
         if let observation = displays.first(where: { $0.recordID == member }) {
             return displayName(for: observation)
         }
-        let record = records[member]
-        return record?.alias ?? record?.fingerprint.modelName ?? member.rawValue
+        guard let record = records[member] ?? registryKnownRecords[member] else {
+            return member.rawValue
+        }
+        return record.friendlyName()
+    }
+
+    /// The displays a group's membership list can offer: everything connected right now, plus every
+    /// display the registry remembers (spec req 4). Without the remembered half, a monitor that is
+    /// unplugged — or that the app itself turned off — simply cannot be added to a group until it
+    /// comes back, which is the moment a user is most likely to be setting groups up.
+    var groupMemberCandidates: [DisplayRecordID] {
+        let connected = displays.map(\.recordID)
+        let remembered = registryKnownRecords.keys.filter { !connected.contains($0) }
+        // Dictionary order is not stable across reads; sort by the name shown so the rows don't
+        // reshuffle under the user's cursor between refreshes.
+        return connected + remembered.sorted { groupMemberName(for: $0) < groupMemberName(for: $1) }
     }
 
     /// Creates a group; false when the name is blank or already taken (names are the CLI's handle on

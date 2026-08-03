@@ -8,7 +8,7 @@ import Foundation
 ///
 /// `offsetByMember` is what keeps two mismatched panels usable together: a follower is written at
 /// `leader + offset`, and the offset is *learned* from the user's own correction rather than
-/// configured up front (see `GroupSyncPolicy.classifyManualWrite`). Keys are
+/// configured up front (see `GroupSyncPolicy.classify`, outcome `.followerCorrection`). Keys are
 /// `DisplayRecordID.rawValue` — raw-representable dictionary keys encode as flat arrays in JSON, the
 /// same reason `adaptiveBrightnessOffsetByDisplay` is String-keyed.
 public struct DisplayGroup: Hashable, Sendable, Codable, Identifiable {

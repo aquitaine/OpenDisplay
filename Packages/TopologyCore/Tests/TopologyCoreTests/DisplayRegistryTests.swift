@@ -56,6 +56,29 @@ final class DisplayRegistryTests: XCTestCase {
         XCTAssertTrue(again.tags.contains("studio"))
     }
 
+    /// What a membership list needs: every remembered display keyed by the id an observation would
+    /// carry, so a monitor that is currently unplugged can still be offered and named.
+    func testRemembersDisplaysByTheirObservationID() async {
+        let registry = await DisplayRegistry(store: InMemoryRegistryStore())
+        let desk = await registry.resolve(fingerprint: fingerprint(serial: "S1", model: "U2720Q"), cgUUID: "U1")
+        await registry.setAlias("Desk", for: desk.id)
+        _ = await registry.resolve(fingerprint: fingerprint(serial: "S2", model: "S34J55x"), cgUUID: "U2")
+
+        let byObservationID = await registry.recordsByObservationID()
+        XCTAssertEqual(byObservationID[.forCGUUID("U1")]?.alias, "Desk")
+        XCTAssertEqual(byObservationID[.forCGUUID("U2")]?.fingerprint.modelName, "S34J55x")
+        XCTAssertEqual(byObservationID.count, 2)
+    }
+
+    /// A display seen only through a UUID-less `cgid:<n>` observation was never indexed by UUID, so
+    /// it simply isn't in the remembered set — it is only reachable while it is connected.
+    func testDisplaysMintedWithoutACGUUIDAreNotInTheObservationIndex() async {
+        let registry = await DisplayRegistry(store: InMemoryRegistryStore())
+        _ = await registry.resolve(fingerprint: fingerprint(serial: "S1"), cgUUID: nil)
+        let byObservationID = await registry.recordsByObservationID()
+        XCTAssertTrue(byObservationID.isEmpty)
+    }
+
     func testStatePersistsAcrossInstances() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("od-registry-tests-\(UUID().uuidString)", isDirectory: true)
