@@ -90,15 +90,23 @@ public actor CommandGateway {
     ///
     /// Persistence is read-modify-write on the shared settings file: only the protected-layout keys
     /// are touched, so a concurrent settings edit elsewhere loses nothing else.
+    ///
+    /// `managedOffline` is the shared ledger (`ManagedOfflineStore`) and is not optional in spirit:
+    /// a display OpenDisplay turned off is part of this desk and part of what the arrangement means,
+    /// and the app keys on it too. Omit it and the CLI would file the layout under a different
+    /// fingerprint than the app looks it up by.
     public func applyLayoutProtection(_ change: LayoutProtectionChange, store: SettingsStore,
+                                      managedOffline: [ManagedOfflineDisplay],
                                       actor: Actor = .cli) async -> ResultEnvelope {
         let snapshot = await observer.currentSnapshot()
         var settings = store.load()
-        let fingerprint = LayoutProtectionPolicy.fingerprint(for: snapshot)
+        let offlineIDs = LayoutProtectionPolicy.switchedOffIDs(in: snapshot, ledger: managedOffline)
+        let fingerprint = LayoutProtectionPolicy.fingerprint(for: snapshot, managedOffline: offlineIDs)
         var status: ResultEnvelope.Status = .committed
         switch change {
         case .protect:
-            let captured = LayoutProtectionPolicy.capture(snapshot, at: Date())
+            let captured = LayoutProtectionPolicy.capture(snapshot, managedOffline: managedOffline,
+                                                          at: Date())
             settings.protectedLayouts[captured.fingerprint] = captured.config
         case .unprotect:
             status = settings.protectedLayouts.removeValue(forKey: fingerprint) == nil
@@ -114,7 +122,7 @@ public actor CommandGateway {
         let envelope = ResultEnvelope(
             transactionId: "txn_layoutProtection", status: status, actor: actor,
             requestedAt: Date(), topologyGeneration: snapshot.generation.value,
-            targets: LayoutProtectionPolicy.members(of: snapshot).map {
+            targets: LayoutProtectionPolicy.members(of: snapshot, managedOffline: offlineIDs).map {
                 .init(displayId: $0.rawValue, alias: nil, identityConfidence: 1.0,
                       operations: [.init(field: change.rawValue, verification: .verified)])
             },

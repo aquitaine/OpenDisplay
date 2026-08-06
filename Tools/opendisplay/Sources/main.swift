@@ -818,7 +818,8 @@ func runLayout() async {
     switch sub {
     case "protect", "unprotect":
         let change: LayoutProtectionChange = sub == "protect" ? .protect : .unprotect
-        let envelope = await gateway.applyLayoutProtection(change, store: store, actor: .cli)
+        let envelope = await gateway.applyLayoutProtection(
+            change, store: store, managedOffline: managedOfflineDisplays, actor: .cli)
         if asJSON { emit(envelope); return }
         switch envelope.status {
         case .committed:
@@ -847,12 +848,18 @@ func runLayout() async {
 func runLayoutStatus(store: SettingsStore) async {
     let settings = store.load()
     let snapshot = await observer.currentSnapshot()
-    let currentFingerprint = LayoutProtectionPolicy.fingerprint(for: snapshot)
+    let currentFingerprint = LayoutProtectionPolicy.fingerprint(
+        for: snapshot,
+        managedOffline: LayoutProtectionPolicy.switchedOffIDs(in: snapshot,
+                                                              ledger: managedOfflineDisplays))
     let pairs = await resolveCurrentDisplays()
     let namesByID = Dictionary(pairs.map { ($0.observation.recordID, name(for: $0)) },
                                uniquingKeysWith: { _, latest in latest })
+    // Members, not observations: a display the arrangement keeps switched off is still one of the
+    // displays it covers, and on the experimental path it left no observation to be listed by.
     func members(of config: ProtectedConfig) -> [String] {
-        config.snapshot.observations.map { namesByID[$0.recordID] ?? $0.recordID.rawValue }.sorted()
+        LayoutProtectionPolicy.members(of: config)
+            .map { namesByID[$0] ?? $0.rawValue }.sorted()
     }
     let lastRestore = await lastLayoutProtectionEntry()
 

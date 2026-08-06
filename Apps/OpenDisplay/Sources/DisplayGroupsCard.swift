@@ -98,7 +98,7 @@ private struct DisplayGroupMemberRow: View {
     let member: DisplayRecordID
 
     var body: some View {
-        ODRow(model.groupMemberName(for: member), secondary: membershipNote) {
+        ODRow(model.rememberedDisplayName(for: member), secondary: membershipNote) {
             HStack(spacing: ODSpacing.sm) {
                 if isMember, group.syncBrightness {
                     Text(offsetLabel)

@@ -23,6 +23,18 @@ final class LayoutProtectionPolicyTests: XCTestCase {
         TopologySnapshot(generation: .init(generation), observations: observations)
     }
 
+    /// An arrangement as `capture` stores it: the lit displays, plus the ledger recording which
+    /// displays this arrangement keeps switched off.
+    private func protectedSnap(_ observations: [DisplayObservation], offline ids: [String] = [],
+                               generation: UInt64 = 1) -> TopologySnapshot {
+        TopologySnapshot(
+            generation: .init(generation), observations: observations,
+            managedOffline: ids.map {
+                ManagedOfflineRecord(displayID: .init(rawValue: $0), actor: .ui,
+                                     reason: "protected layout", providerID: "")
+            })
+    }
+
     private func mode(_ width: Int, _ height: Int) -> DisplayMode {
         DisplayMode(pixelWidth: width, pixelHeight: height, pointWidth: width, pointHeight: height,
                     refreshHz: 60, isHiDPI: false)
@@ -56,36 +68,64 @@ final class LayoutProtectionPolicyTests: XCTestCase {
             state: state ?? settledState(for: current))
     }
 
+    /// The ledger, as the app passes it in: a display OpenDisplay turned off.
+    private func offline(_ id: String,
+                         displayClass: DisplayClass = .builtIn) -> ManagedOfflineDisplay {
+        ManagedOfflineDisplay(recordID: .init(rawValue: id), cgID: 1, name: id,
+                              displayClass: displayClass)
+    }
+
+    private func fingerprint(_ snapshot: TopologySnapshot, offline ids: [String] = []) -> String {
+        LayoutProtectionPolicy.fingerprint(
+            for: snapshot, managedOffline: Set(ids.map { DisplayRecordID(rawValue: $0) }))
+    }
+
     // MARK: - Display-set fingerprint
 
     func testFingerprintIsOrderIndependent() {
         let one = snap([obs("A", main: true), obs("B")])
         let other = snap([obs("B"), obs("A", main: true)])
-        XCTAssertEqual(LayoutProtectionPolicy.fingerprint(for: one),
-                       LayoutProtectionPolicy.fingerprint(for: other))
+        XCTAssertEqual(fingerprint(one), fingerprint(other))
     }
 
     func testFingerprintSeparatesDifferentDisplaySets() {
         let laptopAlone = snap([obs("A", main: true, displayClass: .builtIn)])
         let laptopAndDesk = snap([obs("A", main: true, displayClass: .builtIn), obs("B")])
-        XCTAssertNotEqual(LayoutProtectionPolicy.fingerprint(for: laptopAlone),
-                          LayoutProtectionPolicy.fingerprint(for: laptopAndDesk))
+        XCTAssertNotEqual(fingerprint(laptopAlone), fingerprint(laptopAndDesk))
     }
 
     func testFingerprintIgnoresTheVirtualPlaceholder() {
         let real = snap([obs("A", main: true)])
         let withPhantom = snap([obs("A", main: true), obs("phantom", displayClass: .virtual)])
-        XCTAssertEqual(LayoutProtectionPolicy.fingerprint(for: withPhantom),
-                       LayoutProtectionPolicy.fingerprint(for: real))
+        XCTAssertEqual(fingerprint(withPhantom), fingerprint(real))
+    }
+
+    /// The bug this keys on: a logically disabled display is absent from the enumeration, so keying
+    /// on the enumeration alone means the key CHANGES the moment macOS relights it on wake — and
+    /// protection looks up a display set it has never seen.
+    func testFingerprintIsUnchangedWhenATurnedOffDisplayComesBack() {
+        let builtInOff = snap([obs("B", main: true), obs("C")])
+        let builtInBack = snap([obs("A", displayClass: .builtIn), obs("B", main: true), obs("C")])
+        XCTAssertEqual(fingerprint(builtInOff, offline: ["A"]), fingerprint(builtInBack))
+    }
+
+    /// The same desk, whether the built-in is mirrored away (public provider) or truly disabled
+    /// (experimental provider) — one arrangement must not be filed under two keys.
+    func testFingerprintIsTheSameWhicheverWayADisplayWasTurnedOff() {
+        let mirroredOff = snap([obs("A", active: false, mirror: "B", displayClass: .builtIn),
+                                obs("B", main: true)])
+        let disabled = snap([obs("B", main: true)])
+        XCTAssertEqual(fingerprint(mirroredOff, offline: ["A"]), fingerprint(disabled, offline: ["A"]))
     }
 
     func testCaptureKeysTheLayoutUnderItsOwnDisplaySet() {
         let snapshot = snap([obs("A", main: true), obs("B")])
         let captured = LayoutProtectionPolicy.capture(snapshot, at: epoch)
-        XCTAssertEqual(captured.fingerprint, LayoutProtectionPolicy.fingerprint(for: snapshot))
+        XCTAssertEqual(captured.fingerprint, fingerprint(snapshot))
         XCTAssertEqual(captured.config.capturedAt, epoch)
         XCTAssertEqual(LayoutProtectionPolicy.protectedLayout(
-            for: snapshot, in: [captured.fingerprint: captured.config]), captured.config)
+            for: snapshot, managedOffline: [],
+            in: [captured.fingerprint: captured.config]), captured.config)
     }
 
     func testCaptureDropsTheVirtualPlaceholderFromTheStoredArrangement() {
@@ -94,12 +134,36 @@ final class LayoutProtectionPolicyTests: XCTestCase {
         XCTAssertEqual(captured.config.snapshot.observations.map(\.recordID.rawValue), ["A"])
     }
 
+    /// The arrangement has to record "and this one is off", or a restore can put everything else
+    /// back perfectly and still leave the built-in lit.
+    func testCaptureRecordsWhichDisplaysMustStayOff() {
+        let snapshot = snap([obs("B", main: true), obs("C")])
+        let captured = LayoutProtectionPolicy.capture(snapshot, managedOffline: [offline("A")],
+                                                      at: epoch)
+        XCTAssertEqual(LayoutProtectionPolicy.desiredOff(in: captured.config.snapshot),
+                       [.init(rawValue: "A")])
+        XCTAssertEqual(captured.fingerprint, fingerprint(snapshot, offline: ["A"]))
+        XCTAssertEqual(LayoutProtectionPolicy.members(of: captured.config).map(\.rawValue),
+                       ["A", "B", "C"])
+    }
+
+    /// A display mirrored onto main is "off" too — captured, present, and dark.
+    func testAMirroredOffDisplayIsRecordedAsDesiredOff() {
+        let snapshot = snap([obs("A", active: false, mirror: "B", displayClass: .builtIn),
+                             obs("B", main: true)])
+        let captured = LayoutProtectionPolicy.capture(snapshot, managedOffline: [offline("A")],
+                                                      at: epoch)
+        XCTAssertEqual(LayoutProtectionPolicy.desiredOff(in: captured.config.snapshot),
+                       [.init(rawValue: "A")])
+    }
+
     func testLookupMissesWhenThisDisplaySetIsNotProtected() {
         let protectedSet = snap([obs("A", main: true), obs("B")])
         let captured = LayoutProtectionPolicy.capture(protectedSet, at: epoch)
         let laptopAlone = snap([obs("A", main: true)])
         XCTAssertNil(LayoutProtectionPolicy.protectedLayout(
-            for: laptopAlone, in: [captured.fingerprint: captured.config]))
+            for: laptopAlone, managedOffline: [],
+            in: [captured.fingerprint: captured.config]))
     }
 
     // MARK: - Which drifts trigger a restore
@@ -194,6 +258,83 @@ final class LayoutProtectionPolicyTests: XCTestCase {
         let decision = decide(protected: protectedSnapshot, current: current,
                               context: context(managedOffline: [.init(rawValue: "B")])).decision
         XCTAssertEqual(decision, .restore(.init(changes: [.originMoved(.init(rawValue: "B"))])))
+    }
+
+    // MARK: - …but a display the arrangement wants OFF must be put back off
+
+    /// The reported bug, in the shape it takes on the experimental path. The arrangement was
+    /// captured with the built-in truly disabled, so the built-in left no observation behind; macOS
+    /// relights it on wake and it reads as a display that appeared from nowhere. Before the fix that
+    /// was "a different display set" and protection did nothing at all.
+    func testARelitDisplayTheArrangementWantsOffIsRestored() {
+        let protectedSnapshot = protectedSnap([obs("B", main: true), obs("C")], offline: ["A"])
+        let woken = snap([obs("A", displayClass: .builtIn), obs("B", main: true), obs("C")])
+        let decision = decide(protected: protectedSnapshot, current: woken, trigger: .wake,
+                              context: context(managedOffline: [.init(rawValue: "A")])).decision
+        XCTAssertEqual(decision, .restore(.init(changes: [.appeared(.init(rawValue: "A"))])))
+    }
+
+    /// The same wake, on the public path: "off" was a mirror onto main, and waking un-mirrored it.
+    func testAnUnMirroredDisplayTheArrangementWantsOffIsRestored() {
+        let protectedSnapshot = protectedSnap(
+            [obs("A", active: false, mirror: "B", displayClass: .builtIn), obs("B", main: true)],
+            offline: ["A"])
+        let woken = snap([obs("A", displayClass: .builtIn), obs("B", main: true)])
+        let decision = decide(protected: protectedSnapshot, current: woken, trigger: .wake,
+                              context: context(managedOffline: [.init(rawValue: "A")])).decision
+        XCTAssertEqual(decision, .restore(.init(changes: [.mirrorChanged(.init(rawValue: "A")),
+                                                          .activeChanged(.init(rawValue: "A"))])))
+    }
+
+    /// The wake the user actually reported: the built-in lights up first and the externals are still
+    /// asleep behind it. A sleeping display is a present surface (0.8.2), so the only thing to fix is
+    /// the built-in — the externals must not be dragged into the restore.
+    func testWakeWithStillAsleepExternalsRestoresOnlyTheDisplayThatWokeUp() {
+        let protectedSnapshot = protectedSnap([obs("B", main: true), obs("C")], offline: ["A"])
+        let woken = snap([obs("A", displayClass: .builtIn), obs("B", main: true),
+                          obs("C", active: false)])
+        let decision = decide(protected: protectedSnapshot, current: woken, trigger: .wake,
+                              context: context(asleep: [.init(rawValue: "C")],
+                                               managedOffline: [.init(rawValue: "A")])).decision
+        XCTAssertEqual(decision, .restore(.init(changes: [.appeared(.init(rawValue: "A"))])))
+    }
+
+    /// Protection can put a display back off on its own authority: the ledger entry may already have
+    /// been dropped (a relaunch, an earlier "it came back on its own"), and the arrangement is still
+    /// the record of what the user asked for.
+    func testARelitDisplayIsRestoredEvenWithNoLedgerEntryLeft() {
+        let protectedSnapshot = protectedSnap([obs("B", main: true)], offline: ["A"])
+        let woken = snap([obs("A", displayClass: .builtIn), obs("B", main: true)])
+        XCTAssertEqual(decide(protected: protectedSnapshot, current: woken).decision,
+                       .restore(.init(changes: [.appeared(.init(rawValue: "A"))])))
+    }
+
+    /// The two directions of the ledger rule, side by side: the ledger only ever vetoes turning a
+    /// display back ON.
+    func testTheLedgerVetoesOnlyTheDirectionThatWouldRelightADisplay() {
+        let ledger = context(managedOffline: [.init(rawValue: "A")])
+        let wantsItLit = protectedSnap([obs("A", displayClass: .builtIn), obs("B", main: true)])
+        let wantsItOff = protectedSnap([obs("B", main: true)], offline: ["A"])
+        let builtInIsOn = snap([obs("A", displayClass: .builtIn), obs("B", main: true)])
+        let builtInIsOff = snap([obs("B", main: true)])
+
+        XCTAssertEqual(decide(protected: wantsItLit, current: builtInIsOff, context: ledger).decision,
+                       .clean, "the ledger is the newer instruction; protection must not fight it")
+        XCTAssertEqual(decide(protected: wantsItOff, current: builtInIsOn, context: ledger).decision,
+                       .restore(.init(changes: [.appeared(.init(rawValue: "A"))])),
+                       "here the ledger and the arrangement agree — put it back off")
+    }
+
+    /// A display leaving because the arrangement asked for it to be off is the restore having
+    /// landed, not a new desk.
+    func testADisplayTheArrangementWantsOffGoingAwayIsNotADifferentDisplaySet() {
+        let protectedSnapshot = protectedSnap(
+            [obs("A", active: false, mirror: "B", displayClass: .builtIn), obs("B", main: true)],
+            offline: ["A"])
+        let converged = snap([obs("B", main: true)])
+        XCTAssertEqual(decide(protected: protectedSnapshot, current: converged,
+                              context: context(managedOffline: [.init(rawValue: "A")])).decision,
+                       .clean)
     }
 
     // MARK: - A different display set is a different layout
@@ -394,6 +535,25 @@ final class LayoutProtectionPolicyTests: XCTestCase {
         XCTAssertEqual(scene.members[1].desired.position, DisplayOrigin(x: 2560, y: 0))
         XCTAssertEqual(scene.members[1].desired.rotation, .degrees90)
         XCTAssertEqual(scene.members[1].desired.connected, true)
+    }
+
+    /// A display mirrored onto main was captured sitting exactly where main sits, so asserting its
+    /// position would move a display that is meant to be dark — one of the ways macOS decides to
+    /// un-mirror it. It is put back off by the activity half of the restore instead.
+    func testRestoreSceneLeavesOutTheDisplaysTheArrangementWantsOff() {
+        let protectedSnapshot = protectedSnap(
+            [obs("A", active: false, mirror: "B", displayClass: .builtIn), obs("B", main: true)],
+            offline: ["A"])
+        let scene = LayoutProtectionPolicy.restoreScene(
+            for: ProtectedConfig(snapshot: protectedSnapshot, capturedAt: epoch))
+        XCTAssertEqual(scene.members.map(\.selector), ["id:B"])
+    }
+
+    func testSummaryNamesADisplayThatWasSwitchedBackOffAsAnOnOffChange() {
+        let analysis = DisplayConfigDrifter.DriftAnalysis(changes: [.appeared(.init(rawValue: "A"))])
+        XCTAssertEqual(LayoutProtectionPolicy.summary(of: analysis,
+                                                      names: [.init(rawValue: "A"): "Built-in"]),
+                       "Built-in: on/off")
     }
 
     func testSummaryNamesEachDisplayAndTheFieldsThatMoved() {
