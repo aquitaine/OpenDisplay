@@ -1,3 +1,4 @@
+import DisplayDomain
 import XCTest
 @testable import TopologyCore
 
@@ -61,5 +62,23 @@ final class AutoDisconnectBuiltInPolicyTests: XCTestCase {
         var policy = AutoDisconnectBuiltInPolicy()
         XCTAssertFalse(policy.onTopologyChange(enabled: true, externalPresent: false))
         XCTAssertFalse(policy.onTopologyChange(enabled: true, externalPresent: false))
+    }
+
+    /// On a wake the external's re-arrival edge can fire this policy before the wake re-assert gets
+    /// its turn — an unaudited firing there reads as the re-assert acting silently. So a firing is
+    /// audited like every other automatic display write.
+    func testAFiringIsAudited() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let entry = AutoDisconnectBuiltInPolicy.auditEntry(
+            builtIn: DisplayRecordID(rawValue: "builtin"), committed: true, at: now)
+        XCTAssertEqual(entry.actor, .system)
+        XCTAssertEqual(entry.command, "autoDisconnect")
+        XCTAssertEqual(entry.transactionId, "txn_autoDisconnect")
+        XCTAssertEqual(entry.status, "committed")
+        XCTAssertEqual(entry.targets, ["builtin"])
+        XCTAssertEqual(entry.timestamp, now)
+        XCTAssertEqual(AutoDisconnectBuiltInPolicy.auditEntry(
+            builtIn: DisplayRecordID(rawValue: "builtin"), committed: false, at: now).status,
+                       "failed")
     }
 }

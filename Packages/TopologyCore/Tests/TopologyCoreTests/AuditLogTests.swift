@@ -59,4 +59,21 @@ final class AuditLogTests: XCTestCase {
         let text = try String(contentsOf: directory.appendingPathComponent("audit.jsonl"), encoding: .utf8)
         XCTAssertEqual(text.split(separator: "\n").count, 2)
     }
+
+    /// A wake-convergence entry survives the disk round-trip next to entries from other actors —
+    /// the new actor is just another raw value in the same JSONL shape.
+    func testWakeConvergenceEntryRoundTripsAlongsideOtherActors() async throws {
+        let log = DiskAuditLog(directory: directory)
+        await log.append(entry("txn_cli"))
+        await log.append(AuditEntry(
+            timestamp: Date(timeIntervalSinceReferenceDate: 2000), actor: .wakeConvergence,
+            command: "reassertOff", transactionId: "txn_reassertOff", status: "committed",
+            targets: ["builtin"]))
+        let recent = await log.recent(limit: 10)
+        XCTAssertEqual(recent.map(\.actor), [.cli, .wakeConvergence])
+        XCTAssertEqual(recent.last?.command, "reassertOff")
+        let text = try String(contentsOf: directory.appendingPathComponent("audit.jsonl"),
+                              encoding: .utf8)
+        XCTAssertTrue(text.contains("\"actor\":\"wakeConvergence\""))
+    }
 }

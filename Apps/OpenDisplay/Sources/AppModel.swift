@@ -2705,9 +2705,12 @@ final class AppModel: ObservableObject {
     /// Turns a live display off (flagship). Routes through the coordinator, which preflights and
     /// refuses to remove the last active surface; on success the display is remembered as
     /// managed-offline so it keeps an "off" card in the menu. Works on any display, the built-in
-    /// included, as long as another stays active.
-    func setDisplayActive(_ active: Bool, for observation: DisplayObservation) async {
-        guard !active else { return }  // turning back on is handled by reconnectOffline
+    /// included, as long as another stays active. Returns whether the disconnect committed, so the
+    /// automatic callers (wake re-assert, auto-disconnect) can audit their outcome truthfully.
+    @discardableResult
+    func setDisplayActive(_ active: Bool, for observation: DisplayObservation,
+                          as actor: Actor = .ui) async -> Bool {
+        guard !active else { return false }  // turning back on is handled by reconnectOffline
         busy = true
         defer { busy = false }
         let offline = OfflineDisplay(
@@ -2717,13 +2720,16 @@ final class AppModel: ObservableObject {
             displayClass: observation.displayClass)
         let result = try? await coordinator.disconnect(
             observation.recordID,
-            options: DisconnectOptions(actor: .ui, identityConfidence: 1.0))
+            options: DisconnectOptions(actor: actor, identityConfidence: 1.0))
+        var committed = false
         if case .committed? = result {
+            committed = true
             managedOffline.removeAll { $0.recordID == offline.recordID }
             managedOffline.append(offline)
             persistManagedOffline()
         }
         await refresh()
+        return committed
     }
 
     /// Turns a previously turned-off display back on because the user asked for it — from the menu,
@@ -2742,7 +2748,8 @@ final class AppModel: ObservableObject {
     /// what left the built-in lit with nothing left that remembered why it shouldn't be. The ledger
     /// entry survives, and `WakeConvergencePolicy` puts the display away again once a real screen is
     /// back to cover it — or drops the entry itself once the wake window closes with no rescue.
-    private func reconnectOffline(_ offline: OfflineDisplay, forgettingIntent: Bool) async {
+    @discardableResult
+    private func reconnectOffline(_ offline: OfflineDisplay, forgettingIntent: Bool) async -> Bool {
         busy = true
         defer { busy = false }
         do {
@@ -2755,13 +2762,14 @@ final class AppModel: ObservableObject {
             Self.err("reconnect failed for \(offline.name): \(error) — keeping it owed")
             #endif
             await refresh()
-            return
+            return false
         }
         if forgettingIntent {
             managedOffline.removeAll { $0.recordID == offline.recordID }
             persistManagedOffline()
         }
         await refresh()
+        return true
     }
 
     /// Long-lived subscription to the observer's reconfiguration events: every hotplug, unplug,
@@ -2834,7 +2842,9 @@ final class AppModel: ObservableObject {
         #if DEBUG
         Self.err("AUTO-DISCONNECT firing: turning off \(displayName(for: builtIn))")
         #endif
-        await setDisplayActive(false, for: builtIn)
+        let committed = await setDisplayActive(false, for: builtIn, as: .system)
+        await appendAudit(AutoDisconnectBuiltInPolicy.auditEntry(
+            builtIn: builtIn.recordID, committed: committed, at: Date()))
         return true
     }
 
@@ -2954,7 +2964,9 @@ final class AppModel: ObservableObject {
             // The ledger entry stays: this is an emergency screen, not the user changing their mind.
             // Outside a wake the next refresh drops it anyway (the display really is back for good);
             // inside one it survives, and the re-assert below puts the display away again.
-            await reconnectOffline(fallback, forgettingIntent: false)
+            let committed = await reconnectOffline(fallback, forgettingIntent: false)
+            await appendAudit(
+                WakeConvergencePolicy.netActivateAudit(of: fallback, committed: committed, at: Date()))
             await escalateIfStillStranded()
         }
     }
@@ -2983,6 +2995,7 @@ final class AppModel: ObservableObject {
         #if DEBUG
         Self.err("ACTIVE-SURFACE GUARD: still no real display — escalating to permanent-config restore")
         #endif
+        await appendAudit(WakeConvergencePolicy.netEscalateAudit(at: Date()))
         CoreGraphicsProvider.restorePermanentConfiguration()
         try? await Task.sleep(nanoseconds: 1_500_000_000)  // let the window server settle
         await refresh()
@@ -3091,8 +3104,9 @@ final class AppModel: ObservableObject {
             #if DEBUG
             Self.err("WAKE: \(offline.name) came back with the machine — turning it off again")
             #endif
-            await setDisplayActive(false, for: live)
-            await appendWakeConvergenceAudit(for: offline.recordID)
+            let committed = await setDisplayActive(false, for: live, as: .wakeConvergence)
+            await appendAudit(
+                WakeConvergencePolicy.reassertAudit(of: offline, committed: committed, at: Date()))
         }
     }
 
@@ -3104,14 +3118,13 @@ final class AppModel: ObservableObject {
             darkSince: displaysDarkSince, reassertAttempts: offlineReassertAttempts)
     }
 
-    /// Records a wake re-assert in the shared audit trail, so "why did my built-in switch off just
-    /// now?" is answerable from `opendisplay activity` rather than guessed at.
-    private func appendWakeConvergenceAudit(for displayID: DisplayRecordID) async {
+    /// Appends one entry to the shared on-disk audit trail — the same file the CLI and App Intents
+    /// write through the gateway — so "why did my display just switch?" is answerable from Settings →
+    /// Recent Activity rather than guessed at. Every automatic display write in this file (wake
+    /// re-assert, safety net, auto-disconnect, Protected Layout) reports through here.
+    private func appendAudit(_ entry: AuditEntry) async {
         guard let directory = try? DiskAuditLog.defaultDirectory() else { return }
-        await DiskAuditLog(directory: directory).append(AuditEntry(
-            timestamp: Date(), actor: .system, command: "wakeReassertOffline",
-            transactionId: "txn_wakeReassertOffline", status: "committed",
-            targets: [displayID.rawValue]))
+        await DiskAuditLog(directory: directory).append(entry)
     }
 
     // MARK: - Protected Layout (Batch-4 #A)
@@ -3325,8 +3338,7 @@ final class AppModel: ObservableObject {
     /// with the `system` actor — the app acted on its own, on the user's standing instruction.
     private func appendLayoutProtectionAudit(status: String,
                                              analysis: DisplayConfigDrifter.DriftAnalysis) async {
-        guard let directory = try? DiskAuditLog.defaultDirectory() else { return }
-        await DiskAuditLog(directory: directory).append(AuditEntry(
+        await appendAudit(AuditEntry(
             timestamp: Date(), actor: .system, command: "layoutProtection",
             transactionId: "txn_layoutProtection", status: status,
             targets: analysis.changes.compactMap(\.displayID).map(\.rawValue)))

@@ -106,4 +106,8 @@ public enum Actor: String, Hashable, Sendable, Codable {
     case system
     /// An `opendisplay://` URL-scheme invocation (a distinct automation front door, like `cli`).
     case url
+    /// The wake-convergence engine keeping a promise across a sleep: re-asserting a ledger "off"
+    /// macOS undid, or the always-one-active net lighting its fallback. Distinct from `system` so
+    /// "why did my display just switch?" is answerable to the exact path from the audit trail.
+    case wakeConvergence
 }
