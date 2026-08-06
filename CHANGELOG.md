@@ -7,7 +7,7 @@ change until 1.0.
 
 ## [0.10.0] — 2026-08-06
 
-Everything since 0.8.2 in one release: v0.9.0 was tagged in the tree but never published,
+Everything since 0.8.2 in one release: 0.9.0 was versioned in the tree but never published,
 so its features ship here.
 
 ### Added
