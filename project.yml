@@ -29,6 +29,15 @@ options:
   createIntermediateGroups: true
   generateEmptyDirectories: true
 
+# Sparkle 2 powers the in-app updater (SoftwareUpdater.swift). It ships as a binary xcframework, so
+# SwiftPM resolves it here rather than in Package.swift — the cross-platform package graph stays
+# buildable on Linux. The signing/appcast tools travel inside the same artifact
+# (…/SourcePackages/artifacts/sparkle/Sparkle/bin); scripts/release-signed.sh finds them there.
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.9.5"
+
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -166,9 +175,13 @@ targets:
       - target: SceneEngine
       - target: AutomationSchema
       - target: SimulatorProvider
+      - package: Sparkle
 
   # --- Public-API-only flavor: same sources, experimental/virtual providers excluded
   #     (NFR-010 / D-008); defines PUBLIC_API_ONLY for conditional wiring. ---
+  # It links Sparkle and reads the same feed as the full app: the two flavors are built from one
+  # source tree, so a second (updater-less) code path would exist only to keep this local build
+  # flavor from updating itself. Only the full app is ever published.
   OpenDisplay-PublicAPIOnly:
     type: application
     platform: macOS
@@ -189,6 +202,7 @@ targets:
       - target: SceneEngine
       - target: AutomationSchema
       - target: SimulatorProvider
+      - package: Sparkle
 
   # --- Independent rescue utility ---
   OpenDisplayRescue:

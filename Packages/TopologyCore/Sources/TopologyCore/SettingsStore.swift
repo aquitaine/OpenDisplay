@@ -94,9 +94,14 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// curve, the fallback when CoreLocation is unavailable. Nil ⇒ solar-anchored schedule entries
     /// are skipped and Location Mode degrades to the flat schedule; time anchors always work.
     public var clockManualLocation: GeoCoordinate?
-    /// When on, ask GitHub for the newest release at most once a day and surface it in the menu.
-    /// Manual "Check for updates" works regardless. Nothing is ever downloaded automatically.
+    /// When on, let the updater check the release feed on its own schedule (about once a day) and
+    /// surface what it finds in the menu. The menu's own "Check for Updates…" works either way, and
+    /// nothing is downloaded until the user asks — unless `automaticUpdateDownloadEnabled` is also on.
     public var updateCheckEnabled: Bool
+    /// When on, a found update is downloaded and installed without asking each time (the app relaunches
+    /// itself into the new version). Opt-in, and inert while `updateCheckEnabled` is off — an updater
+    /// that never looks at the feed has nothing to install.
+    public var automaticUpdateDownloadEnabled: Bool
     /// How the software dimming slider darkens a display (gamma table, overlay window, or both).
     public var dimmingMethod: DimmingMethod
     /// App Presets (Issue #33): switch a display's brightness/contrast/colour preset when a chosen app
@@ -159,6 +164,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         clockScheduleEntries: [ClockScheduleEntry] = [],
         clockManualLocation: GeoCoordinate? = nil,
         updateCheckEnabled: Bool = true,
+        automaticUpdateDownloadEnabled: Bool = false,
         dimmingMethod: DimmingMethod = .gamma,
         appPresetsEnabled: Bool = false,
         appPresets: [AppPresetPolicy.AppPreset] = [],
@@ -198,6 +204,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.clockScheduleEntries = clockScheduleEntries
         self.clockManualLocation = clockManualLocation
         self.updateCheckEnabled = updateCheckEnabled
+        self.automaticUpdateDownloadEnabled = automaticUpdateDownloadEnabled
         self.dimmingMethod = dimmingMethod
         self.appPresetsEnabled = appPresetsEnabled
         self.appPresets = appPresets
@@ -239,6 +246,7 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case clockScheduleEntries
         case clockManualLocation
         case updateCheckEnabled
+        case automaticUpdateDownloadEnabled
         case dimmingMethod
         case appPresetsEnabled
         case appPresets
@@ -318,6 +326,8 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
             ?? defaults.clockManualLocation
         updateCheckEnabled = container.lenient(Bool.self, forKey: .updateCheckEnabled)
             ?? defaults.updateCheckEnabled
+        automaticUpdateDownloadEnabled = container.lenient(Bool.self, forKey: .automaticUpdateDownloadEnabled)
+            ?? defaults.automaticUpdateDownloadEnabled
         dimmingMethod = container.lenient(DimmingMethod.self, forKey: .dimmingMethod)
             ?? defaults.dimmingMethod
         appPresetsEnabled = container.lenient(Bool.self, forKey: .appPresetsEnabled)

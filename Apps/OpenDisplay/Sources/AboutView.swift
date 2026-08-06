@@ -2,6 +2,7 @@
 import AppKit
 import OpenDisplayDesignSystem
 import SwiftUI
+import TopologyCore
 
 /// Custom About window, replacing `orderFrontStandardAboutPanel`. The standard panel only shows
 /// the icon + version; this one adds what people actually come for — the running version (selectable
@@ -91,34 +92,29 @@ struct AboutView: View {
     }
 }
 
-/// Mirrors the menu's update row: idle → button, checking → progress, result → outcome text (with a
-/// click-through to the release page when one is available). Shared by the About window and the
-/// Settings → About card so both surfaces drive the same `AppModel.updateState` machinery.
+/// Mirrors the menu's update row: work in flight shows a spinner, everything else is a button that
+/// hands over to Sparkle (check → download → verify → install → relaunch). Shared by the About window
+/// and the Settings → About card, and it reads the same `SoftwareUpdatePolicy` presentation the menu
+/// row does, so all three surfaces say the same thing about the same phase.
 struct UpdateCheckStatusView: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        switch model.updateState {
-        case .idle:
-            Button("Check for Updates…") { Task { await model.checkForUpdates() } }
-                .controlSize(.small)
-        case .checking:
+        let presentation = SoftwareUpdatePolicy.presentation(for: model.updatePhase)
+        if presentation.showsProgress {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
-                Text("Checking for updates…").font(.callout).foregroundStyle(.secondary)
+                Text(presentation.combinedTitle).font(.callout).foregroundStyle(.secondary)
             }
             .accessibilityElement(children: .combine)
-        case .upToDate:
-            Label("Up to date", systemImage: "checkmark.circle")
-                .font(.callout).foregroundStyle(.secondary)
-        case .available(let version, _):
+        } else {
             Button {
-                model.openUpdatePage()
+                model.checkForUpdates()
             } label: {
-                Label("Update available: \(version)", systemImage: "arrow.down.circle.fill")
+                Label(presentation.combinedTitle, systemImage: presentation.systemImage)
             }
             .controlSize(.small)
-            .accessibilityHint("Opens the release page in your browser")
+            .accessibilityHint("Checks for a new version, then downloads and installs it")
         }
     }
 }

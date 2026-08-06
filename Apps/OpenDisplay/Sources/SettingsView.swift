@@ -389,12 +389,26 @@ private struct HealthSection: View {
                 )) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Check for updates automatically")
-                        Text("Asks GitHub for the newest release at most once a day and shows it in the "
-                             + "menu. Nothing is downloaded or installed automatically, and the menu\u{2019}s "
-                             + "manual \u{201C}Check for updates\u{201D} works either way.")
+                        Text("Looks at the release feed about once a day and shows what it finds in the "
+                             + "menu. Nothing is downloaded until you say so, and the menu\u{2019}s "
+                             + "\u{201C}Check for Updates\u{2026}\u{201D} works either way.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                Toggle(isOn: Binding(
+                    get: { model.settings.automaticUpdateDownloadEnabled },
+                    set: { model.setAutomaticUpdateDownloadEnabled($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Download and install updates automatically")
+                        Text("Installs a new release on its own and relaunches OpenDisplay into it. Every "
+                             + "download is checked against the project\u{2019}s signing key before it runs. "
+                             + "Needs the automatic check above.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(!model.settings.updateCheckEnabled)
+                .padding(.leading, ODSpacing.lg)
 
                 Divider()
 
