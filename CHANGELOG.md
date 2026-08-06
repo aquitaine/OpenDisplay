@@ -5,6 +5,24 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [Unreleased]
+
+### Added
+- **One-click updates.** "Check for Updates…" now does the whole job: OpenDisplay downloads the new
+  version, verifies it, installs it, and relaunches itself into it — no trip to the browser, no
+  dragging a new app into `/Applications`. Every download is checked against the project's EdDSA
+  signing key *and* the Developer ID signature of the copy you already have, so an update that
+  doesn't come from us doesn't run. Two settings govern it: "Check for updates automatically" (on by
+  default, about once a day, and it only tells you) and the opt-in "Download and install updates
+  automatically". A background check that finds something never interrupts you — it leaves a version
+  badge on the menu's update row and waits until you click it.
+
+### Notes
+- Updating in place only works *from* a build that has the updater in it. If you are on 0.9.0 or
+  older, install this release by hand once; from then on OpenDisplay keeps itself current.
+- Releases now carry a second asset, `appcast.xml`, alongside `OpenDisplay.zip` — that file is the
+  update feed, produced and signed by `scripts/release-signed.sh` (see `scripts/sparkle-setup.md`).
+
 ## [0.9.0] — 2026-08-03
 
 ### Added

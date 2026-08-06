@@ -24,6 +24,17 @@
 	     entry is always available instead. -->
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>OpenDisplay uses your location once to calculate local sunrise, noon, and sunset times for Clock Mode brightness schedules. You can also enter your coordinates manually.</string>
+	<!-- Sparkle 2 in-app updates. The feed is the newest release's appcast.xml asset, reached through
+	     GitHub's stable "latest" redirect, so the URL never has to be re-pointed at a new tag.
+	     SUPublicEDKey is the EdDSA public key every downloaded update is verified against; its private
+	     half lives only in the maintainer's login keychain and signs the appcast at release time (see
+	     scripts/sparkle-setup.md). Automatic checking/downloading is NOT declared here: both are user
+	     settings the app writes into Sparkle at launch, so settings.json stays the one place a
+	     preference lives. -->
+	<key>SUFeedURL</key>
+	<string>https://github.com/aquitaine/OpenDisplay/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>G9aQchK8B0eqrXhKwKWat4SRCR/XboPdgpmfuHrBnuE=</string>
 	<!-- opendisplay:// URL-scheme automation (Issue 4). Routes onto the same safety-checked,
 	     audited CommandGateway as the CLI and App Intents; only non-destructive recovery
 	     commands auto-run, arrangement-altering ones require in-app confirmation. -->

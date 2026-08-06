@@ -138,24 +138,15 @@ struct MenuBarView: View {
         }
     }
 
-    /// "Check for updates" reflects the checker's live state: idle → runs a check, checking →
-    /// disabled spinner text, up to date → confirmation (click re-checks), update available →
-    /// version badge and a click-through to the release page.
-    @ViewBuilder private var updatesRow: some View {
-        switch model.updateState {
-        case .idle:
-            MenuActionRow(title: "Check for updates", systemImage: "arrow.down.circle",
-                          showChevron: false) { Task { await model.checkForUpdates() } }
-        case .checking:
-            MenuActionRow(title: "Checking for updates…", systemImage: "arrow.down.circle",
-                          showChevron: false, enabled: false)
-        case .upToDate:
-            MenuActionRow(title: "Up to date", systemImage: "checkmark.circle",
-                          showChevron: false) { Task { await model.checkForUpdates() } }
-        case .available(let version, _):
-            MenuActionRow(title: "Update available", systemImage: "arrow.down.circle.fill",
-                          badge: version, showChevron: false) { model.openUpdatePage() }
-        }
+    /// The updates row reflects the updater's live phase — idle, checking, up to date, a badged
+    /// version, or an install in flight — and every clickable variant does the same one thing: hand
+    /// over to Sparkle, which downloads, verifies, installs, and relaunches. Wording, icon, and
+    /// badge come from `SoftwareUpdatePolicy` so this row and the About window can't drift apart.
+    private var updatesRow: some View {
+        let presentation = SoftwareUpdatePolicy.presentation(for: model.updatePhase)
+        return MenuActionRow(title: presentation.title, systemImage: presentation.systemImage,
+                             badge: presentation.badge, showChevron: false,
+                             enabled: !presentation.showsProgress) { model.checkForUpdates() }
     }
 
     /// Asks the app delegate to open Settings. The delegate owns that window (AppKit, not SwiftUI's

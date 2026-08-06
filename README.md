@@ -142,6 +142,10 @@ verified on macOS 26 / Apple Silicon.) OpenDisplay runs as a menu-bar item — n
 3. Open it. The build is **signed with a Developer ID and notarized by Apple**, so it
    launches with no Gatekeeper warning.
 
+From there OpenDisplay updates itself: *Check for Updates…* in the menu downloads, verifies, and
+installs a new version in one click, and *Settings → Health & Recovery → Behavior* can do the whole
+thing automatically. Every update is checked against the project's signing key before it runs.
+
 Then click the display glyph in the menu bar. Two optional one-time steps:
 
 - **Media keys** — to have the keyboard brightness keys drive your external monitor, turn

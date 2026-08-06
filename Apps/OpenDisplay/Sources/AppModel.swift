@@ -265,14 +265,12 @@ final class AppModel: ObservableObject {
     /// On-disk managed-offline list, shared with the CLI (see `ManagedOfflineStore`).
     private let managedOfflineStore: ManagedOfflineStore?
 
-    /// Update-check state driving the menu's "Check for updates" row.
-    enum UpdateState: Equatable {
-        case idle
-        case checking
-        case upToDate
-        case available(version: String, url: String)
-    }
-    @Published private(set) var updateState: UpdateState = .idle
+    /// Sparkle-backed one-click updater (check → download → verify → install → relaunch). Held for the
+    /// lifetime of the app because Sparkle references its delegates weakly.
+    private let softwareUpdater: SoftwareUpdater
+    /// What the update affordances (menu row, About window) should currently say. Mirrored from the
+    /// updater so the views observe one published property instead of two objects.
+    @Published private(set) var updatePhase: SoftwareUpdatePhase = .idle
 
     /// Live "Keep these settings?" prompt for an arrangement-altering change (Issue 6), or nil when no
     /// revert window is open. Drives the countdown banner; the UI calls `confirmArrangementChange()` /
@@ -331,13 +329,22 @@ final class AppModel: ObservableObject {
         )
         let settingsStore = (try? SettingsStore.defaultDirectory()).map(SettingsStore.init(directory:))
         self.settingsStore = settingsStore
-        self.settings = settingsStore?.load() ?? .default
+        let settings = settingsStore?.load() ?? .default
+        self.settings = settings
         self.sleepGuard = DisplaySleepGuard(backend: IOKitPowerAssertions())
         let favoritesStore = (try? SettingsStore.defaultDirectory()).map(FavoritesStore.init(directory:))
         self.favoritesStore = favoritesStore
         self.favorites = favoritesStore?.load() ?? FavoriteResolutions()
         self.managedOfflineStore =
             (try? ManagedOfflineStore.defaultDirectory()).map(ManagedOfflineStore.init(directory:))
+        // Start Sparkle with the user's saved preferences already in place: its first scheduled cycle
+        // begins on the next runloop pass, so applying them later would let one check slip through
+        // against the wrong settings.
+        self.softwareUpdater = SoftwareUpdater(behavior: AppModel.automaticUpdateBehavior(for: settings))
+        softwareUpdater.onPhaseChange = { [weak self] phase in self?.updatePhase = phase }
+        softwareUpdater.onAutomaticDownloadPreferenceChange = { [weak self] enabled in
+            self?.setAutomaticUpdateDownloadEnabled(enabled)
+        }
         // Register the configurable global hotkeys (Batch-2 #4). Reconnect-All is always-available
         // (recovery hierarchy step 3) and reachable even when the menu bar isn't; the rest are unbound
         // by default. A chord that can't be claimed is simply skipped (menu-bar item remains).
@@ -362,7 +369,6 @@ final class AppModel: ObservableObject {
             #endif
             autoDisconnectPolicy.seed(externalPresent: hasExternalDisplay)  // don't treat a pre-attached external as an arrival
             reconcileLayoutProtectionObserver()  // Batch-4 #A: arm the wake trigger + check the launch arrangement
-            await autoCheckForUpdatesIfDue()
             await writeBaselineCheckpoint()
             if let marker = Self.readRotationMarker() {
                 // A prior experimental rotation didn't confirm — restore that display's safe angle and
@@ -2792,44 +2798,42 @@ final class AppModel: ObservableObject {
         reconcileDisplaySleepGuard()
     }
 
+    /// Toggle for "check for updates automatically". Also re-applies the pair to Sparkle, which
+    /// re-schedules its own cycle shortly afterwards.
     func setUpdateCheckEnabled(_ enabled: Bool) {
         guard settings.updateCheckEnabled != enabled else { return }
         settings.updateCheckEnabled = enabled
         persistSettings()
+        reconcileAutomaticUpdates()
     }
 
-    private static let lastUpdateCheckKey = "OpenDisplayLastUpdateCheck"
-
-    /// Runs the daily background update check when the toggle is on and one is due. Failures stay
-    /// silent (`idle`) — a background check must never surface an error.
-    func autoCheckForUpdatesIfDue() async {
-        guard settings.updateCheckEnabled else { return }
-        let last = UserDefaults.standard.object(forKey: Self.lastUpdateCheckKey) as? Date
-        guard UpdateCheckPolicy.shouldAutoCheck(lastCheck: last, now: Date()) else { return }
-        await checkForUpdates()
+    /// Toggle for "download and install updates automatically" (opt-in). Inert while automatic checks
+    /// are off — the policy decides that, so the setting is remembered rather than silently rewritten.
+    func setAutomaticUpdateDownloadEnabled(_ enabled: Bool) {
+        guard settings.automaticUpdateDownloadEnabled != enabled else { return }
+        settings.automaticUpdateDownloadEnabled = enabled
+        persistSettings()
+        reconcileAutomaticUpdates()
     }
 
-    /// Fetches the latest release and publishes the outcome. An unusable answer (offline,
-    /// rate-limited, bad tag) shows "up to date" only for a user-initiated re-check via the menu —
-    /// here it just returns to `idle`.
-    func checkForUpdates() async {
-        guard updateState != .checking else { return }
-        updateState = .checking
-        let availability = await UpdateChecker.fetchAvailability()
-        UserDefaults.standard.set(Date(), forKey: Self.lastUpdateCheckKey)
-        switch availability {
-        case .available(let version, let url): updateState = .available(version: version, url: url)
-        case .upToDate: updateState = .upToDate
-        case nil: updateState = .idle
-        }
+    /// The one action behind every update affordance: Sparkle checks, downloads, verifies the EdDSA
+    /// signature, installs, and relaunches — the app only asks it to start.
+    func checkForUpdates() {
+        softwareUpdater.checkForUpdates()
     }
 
-    /// Opens the newest release's page (menu action for the "Update available" row).
-    func openUpdatePage() {
-        let url: String
-        if case .available(_, let releaseURL) = updateState { url = releaseURL }
-        else { url = UpdateChecker.releasesPage }
-        if let target = URL(string: url) { NSWorkspace.shared.open(target) }
+    private func reconcileAutomaticUpdates() {
+        softwareUpdater.apply(Self.automaticUpdateBehavior(for: settings))
+    }
+
+    /// The two update settings as the one value Sparkle is configured from — used at launch (before
+    /// `self` exists) and on every toggle, so both paths can't disagree.
+    private static func automaticUpdateBehavior(
+        for settings: OpenDisplaySettings
+    ) -> AutomaticUpdateBehavior {
+        SoftwareUpdatePolicy.automaticBehavior(
+            checkEnabled: settings.updateCheckEnabled,
+            downloadEnabled: settings.automaticUpdateDownloadEnabled)
     }
 
     /// Acquire or release the keep-awake assertion for the current (toggle, external-presence) state.
