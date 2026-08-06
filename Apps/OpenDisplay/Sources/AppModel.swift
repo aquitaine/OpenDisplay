@@ -3044,6 +3044,11 @@ final class AppModel: ObservableObject {
         lastWakeAt = Date()
         isBetweenSleepAndWake = false  // the transition is over; the bounded window starts now
         offlineReassertAttempts.removeAll()  // a new wake is a fresh world; prior attempts don't count
+        // A dark spell stamped as the machine went down must not count against the recovery
+        // deadline: measured from a pre-sleep stamp, the net would light its fallback on the very
+        // first post-wake look instead of giving returning displays their eight seconds. The
+        // refresh below re-stamps "now" if the screens really are still dark.
+        displaysDarkSince = nil
         await refresh()
         await enforceActiveSurfaceInvariant()
         await reassertManagedOfflineIntent()
