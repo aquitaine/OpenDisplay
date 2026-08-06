@@ -5,7 +5,10 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
-## [Unreleased]
+## [0.10.0] — 2026-08-06
+
+Everything since 0.8.2 in one release: v0.9.0 was tagged in the tree but never published,
+so its features ship here.
 
 ### Added
 - **One-click updates.** "Check for Updates…" now does the whole job: OpenDisplay downloads the new
@@ -17,15 +20,6 @@ change until 1.0.
   automatically". A background check that finds something never interrupts you — it leaves a version
   badge on the menu's update row and waits until you click it.
 
-### Notes
-- Updating in place only works *from* a build that has the updater in it. If you are on 0.9.0 or
-  older, install this release by hand once; from then on OpenDisplay keeps itself current.
-- Releases now carry a second asset, `appcast.xml`, alongside `OpenDisplay.zip` — that file is the
-  update feed, produced and signed by `scripts/release-signed.sh` (see `scripts/sparkle-setup.md`).
-
-## [0.9.0] — 2026-08-03
-
-### Added
 - **Protected layout** (Issue #38) — mark your current display arrangement as protected, and
   OpenDisplay puts it back when something else moves it. Origins, resolution, refresh,
   mirroring, and the main display are captured per *display set* — your laptop-alone layout and
@@ -72,6 +66,10 @@ change until 1.0.
   in the key, in what is captured, and in what is restored.
 
 ### Notes
+- Updating in place only works *from* a build that has the updater in it. If you are on 0.8.2 or
+  older, install this release by hand once; from then on OpenDisplay keeps itself current.
+- Releases now carry a second asset, `appcast.xml`, alongside `OpenDisplay.zip` — that file is the
+  update feed, produced and signed by `scripts/release-signed.sh` (see `scripts/sparkle-setup.md`).
 - CLI edits to app-owned settings made while the app is running — `group` edits and
   `layout protect|unprotect` alike — are overwritten when the app next saves its settings.
   Quit the app first, or use the Settings window. A shared on-disk store is planned.
