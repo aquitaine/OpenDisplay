@@ -1,3 +1,4 @@
+import DisplayDomain
 import Foundation
 
 /// Edge-triggered policy for "auto-disconnect the built-in panel when an external connects" (Issue 5)
@@ -29,5 +30,20 @@ public struct AutoDisconnectBuiltInPolicy {
         let arrived = !self.externalPresent && externalPresent
         self.externalPresent = externalPresent
         return enabled && arrived
+    }
+
+    /// Command recorded when the policy fires. On a wake the external's re-arrival edge can fire
+    /// this before the wake re-assert gets its turn, so an unaudited firing reads as the re-assert
+    /// acting silently — the exact confusion the entry exists to prevent.
+    public static let auditCommand = "autoDisconnect"
+
+    /// The audit entry for one firing. `system` actor, like Protected Layout's restores: the app
+    /// acted on its own, on the user's standing instruction.
+    public static func auditEntry(builtIn: DisplayRecordID, committed: Bool,
+                                  at now: Date) -> AuditEntry {
+        AuditEntry(timestamp: now, actor: .system, command: auditCommand,
+                   transactionId: "txn_\(auditCommand)",
+                   status: committed ? "committed" : "failed",
+                   targets: [builtIn.rawValue])
     }
 }

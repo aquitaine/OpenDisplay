@@ -259,4 +259,53 @@ final class WakeConvergencePolicyTests: XCTestCase {
         XCTAssertTrue(intent.reassert.isEmpty)
         XCTAssertEqual(intent.recheckAfter, WakeConvergencePolicy.defaultReassertRecheckStep)
     }
+
+    // MARK: - The audit trail
+
+    /// The reported gap: a wake re-assert switched the built-in off with nothing in audit.jsonl to
+    /// say so. Every wake-convergence write now records who (the distinct actor) and what.
+    func testAReassertIsAuditedUnderItsOwnActorAndCommand() {
+        let entry = WakeConvergencePolicy.reassertAudit(of: offline("builtin"), committed: true,
+                                                        at: epoch)
+        XCTAssertEqual(entry.actor, .wakeConvergence)
+        XCTAssertEqual(entry.command, "reassertOff")
+        XCTAssertEqual(entry.transactionId, "txn_reassertOff")
+        XCTAssertEqual(entry.status, "committed")
+        XCTAssertEqual(entry.targets, ["builtin"])
+        XCTAssertEqual(entry.timestamp, epoch)
+    }
+
+    /// A refused disconnect is not silently dropped from history — it lands as "failed".
+    func testAFailedReassertIsAuditedAsFailed() {
+        let entry = WakeConvergencePolicy.reassertAudit(of: offline("builtin"), committed: false,
+                                                        at: epoch)
+        XCTAssertEqual(entry.status, "failed")
+    }
+
+    func testTheNetLightingItsFallbackIsAudited() {
+        let entry = WakeConvergencePolicy.netActivateAudit(of: offline("builtin"), committed: true,
+                                                           at: epoch)
+        XCTAssertEqual(entry.actor, .wakeConvergence)
+        XCTAssertEqual(entry.command, "netActivate")
+        XCTAssertEqual(entry.transactionId, "txn_netActivate")
+        XCTAssertEqual(entry.status, "committed")
+        XCTAssertEqual(entry.targets, ["builtin"])
+    }
+
+    func testAFailedNetActivationIsAuditedAsFailed() {
+        let entry = WakeConvergencePolicy.netActivateAudit(of: offline("builtin"), committed: false,
+                                                           at: epoch)
+        XCTAssertEqual(entry.status, "failed")
+    }
+
+    /// The escalation is system-wide (the public permanent-config restore names no display) and
+    /// reports no outcome, so its entry says exactly that: no targets, status "attempted".
+    func testTheNetEscalationIsAuditedWithoutTargets() {
+        let entry = WakeConvergencePolicy.netEscalateAudit(at: epoch)
+        XCTAssertEqual(entry.actor, .wakeConvergence)
+        XCTAssertEqual(entry.command, "netEscalate")
+        XCTAssertEqual(entry.transactionId, "txn_netEscalate")
+        XCTAssertEqual(entry.status, "attempted")
+        XCTAssertEqual(entry.targets, [])
+    }
 }

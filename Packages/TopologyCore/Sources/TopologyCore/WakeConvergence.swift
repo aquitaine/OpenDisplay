@@ -248,4 +248,44 @@ public enum WakeConvergencePolicy {
         let owned = Set(context.managedOffline.map(\.recordID))
         return visibleSurfaces(in: context.observations).contains { !owned.contains($0.recordID) }
     }
+
+    // MARK: - Audit trail
+
+    /// Command recorded when rule 2 puts a ledger display back off after macOS relit it on wake.
+    public static let reassertAuditCommand = "reassertOff"
+    /// Command recorded when rule 1 lights the fallback because nothing else is on screen.
+    public static let netActivateAuditCommand = "netActivate"
+    /// Command recorded when the net escalates to the public permanent-configuration restore
+    /// because the fallback it lit still produced no visible surface.
+    public static let netEscalateAuditCommand = "netEscalate"
+
+    /// The audit entry for one re-assert attempt (rule 2). Every one of these writes goes into the
+    /// same trail the CLI and App Intents report to; the distinct actor/command pair is what lets
+    /// "why did my built-in switch off just now?" be answered from the log instead of guessed at.
+    public static func reassertAudit(of display: ManagedOfflineDisplay, committed: Bool,
+                                     at now: Date) -> AuditEntry {
+        entry(command: reassertAuditCommand, committed: committed,
+              targets: [display.recordID.rawValue], at: now)
+    }
+
+    /// The audit entry for the net lighting its fallback display (rule 1).
+    public static func netActivateAudit(of display: ManagedOfflineDisplay, committed: Bool,
+                                        at now: Date) -> AuditEntry {
+        entry(command: netActivateAuditCommand, committed: committed,
+              targets: [display.recordID.rawValue], at: now)
+    }
+
+    /// The audit entry for the net's escalation. Status is always "attempted": the permanent-config
+    /// restore reports no per-display outcome, and no targets are named because it is system-wide.
+    public static func netEscalateAudit(at now: Date) -> AuditEntry {
+        AuditEntry(timestamp: now, actor: .wakeConvergence, command: netEscalateAuditCommand,
+                   transactionId: "txn_\(netEscalateAuditCommand)", status: "attempted", targets: [])
+    }
+
+    private static func entry(command: String, committed: Bool, targets: [String],
+                              at now: Date) -> AuditEntry {
+        AuditEntry(timestamp: now, actor: .wakeConvergence, command: command,
+                   transactionId: "txn_\(command)",
+                   status: committed ? "committed" : "failed", targets: targets)
+    }
 }

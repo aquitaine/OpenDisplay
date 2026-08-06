@@ -5,6 +5,20 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [Unreleased]
+
+### Fixed
+- **Every automatic display switch now leaves an audit entry.** The 0.10.0 wake fix could turn a
+  display off (or light one) without a trace in `audit.jsonl` — live, a built-in that relit on wake
+  and was put back off left the log still ending at the prior CLI disconnect. Wake-convergence
+  writes now record under their own actor, `wakeConvergence`: `reassertOff` when a ledger "off" is
+  re-asserted after wake, `netActivate` when the always-one-active net lights its fallback, and
+  `netEscalate` when it falls through to the permanent-configuration restore. The
+  auto-disconnect-on-external-arrival path — which on a wake can fire before the re-assert gets its
+  turn, and previously wrote nothing — records as `autoDisconnect`. Entries carry the real outcome
+  (`committed`/`failed`) instead of assuming success, so Settings → Recent Activity answers "why
+  did my display just switch?" with the exact path that did it.
+
 ## [0.10.0] — 2026-08-06
 
 Everything since 0.8.2 in one release: 0.9.0 was versioned in the tree but never published,
