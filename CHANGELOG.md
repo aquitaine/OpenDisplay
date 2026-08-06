@@ -5,7 +5,7 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
-## [Unreleased]
+## [0.10.1] — 2026-08-06
 
 ### Fixed
 - **Every automatic display switch now leaves an audit entry.** The 0.10.0 wake fix could turn a
@@ -18,6 +18,11 @@ change until 1.0.
   turn, and previously wrote nothing — records as `autoDisconnect`. Entries carry the real outcome
   (`committed`/`failed`) instead of assuming success, so Settings → Recent Activity answers "why
   did my display just switch?" with the exact path that did it.
+
+### Notes
+- Known issue: driving a group leader's brightness to its maximum can overwrite the group's
+  learned per-display offsets, after which followers track the leader too bright. Recreating the
+  group resets the offsets; a proper fix is in progress.
 
 ## [0.10.0] — 2026-08-06
 
