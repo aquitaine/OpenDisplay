@@ -26,6 +26,30 @@ change until 1.0.
   Grouped displays are excluded from Adaptive Display's brightness targeting so the two features
   can't fight. Groups are configured in Settings → Displays.
 
+### Fixed
+- **A display you turned off no longer lights back up when the Mac wakes.** With externals
+  connected and the built-in panel deliberately switched off, waking the Mac brought the built-in
+  back and left it on for the rest of the session. Three separate things had to be true for that,
+  and all three are fixed:
+
+  macOS relights the panel itself on wake — its display-configuration transactions don't survive a
+  sleep — and OpenDisplay read that as *you* having switched it back on, so it forgot the display
+  was ever meant to be off. It now tells the two apart, and switches the display back off once
+  another screen is lit to take over (bounded, so it never turns into a tug-of-war with macOS).
+  This works whether or not Protected Layout is on: a display you turned off is already an
+  explicit instruction, not something that should need a second switch.
+
+  The always-one-display-active safety net could also do it. For a second or two after a wake an
+  external that is still re-negotiating its link is indistinguishable from one that was unplugged,
+  and the net answered "nothing is on screen" by lighting the display you had turned off. It now
+  waits for a display that is plainly on its way back — while still guaranteeing a screen within
+  eight seconds no matter what the display list says, so the 0.8.2 black screen cannot return.
+
+  And Protected Layout could not have helped, because a switched-off display leaves macOS's
+  display list entirely: the moment it came back, the arrangement was filed under one display set
+  and looked up under another. Protected layouts now cover the displays they keep switched off —
+  in the key, in what is captured, and in what is restored.
+
 ### Notes
 - CLI group edits made while the app is running are overwritten when the app next saves its
   settings — quit the app first, or use Settings → Displays → Groups. A shared on-disk store is

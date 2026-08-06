@@ -42,8 +42,10 @@ no Dock icon.
 - **App Presets** — per-app display presets: your video editor gets full brightness and
   its colour preset, your terminal gets 40%, and everything restores when you switch away.
 - **Protected layout** — mark your arrangement as protected and OpenDisplay puts it back
-  when macOS shuffles it: positions, resolution, rotation, mirroring, and the main display,
-  restored seconds after hotplug or wake. Each display combination keeps its own layout.
+  when macOS shuffles it: positions, resolution, rotation, mirroring, the main display, and
+  which displays are switched off, restored seconds after hotplug or wake. Each display
+  combination keeps its own layout. A display you turned off in OpenDisplay is switched back
+  off after sleep whether or not you protect the layout.
 - **Display groups** — group displays so one brightness slider (or media key) moves them
   all, with per-display offsets the group *learns* from your adjustments instead of
   fighting them. Optional contrast sync.

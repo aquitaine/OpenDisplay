@@ -149,32 +149,92 @@ public enum LayoutProtectionPolicy {
         Set(recordIDs).map(\.rawValue).sorted().joined(separator: "|")
     }
 
-    /// The current display set's key. macOS's synthetic placeholder is excluded deliberately
-    /// (0.8.2): it appears when every real display has gone, and letting it into the key would mint
-    /// a phantom display set — and protect it.
-    public static func fingerprint(for snapshot: TopologySnapshot) -> String {
-        fingerprint(for: members(of: snapshot))
+    /// The current display set's key: the displays on the desk, whether or not one of them is
+    /// currently switched off.
+    ///
+    /// The ledger has to be part of it. "Turned the built-in off" is not a different desk — but a
+    /// logically disabled display is absent from `CGGetOnlineDisplayList` entirely, so keying on the
+    /// enumeration alone means the key silently changes the moment macOS relights that display. That
+    /// is exactly what happens on wake, and it made protection a guaranteed no-op at the one moment
+    /// it was most needed: the arrangement was filed under "two externals" and the machine woke up
+    /// asking about "two externals and a built-in".
+    ///
+    /// macOS's synthetic placeholder is excluded deliberately (0.8.2): it appears when every real
+    /// display has gone, and letting it into the key would mint a phantom display set — and protect it.
+    public static func fingerprint(for snapshot: TopologySnapshot,
+                                   managedOffline: Set<DisplayRecordID>) -> String {
+        fingerprint(for: members(of: snapshot, managedOffline: managedOffline))
     }
 
     /// The displays that make up this set, in the fingerprint's own sorted order.
-    public static func members(of snapshot: TopologySnapshot) -> [DisplayRecordID] {
-        realDisplays(of: snapshot).map(\.recordID).sorted { $0.rawValue < $1.rawValue }
+    public static func members(of snapshot: TopologySnapshot,
+                               managedOffline: Set<DisplayRecordID> = []) -> [DisplayRecordID] {
+        Set(realDisplays(of: snapshot).map(\.recordID)).union(managedOffline)
+            .sorted { $0.rawValue < $1.rawValue }
+    }
+
+    /// The displays a stored arrangement covers, including the ones it says must stay off — what the
+    /// Settings row and `layout status` count and name.
+    public static func members(of config: ProtectedConfig) -> [DisplayRecordID] {
+        members(of: config.snapshot, managedOffline: desiredOff(in: config.snapshot))
     }
 
     /// The protected layout for this display set, if the user has protected it.
     public static func protectedLayout(for snapshot: TopologySnapshot,
+                                       managedOffline: Set<DisplayRecordID>,
                                        in layouts: [String: ProtectedConfig]) -> ProtectedConfig? {
-        layouts[fingerprint(for: snapshot)]
+        layouts[fingerprint(for: snapshot, managedOffline: managedOffline)]
     }
 
     /// Captures the live arrangement as the protected layout for its own display set. Re-protecting
     /// overwrites, because the key is derived from the members rather than minted.
+    ///
+    /// The ledger is captured with it, in the snapshot's own `managedOffline` field. Without that the
+    /// stored arrangement has no way to say "and this display is off" — a logically disabled display
+    /// leaves no trace in the enumeration to record — so a restore could put everything else back
+    /// perfectly and still leave the built-in lit.
     public static func capture(_ snapshot: TopologySnapshot,
+                               managedOffline: [ManagedOfflineDisplay] = [],
                                at now: Date) -> (fingerprint: String, config: ProtectedConfig) {
+        let switchedOff = switchedOffIDs(in: snapshot, ledger: managedOffline)
+        let alreadyRecorded = snapshot.managedOffline
+        let owed = alreadyRecorded + switchedOff
+            .subtracting(alreadyRecorded.map(\.displayID))
+            .sorted { $0.rawValue < $1.rawValue }
+            .map {
+                ManagedOfflineRecord(displayID: $0, actor: .ui, reason: "protected layout",
+                                     disconnectedAt: now, providerID: "")
+            }
         let real = TopologySnapshot(
             generation: snapshot.generation, observations: realDisplays(of: snapshot),
-            managedOffline: snapshot.managedOffline, capturedAt: snapshot.capturedAt)
-        return (fingerprint(for: real), ProtectedConfig(snapshot: real, capturedAt: now))
+            managedOffline: owed, capturedAt: snapshot.capturedAt)
+        return (fingerprint(for: real, managedOffline: switchedOff),
+                ProtectedConfig(snapshot: real, capturedAt: now))
+    }
+
+    /// Every display on this desk that is switched off right now: the caller's ledger, plus anything
+    /// the snapshot itself already records as offline.
+    ///
+    /// Both sources are merged rather than one winning, and every caller that keys or captures a
+    /// layout goes through here. The app's ledger is the live record — Core Graphics snapshots carry
+    /// no offline list at all — while an observer that does report one (the simulator, a checkpoint
+    /// replay) knows things the caller may not. Two callers deriving this two ways is precisely how
+    /// `protect` and the lookup that follows it end up disagreeing about which desk they are on.
+    public static func switchedOffIDs(in snapshot: TopologySnapshot,
+                                      ledger: [ManagedOfflineDisplay]) -> Set<DisplayRecordID> {
+        Set(snapshot.managedOffline.map(\.displayID)).union(ledger.map(\.recordID))
+    }
+
+    /// The displays a protected arrangement says must be OFF — the ledger it was captured with, plus
+    /// any member that was captured dark.
+    ///
+    /// Both halves are needed because "off" has two shapes. The experimental provider truly disables
+    /// a display, so it is absent from the capture and survives only in the ledger; the public
+    /// provider MIRRORS it onto main, so it is captured, present, and inactive. One arrangement,
+    /// recorded two ways, and a restore has to recognise it either way.
+    public static func desiredOff(in protected: TopologySnapshot) -> Set<DisplayRecordID> {
+        Set(protected.managedOffline.map(\.displayID))
+            .union(protected.observations.filter { !$0.isActive }.map(\.recordID))
     }
 
     private static func realDisplays(of snapshot: TopologySnapshot) -> [DisplayObservation] {
@@ -233,33 +293,54 @@ public enum LayoutProtectionPolicy {
 
     /// The drift worth acting on, or nil when the current display set is not the protected set.
     ///
-    /// Two rules do the filtering. A display that appeared or disconnected means a *different* set
-    /// is on the desk, and that set's own protected layout (if any) is the one that applies —
-    /// restoring this one would drag a departed display's geometry onto the displays actually
-    /// present. And any change to a display in the managed-offline ledger is not drift at all: it is
-    /// the user's standing decision that this display stays off.
+    /// Two rules do the filtering, and both turn on the same distinction.
     ///
-    /// The ledger rule covers `mirrorChanged` as well as the obvious `activeChanged`, because
+    /// A display that appeared or disconnected normally means a *different* set is on the desk, and
+    /// that set's own protected layout (if any) is the one that applies —
+    /// restoring this one would drag a departed display's geometry onto the displays actually
+    /// present. The exception is a display the protected arrangement says must be OFF: the
+    /// experimental provider's "off" removes it from the enumeration entirely, so it *appears* the
+    /// moment macOS relights it and *disconnects* the moment we put it away. Neither is a new desk;
+    /// one is the drift to fix and the other is that fix having landed.
+    ///
+    /// The ledger rule is directional, and that direction is the whole point. A change to a display
+    /// the user turned off is left alone only when the protected arrangement wants that display ON —
+    /// there the ledger is the newer instruction and protection must not fight it. When the
+    /// protected arrangement wants it off too, restoring and the ledger agree, so the change IS
+    /// actionable. Read undirected (as it first shipped) the rule reads "never touch a display the
+    /// user turned off", which sounds right and means the app watches macOS switch the built-in back
+    /// on at every wake and decides, on principle, to leave it that way.
+    ///
+    /// Both rules cover `mirrorChanged` as well as the obvious `activeChanged`, because
     /// "turned off" has two shapes. The public lifecycle provider has no API to truly remove a
     /// display, so it approximates the disconnect by MIRRORING the display onto main — the only
     /// path in the public-API-only build, and the fallback in the full one. A display turned off
     /// that way is still enumerated, still in the protected set, and differs from the protected
-    /// snapshot in exactly one field: its mirror source. Treating that as drift would un-mirror it,
-    /// putting back the display the user turned off — and, worse, the app would then see it "come
-    /// back on its own" and drop its ledger entry, which is the only record that it is owed a
-    /// reconnect at all.
+    /// snapshot in exactly one field: its mirror source. Un-mirroring it because the protected
+    /// snapshot has it lit would put back the display the user turned off — and, worse, the app
+    /// would then see it "come back on its own" and drop its ledger entry, which is the only record
+    /// that it is owed a reconnect at all.
     public static func actionableDrift(protected: TopologySnapshot,
                                        current: TopologySnapshot,
                                        context: Context) -> DisplayConfigDrifter.DriftAnalysis? {
         let analysis = DisplayConfigDrifter.detectDrift(protected: protected,
                                                        current: awake(current, context: context))
+        let wantsOff = desiredOff(in: protected)
         var actionable: [DisplayConfigDrifter.Change] = []
         for change in analysis.changes {
             switch change {
-            case .appeared, .disconnected:
-                return nil
+            case .appeared(let displayID):
+                guard wantsOff.contains(displayID) else { return nil }
+                actionable.append(change)
+            case .disconnected(let displayID):
+                // The arrangement asked for this display to be gone and it is — or the user has
+                // since turned it off themselves. Either way this is convergence, not a new desk.
+                guard wantsOff.contains(displayID) || context.managedOfflineIDs.contains(displayID)
+                else { return nil }
             case .activeChanged(let displayID), .mirrorChanged(let displayID):
-                if !context.managedOfflineIDs.contains(displayID) { actionable.append(change) }
+                if !context.managedOfflineIDs.contains(displayID) || wantsOff.contains(displayID) {
+                    actionable.append(change)
+                }
             case .originMoved, .modeChanged, .rotationChanged, .mainChanged:
                 actionable.append(change)
             }
@@ -327,8 +408,19 @@ public enum LayoutProtectionPolicy {
     /// desired state is exactly what was captured. This rides the app's existing `applyScene` path,
     /// so checkpointing, verification, the audit trail, and the always-one-active net all apply
     /// without a second lifecycle implementation to keep in step.
+    ///
+    /// Displays the arrangement wants OFF are left out. Their captured geometry is not a place on
+    /// the desk — a display mirrored onto main was captured sitting exactly where main sits — so
+    /// asserting it would move a display that is supposed to be dark, and moving a mirrored display
+    /// is one of the ways macOS decides to un-mirror it.
     public static func restoreScene(for config: ProtectedConfig) -> Scene {
-        SceneRecorder.capture(from: config.snapshot, name: "Protected layout", id: restoreSceneID)
+        let wantsOff = desiredOff(in: config.snapshot)
+        let lit = TopologySnapshot(
+            generation: config.snapshot.generation,
+            observations: config.snapshot.observations.filter { !wantsOff.contains($0.recordID) },
+            managedOffline: config.snapshot.managedOffline,
+            capturedAt: config.snapshot.capturedAt)
+        return SceneRecorder.capture(from: lit, name: "Protected layout", id: restoreSceneID)
     }
 
     // MARK: - User-facing copy
@@ -345,9 +437,13 @@ public enum LayoutProtectionPolicy {
             case .modeChanged(let displayID): fieldsByDisplay[displayID, default: []].append("resolution")
             case .rotationChanged(let displayID): fieldsByDisplay[displayID, default: []].append("rotation")
             case .mirrorChanged(let displayID): fieldsByDisplay[displayID, default: []].append("mirroring")
-            case .activeChanged(let displayID): fieldsByDisplay[displayID, default: []].append("on/off")
+            // `appeared` reaches here only for a display the arrangement wants off — macOS switched
+            // it back on and the restore switched it away again, which reads as "on/off" like any
+            // other activity change.
+            case .activeChanged(let displayID), .appeared(let displayID):
+                fieldsByDisplay[displayID, default: []].append("on/off")
             case .mainChanged: mainMoved = true
-            case .appeared, .disconnected: break
+            case .disconnected: break
             }
         }
         var parts = fieldsByDisplay

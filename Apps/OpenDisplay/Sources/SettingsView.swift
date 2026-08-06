@@ -143,7 +143,9 @@ private struct ProtectedLayoutCard: View {
                     Text("Put my arrangement back when it changes")
                     Text("When macOS (or another app) moves a display, changes its resolution, or "
                          + "hands \u{201C}main\u{201D} to the other screen, the protected arrangement is "
-                         + "restored. A display you turned off yourself stays off.")
+                         + "restored \u{2014} including which displays are switched off. A display you "
+                         + "turned off in OpenDisplay is switched back off after sleep whether this "
+                         + "is on or not.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -179,7 +181,9 @@ private struct CurrentLayoutProtectionRow: View {
 
     private var status: String {
         guard let protected = model.protectedLayoutForCurrentSet else { return "Not protected" }
-        let count = protected.snapshot.observations.count
+        // Members, not observations: a display the arrangement keeps switched off is one of the
+        // displays it covers, and on the experimental path it left no observation behind to count.
+        let count = LayoutProtectionPolicy.members(of: protected).count
         return "Protected \u{00B7} \(count) display\(count == 1 ? "" : "s") \u{00B7} captured "
             + protected.capturedAt.formatted(.dateTime.month(.abbreviated).day())
     }
@@ -214,13 +218,14 @@ private struct OtherProtectedLayoutsList: View {
         }
     }
 
-    /// Names the members from the stored snapshot — those displays are absent, so the live
-    /// registry has nothing to name them with.
+    /// Names every member the arrangement covers, switched-off displays included. Those displays are
+    /// absent from the desk (and, when truly disabled, from the stored snapshot too), so the
+    /// remembered-display index is what names them.
     private func memberNames(of config: ProtectedConfig) -> String {
-        let names = config.snapshot.observations
-            .map { model.displayName(for: $0) }
+        LayoutProtectionPolicy.members(of: config)
+            .map { model.rememberedDisplayName(for: $0) }
             .sorted()
-        return names.joined(separator: " + ")
+            .joined(separator: " + ")
     }
 }
 

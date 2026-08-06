@@ -168,9 +168,11 @@ final class AppModel: ObservableObject {
     typealias OfflineDisplay = ManagedOfflineDisplay
 
     /// Count of currently-active REAL displays — the UI disables the off-toggle on the last one.
-    /// Excludes macOS's `.virtual` placeholder, which is never a surface the user can see.
+    /// Excludes macOS's `.virtual` placeholder, which is never a surface the user can see; the
+    /// predicate is `WakeConvergencePolicy`'s so the menu, the safety net, and the ledger can never
+    /// disagree about what counts as a screen.
     var activeDisplayCount: Int {
-        displays.filter { $0.isActive && $0.displayClass != .virtual }.count
+        WakeConvergencePolicy.visibleSurfaces(in: displays).count
     }
 
     /// True when any provider isn't fully supported — drives the menu-bar caution banner.
@@ -310,8 +312,29 @@ final class AppModel: ObservableObject {
     /// pending re-check: the timer keeps waiting and working in separate tasks so a debounce-driven
     /// restore can never be running inside the task it just cancelled.
     private let layoutProtectionRecheck = RecheckTimer()
-    /// Wake observer token, held while layout protection is on (a wake is one of the three triggers).
-    private var layoutProtectionWakeObserver: NSObjectProtocol?
+
+    /// Sleep/wake observer tokens. Held for the app's whole lifetime rather than with a feature
+    /// toggle: the managed-offline ledger is re-asserted across a wake whatever else is switched on
+    /// (see `WakeConvergencePolicy`), and Protected Layout's wake trigger rides along with them.
+    private var sleepWakeObservers: [NSObjectProtocol] = []
+    /// When the machine last woke. Inside `WakeConvergencePolicy.defaultWakeWindow` of this, a
+    /// display that lights up did so because macOS relit it, not because the user asked.
+    private var lastWakeAt: Date?
+    /// True between `willSleep` and the matching `didWake` — the gap in which reconfiguration events
+    /// arrive before macOS has said the machine woke.
+    private var isBetweenSleepAndWake = false
+    /// When the app first saw zero visible surfaces in the current dark spell, nil while it can see
+    /// one. The always-one-active net's deadline is measured from here.
+    private var displaysDarkSince: Date?
+    /// Re-assert attempts spent per display in this wake, so the app never fights macOS indefinitely
+    /// over one panel. Cleared on every wake.
+    private var offlineReassertAttempts: [DisplayRecordID: Int] = [:]
+    /// "Look again in a moment" for the always-one-active net, so a display still waking up isn't
+    /// mistaken for one that left. A `RecheckTimer` for the same reason Protected Layout uses one:
+    /// the work it fires begins by cancelling the pending re-check.
+    private let activeSurfaceRecheck = RecheckTimer()
+    /// The same, for putting a relit display back off once a real screen is available to cover it.
+    private let offlineIntentRecheck = RecheckTimer()
 
     init() {
         let observer = CoreGraphicsProvider()
@@ -342,6 +365,7 @@ final class AppModel: ObservableObject {
         // (recovery hierarchy step 3) and reachable even when the menu bar isn't; the rest are unbound
         // by default. A chord that can't be claimed is simply skipped (menu-bar item remains).
         registerHotkeys()
+        observeSleepAndWake()  // re-assert what the user turned off once macOS has woken the desk
         reconcileMediaKeyTap()  // Batch-3 #3: arm the media-key tap if enabled + Accessibility granted
         if settings.displayNotificationsEnabled { NotificationDelivery.requestAuthorization() }  // Batch-2 #5
         #if DEBUG
@@ -361,7 +385,7 @@ final class AppModel: ObservableObject {
             reconcileAppPresetObserver()  // observe the frontmost app if App Presets is enabled
             #endif
             autoDisconnectPolicy.seed(externalPresent: hasExternalDisplay)  // don't treat a pre-attached external as an arrival
-            reconcileLayoutProtectionObserver()  // Batch-4 #A: arm the wake trigger + check the launch arrangement
+            await evaluateLayoutProtection(trigger: .launch)  // Batch-4 #A: check the launch arrangement
             await autoCheckForUpdatesIfDue()
             await writeBaselineCheckpoint()
             if let marker = Self.readRotationMarker() {
@@ -401,6 +425,9 @@ final class AppModel: ObservableObject {
                 self?.mediaKeyTapRetry?.cancel()
                 self?.mediaKeyTap?.stop()
                 self?.layoutProtectionRecheck.cancel()
+                self?.activeSurfaceRecheck.cancel()
+                self?.offlineIntentRecheck.cancel()
+                self?.stopObservingSleepAndWake()
                 #if !PUBLIC_API_ONLY
                 self?.adaptiveLoop?.cancel()
                 self?.stopAppPresetObserver()
@@ -931,12 +958,20 @@ final class AppModel: ObservableObject {
         }
         displays = snapshot.observations.sorted { $0.recordID.rawValue < $1.recordID.rawValue }
         pruneControlCaches(to: Set(displays.map(\.recordID)))
-        // Drop any tracked off-display that has come back on its own (e.g. re-enabled elsewhere).
-        let priorOffline = managedOffline
-        managedOffline.removeAll { offline in
-            displays.contains { $0.recordID == offline.recordID && $0.isActive }
+        // The start of the current dark spell, stamped here because this is the one place the app
+        // looks at the world. The safety net measures its "give up waiting and light something"
+        // deadline from it, so it has to survive across the several events a wake emits.
+        displaysDarkSince = WakeConvergencePolicy.visibleSurfaces(in: displays).isEmpty
+            ? (displaysDarkSince ?? Date())
+            : nil
+        // Drop any tracked off-display that has come back on its own (e.g. re-enabled elsewhere) —
+        // unless we are still inside the wake window, where the same observation means macOS relit
+        // it and the entry is the only thing that remembers an "off" is owed.
+        let forget = WakeConvergencePolicy.entriesToForget(wakeConvergenceContext())
+        if !forget.isEmpty {
+            managedOffline.removeAll { forget.contains($0.recordID) }
+            persistManagedOffline()
         }
-        if managedOffline != priorOffline { persistManagedOffline() }
         // Guard against a no-op republish: the active/total count string is usually unchanged across
         // a refresh, and reassigning @Published fires objectWillChange and re-evaluates every view.
         let status = "\(snapshot.activeDisplays.count) active · \(snapshot.observations.count) total"
@@ -2269,18 +2304,22 @@ final class AppModel: ObservableObject {
         displayGroup(containing: observation.recordID).map { "Synced with \($0.name)" }
     }
 
-    /// A name for a group member that may not be present right now: its live/aliased name when the
+    /// A name for a display that may not be present right now: its live/aliased name when the
     /// display is here, else the remembered registry record's friendly name (alias → model → class
-    /// label). `records` only ever holds the displays of the current snapshot, so an absent member
+    /// label). `records` only ever holds the displays of the current snapshot, so an absent display
     /// is named from the registry index instead — otherwise the row reads `cg:37D8832A-2D66-…`,
-    /// which tells the user nothing about which monitor they are about to group. The raw id survives
-    /// only for a display the registry has never seen at all.
-    func groupMemberName(for member: DisplayRecordID) -> String {
-        if let observation = displays.first(where: { $0.recordID == member }) {
+    /// which tells the user nothing about which monitor it means. The raw id survives only for a
+    /// display the registry has never seen at all.
+    ///
+    /// Shared by the Groups card and the protected-layout rows, which have the same problem from
+    /// opposite ends: the display you most want named is the one that isn't on the desk — or the one
+    /// this app switched off.
+    func rememberedDisplayName(for display: DisplayRecordID) -> String {
+        if let observation = displays.first(where: { $0.recordID == display }) {
             return displayName(for: observation)
         }
-        guard let record = records[member] ?? registryKnownRecords[member] else {
-            return member.rawValue
+        guard let record = records[display] ?? registryKnownRecords[display] else {
+            return display.rawValue
         }
         return record.friendlyName()
     }
@@ -2294,7 +2333,7 @@ final class AppModel: ObservableObject {
         let remembered = registryKnownRecords.keys.filter { !connected.contains($0) }
         // Dictionary order is not stable across reads; sort by the name shown so the rows don't
         // reshuffle under the user's cursor between refreshes.
-        return connected + remembered.sorted { groupMemberName(for: $0) < groupMemberName(for: $1) }
+        return connected + remembered.sorted { rememberedDisplayName(for: $0) < rememberedDisplayName(for: $1) }
     }
 
     /// Creates a group; false when the name is blank or already taken (names are the CLI's handle on
@@ -2681,10 +2720,23 @@ final class AppModel: ObservableObject {
         await refresh()
     }
 
-    /// Turns a previously turned-off display back on. Reconnects by raw display id (a disabled
-    /// display drops off the online list, so UUID resolution can fail), then drops it from the
-    /// managed-offline list and re-reads the topology.
+    /// Turns a previously turned-off display back on because the user asked for it — from the menu,
+    /// a hotkey, or Protected Layout deciding the arrangement wants it lit. Reconnects by raw
+    /// display id (a disabled display drops off the online list, so UUID resolution can fail), then
+    /// drops it from the managed-offline list and re-reads the topology.
     func reconnectOffline(_ offline: OfflineDisplay) async {
+        await reconnectOffline(offline, forgettingIntent: true)
+    }
+
+    /// The reconnect above, plus the one question the callers disagree about: does bringing this
+    /// display back cancel the standing decision that it should be off?
+    ///
+    /// From the menu, yes — the user just said so. From the always-one-active safety net, no: that
+    /// reconnect is an emergency screen, not a change of mind, and forgetting the entry is precisely
+    /// what left the built-in lit with nothing left that remembered why it shouldn't be. The ledger
+    /// entry survives, and `WakeConvergencePolicy` puts the display away again once a real screen is
+    /// back to cover it — or drops the entry itself once the wake window closes with no rescue.
+    private func reconnectOffline(_ offline: OfflineDisplay, forgettingIntent: Bool) async {
         busy = true
         defer { busy = false }
         do {
@@ -2699,8 +2751,10 @@ final class AppModel: ObservableObject {
             await refresh()
             return
         }
-        managedOffline.removeAll { $0.recordID == offline.recordID }
-        persistManagedOffline()
+        if forgettingIntent {
+            managedOffline.removeAll { $0.recordID == offline.recordID }
+            persistManagedOffline()
+        }
         await refresh()
     }
 
@@ -2723,6 +2777,9 @@ final class AppModel: ObservableObject {
             #endif
             let autoDisconnected = await applyAutoDisconnectBuiltInIfNeeded()  // external arrived → built-in off
             postDisplayNotifications(prior: prior, builtInAutoDisconnected: autoDisconnected)  // Batch-2 #5
+            // The externals coming back is the event the wake re-assert has been waiting for: only
+            // now is there a screen to take over from the display macOS relit.
+            await reassertManagedOfflineIntent()
             await evaluateLayoutProtection(trigger: .topologyChange)  // Batch-4 #A: put a drifted layout back
         }
     }
@@ -2847,34 +2904,65 @@ final class AppModel: ObservableObject {
         try? settingsStore?.save(settings)
     }
 
-    /// The "one display is always active" safety net. If a topology change leaves nothing active —
-    /// e.g. the last external is physically unplugged while the built-in is logically off — re-enable
-    /// the built-in (or the most-recently disabled display) so the user is never left black-screened.
+    /// The "one display is always active" safety net. If a topology change leaves nothing the user
+    /// can see — e.g. the last external is physically unplugged while the built-in is logically off —
+    /// re-enable the built-in (or the most-recently disabled display) so nobody is left staring at a
+    /// dark Mac.
+    ///
+    /// The waiting half is the wake correction. A wake looks identical to an unplug for the second
+    /// or two while an external re-negotiates its link, and firing into that window lit the built-in
+    /// the user had deliberately turned off — the exact opposite of what they asked for, on every
+    /// single wake. `WakeConvergencePolicy` tells the two apart and still bounds the wait, so the
+    /// guarantee itself is unchanged: within `defaultRecoveryDeadline` seconds there is a screen,
+    /// whatever the display list claims.
     private func enforceActiveSurfaceInvariant() async {
-        // Count only surfaces the user can actually SEE. macOS answers the loss of every real
-        // display by synthesising a placeholder (`.virtual`) rather than reporting zero, so a
-        // plain "no active displays" test never becomes true and this net never fired.
-        let realSurfaces = displays.filter { $0.isActive && $0.displayClass != .virtual }
-        #if DEBUG
-        // Terse normally; the full per-display + gamma dump only when we appear to be stranded,
-        // which is when it is worth reading (and is what made this class of bug diagnosable).
-        if realSurfaces.isEmpty {
-            Self.err(Self.diagnosticState(displays: displays, busy: busy, managedOffline: managedOffline))
-        }
-        #endif
-        guard !busy, realSurfaces.isEmpty else { return }
-        let fallback = managedOffline.first(where: { $0.displayClass == .builtIn }) ?? managedOffline.last
-        guard let fallback else {
-            #if DEBUG
-            Self.err("ACTIVE-SURFACE GUARD: 0 active displays but NOTHING to restore — stranded!")
-            #endif
+        guard !busy else {
+            // A write is in flight, so the world is half-applied and not worth judging. While the
+            // screen is dark this re-arms rather than returning: the deadline must never be able to
+            // expire in a gap where nothing is scheduled to look again.
+            if displaysDarkSince != nil {
+                armActiveSurfaceRecheck(after: WakeConvergencePolicy.defaultRecheckStep)
+            }
             return
         }
-        #if DEBUG
-        Self.err("ACTIVE-SURFACE GUARD: 0 active displays — re-enabling \(fallback.name)")
-        #endif
-        await reconnectOffline(fallback)
-        await escalateIfStillStranded()
+        switch WakeConvergencePolicy.surfaceDecision(wakeConvergenceContext()) {
+        case .satisfied:
+            activeSurfaceRecheck.cancel()
+        case .waitForWakingDisplay(let delay):
+            #if DEBUG
+            Self.err("ACTIVE-SURFACE GUARD: nothing lit yet, but a display is on its way back — waiting")
+            #endif
+            armActiveSurfaceRecheck(after: delay)
+        case .stranded:
+            activeSurfaceRecheck.cancel()
+            #if DEBUG
+            // The full per-display + gamma dump only where it is worth reading — being stranded is
+            // what made this class of bug diagnosable in the first place.
+            Self.err(Self.diagnosticState(displays: displays, busy: busy, managedOffline: managedOffline))
+            Self.err("ACTIVE-SURFACE GUARD: 0 active displays but NOTHING to restore — stranded!")
+            #endif
+        case .restore(let fallback):
+            activeSurfaceRecheck.cancel()
+            #if DEBUG
+            Self.err(Self.diagnosticState(displays: displays, busy: busy, managedOffline: managedOffline))
+            Self.err("ACTIVE-SURFACE GUARD: 0 active displays — re-enabling \(fallback.name)")
+            #endif
+            // The ledger entry stays: this is an emergency screen, not the user changing their mind.
+            // Outside a wake the next refresh drops it anyway (the display really is back for good);
+            // inside one it survives, and the re-assert below puts the display away again.
+            await reconnectOffline(fallback, forgettingIntent: false)
+            await escalateIfStillStranded()
+        }
+    }
+
+    /// Schedules the next look, re-reading the topology first — the whole question is whether the
+    /// world has changed since the last one.
+    private func armActiveSurfaceRecheck(after delay: TimeInterval) {
+        activeSurfaceRecheck.arm(after: delay) { [weak self] in
+            guard let self else { return }
+            await self.refresh()
+            await self.enforceActiveSurfaceInvariant()
+        }
     }
 
     /// Verifies the rescue actually produced a screen, and escalates if it did not.
@@ -2887,7 +2975,7 @@ final class AppModel: ObservableObject {
     /// permanent-configuration restore, which is not bound to any one process's transaction.
     private func escalateIfStillStranded() async {
         await refresh()
-        guard displays.filter({ $0.isActive && $0.displayClass != .virtual }).isEmpty else { return }
+        guard WakeConvergencePolicy.visibleSurfaces(in: displays).isEmpty else { return }
         #if DEBUG
         Self.err("ACTIVE-SURFACE GUARD: still no real display — escalating to permanent-config restore")
         #endif
@@ -2905,6 +2993,118 @@ final class AppModel: ObservableObject {
         await refresh()
     }
 
+    // MARK: - Wake convergence
+
+    /// Watches the sleep/wake pair, for the app's whole lifetime.
+    ///
+    /// Deliberately not tied to any toggle. A display the user turned off through OpenDisplay is
+    /// already an explicit, per-display instruction — the ledger *is* the saved configuration for
+    /// that display — and re-asserting it after macOS relights the panel on wake is the app keeping
+    /// the promise it already made, not a new feature that has to be switched on. Protected Layout
+    /// sits one rung above (it restores the whole arrangement: origins, modes, main) and stays
+    /// opt-in; its wake trigger rides along here rather than owning a second observer.
+    ///
+    /// Both halves of the pair are observed because the display list moves on both sides of it: the
+    /// sleep marks the start of a transition in which nothing a display does is the user's doing,
+    /// and the wake is what puts a bound on how long that stays true.
+    private func observeSleepAndWake() {
+        guard sleepWakeObservers.isEmpty else { return }
+        let center = NSWorkspace.shared.notificationCenter
+        sleepWakeObservers = [
+            center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil,
+                               queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.isBetweenSleepAndWake = true }
+            },
+            center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil,
+                               queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    Task { await self.convergeAfterWake() }
+                }
+            }
+        ]
+    }
+
+    /// Drops the sleep/wake subscriptions so they can't outlive the app.
+    private func stopObservingSleepAndWake() {
+        for observer in sleepWakeObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        sleepWakeObservers.removeAll()
+    }
+
+    /// Everything the app owes the user the moment the machine comes back.
+    ///
+    /// Order matters and follows the lifecycle precedence ladder in `WakeConvergencePolicy`: make
+    /// sure something is lit first, then put back what the user turned off, then — if Protected
+    /// Layout is on — restore the rest of the arrangement around it. Each step is separately
+    /// re-armed by the topology events that keep arriving as displays finish waking, so a display
+    /// that takes ten seconds to light up is still converged on when it does.
+    private func convergeAfterWake() async {
+        lastWakeAt = Date()
+        isBetweenSleepAndWake = false  // the transition is over; the bounded window starts now
+        offlineReassertAttempts.removeAll()  // a new wake is a fresh world; prior attempts don't count
+        await refresh()
+        await enforceActiveSurfaceInvariant()
+        await reassertManagedOfflineIntent()
+        await evaluateLayoutProtection(trigger: .wake)
+    }
+
+    /// Puts back off every display the ledger owns that woke up with the machine.
+    ///
+    /// This is the fix for the reported bug in one function: macOS relights the built-in on wake
+    /// (its own display-configuration transactions don't survive a sleep), the app used to read that
+    /// as "the user turned it back on", drop the ledger entry, and leave the laptop panel glowing
+    /// next to the externals for the rest of the session. Now the return is recognised for what it
+    /// is and undone — but only once something else is lit to take over, and only a bounded number
+    /// of times, so the safety net's guarantee is never the thing being argued with.
+    private func reassertManagedOfflineIntent() async {
+        offlineIntentRecheck.cancel()
+        let intent = WakeConvergencePolicy.offlineIntent(wakeConvergenceContext())
+        // "Ask again" either because the policy said so (nothing lit yet to take over) or because a
+        // write is already in flight — an owed "off" must never be dropped on the floor for want of
+        // something scheduled to notice it again.
+        let isDeferredByAWriteInFlight = busy && !intent.reassert.isEmpty
+        if let delay = isDeferredByAWriteInFlight
+            ? WakeConvergencePolicy.defaultReassertRecheckStep
+            : intent.recheckAfter {
+            offlineIntentRecheck.arm(after: delay) { [weak self] in
+                guard let self else { return }
+                await self.refresh()
+                await self.reassertManagedOfflineIntent()
+            }
+        }
+        guard !busy, !intent.reassert.isEmpty else { return }
+        for offline in intent.reassert {
+            guard let live = displays.first(where: { $0.recordID == offline.recordID && $0.isActive })
+            else { continue }
+            offlineReassertAttempts[offline.recordID, default: 0] += 1
+            #if DEBUG
+            Self.err("WAKE: \(offline.name) came back with the machine — turning it off again")
+            #endif
+            await setDisplayActive(false, for: live)
+            await appendWakeConvergenceAudit(for: offline.recordID)
+        }
+    }
+
+    /// The observed world both wake-convergence decisions reason over.
+    private func wakeConvergenceContext() -> WakeConvergencePolicy.Context {
+        WakeConvergencePolicy.Context(
+            now: Date(), observations: displays, managedOffline: managedOffline,
+            lastWakeAt: lastWakeAt, isBetweenSleepAndWake: isBetweenSleepAndWake,
+            darkSince: displaysDarkSince, reassertAttempts: offlineReassertAttempts)
+    }
+
+    /// Records a wake re-assert in the shared audit trail, so "why did my built-in switch off just
+    /// now?" is answerable from `opendisplay activity` rather than guessed at.
+    private func appendWakeConvergenceAudit(for displayID: DisplayRecordID) async {
+        guard let directory = try? DiskAuditLog.defaultDirectory() else { return }
+        await DiskAuditLog(directory: directory).append(AuditEntry(
+            timestamp: Date(), actor: .system, command: "wakeReassertOffline",
+            transactionId: "txn_wakeReassertOffline", status: "committed",
+            targets: [displayID.rawValue]))
+    }
+
     // MARK: - Protected Layout (Batch-4 #A)
 
     /// The display-set key the current topology protects under (`LayoutProtectionPolicy`).
@@ -2920,7 +3120,11 @@ final class AppModel: ObservableObject {
     /// so the same button serves as "Update".
     func protectCurrentLayout() async {
         let snapshot = await observer.currentSnapshot()
-        let captured = LayoutProtectionPolicy.capture(snapshot, at: Date())
+        // The ledger goes in with it: "and the built-in is off" is part of this arrangement, and on
+        // the experimental path it is the only place that fact survives — a logically disabled
+        // display leaves nothing behind in the enumeration to capture.
+        let captured = LayoutProtectionPolicy.capture(snapshot, managedOffline: managedOffline,
+                                                      at: Date())
         settings.protectedLayouts[captured.fingerprint] = captured.config
         persistSettings()
         currentLayoutFingerprint = captured.fingerprint
@@ -2935,35 +3139,17 @@ final class AppModel: ObservableObject {
         persistSettings()
     }
 
-    /// Master toggle for Protected Layout. Turning it on arms the wake observer and checks the
-    /// current arrangement straight away; turning it off drops both.
+    /// Master toggle for Protected Layout. Turning it on checks the current arrangement straight
+    /// away; turning it off drops any pending re-check. The wake trigger itself belongs to
+    /// `observeSleepAndWake`, which runs whatever this toggle says — the ledger is re-asserted on
+    /// wake with or without whole-arrangement protection.
     func setLayoutProtectionEnabled(_ enabled: Bool) {
         guard settings.layoutProtectionEnabled != enabled else { return }
         settings.layoutProtectionEnabled = enabled
         persistSettings()
-        reconcileLayoutProtectionObserver()
-    }
-
-    /// Starts or stops the wake observer to match the toggle (mirrors `reconcileAppPresetObserver`).
-    /// Idempotent, so it is safe on every settings change.
-    func reconcileLayoutProtectionObserver() {
-        guard settings.layoutProtectionEnabled else {
-            if let observer = layoutProtectionWakeObserver {
-                NSWorkspace.shared.notificationCenter.removeObserver(observer)
-                layoutProtectionWakeObserver = nil
-            }
+        guard enabled else {
             layoutProtectionRecheck.cancel()
             return
-        }
-        if layoutProtectionWakeObserver == nil {
-            layoutProtectionWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
-                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    Task { await self.evaluateLayoutProtection(trigger: .wake) }
-                }
-            }
         }
         Task { [weak self] in
             guard let self else { return }
@@ -2979,7 +3165,14 @@ final class AppModel: ObservableObject {
     func evaluateLayoutProtection(trigger: LayoutProtectionPolicy.Trigger) async {
         layoutProtectionRecheck.cancel()
         let snapshot = await observer.currentSnapshot()
-        let fingerprint = LayoutProtectionPolicy.fingerprint(for: snapshot)
+        // The ledger is part of the key. Without it the fingerprint changes the instant macOS
+        // relights a display the user turned off — so on wake the app would look up a display set
+        // it had never protected and conclude, correctly and uselessly, that there is nothing to
+        // restore. That miss is why protection did nothing at the one moment it was needed.
+        let fingerprint = LayoutProtectionPolicy.fingerprint(
+            for: snapshot,
+            managedOffline: LayoutProtectionPolicy.switchedOffIDs(in: snapshot,
+                                                                  ledger: managedOffline))
         // Republish only on a real change: this runs on every topology event, and reassigning a
         // @Published value re-evaluates every observing view.
         if currentLayoutFingerprint != fingerprint { currentLayoutFingerprint = fingerprint }
@@ -3064,13 +3257,24 @@ final class AppModel: ObservableObject {
 
     /// Restores the on/off differences the policy asked for through the paths the menu already uses —
     /// `reconnectOffline` to bring one back, the gated coordinator disconnect to put one away — so
-    /// the safety net, the ledger, and the audit trail behave exactly as they always do. Displays the
-    /// user deliberately turned off never reach here: the policy filtered them out.
+    /// the safety net, the ledger, and the audit trail behave exactly as they always do.
+    ///
+    /// `appeared` counts as an activity change here, and it is the shape the reported wake bug takes
+    /// on the experimental path: the arrangement was captured with the built-in truly disabled, so
+    /// the built-in is absent from the stored snapshot entirely, and macOS relighting it reads as a
+    /// display that appeared out of nowhere rather than one that switched on. The policy only marks
+    /// it actionable when the arrangement says that display must be off, so the wanted state for
+    /// every id reaching here is simply "off unless the arrangement lists it as lit".
     private func restoreProtectedActiveState(_ config: ProtectedConfig,
                                              analysis: DisplayConfigDrifter.DriftAnalysis) async {
+        let wantsOff = LayoutProtectionPolicy.desiredOff(in: config.snapshot)
         for change in analysis.changes {
-            guard case .activeChanged(let id) = change,
-                  let wanted = config.snapshot.observation(for: id)?.isActive else { continue }
+            let id: DisplayRecordID
+            switch change {
+            case .activeChanged(let changed), .appeared(let changed): id = changed
+            default: continue
+            }
+            let wanted = !wantsOff.contains(id)
             if wanted, let offline = managedOffline.first(where: { $0.recordID == id }) {
                 await reconnectOffline(offline)
             } else if !wanted, let live = displays.first(where: { $0.recordID == id && $0.isActive }) {
