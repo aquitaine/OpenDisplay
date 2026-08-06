@@ -42,8 +42,10 @@ no Dock icon.
 - **App Presets** — per-app display presets: your video editor gets full brightness and
   its colour preset, your terminal gets 40%, and everything restores when you switch away.
 - **Protected layout** — mark your arrangement as protected and OpenDisplay puts it back
-  when macOS shuffles it: positions, resolution, rotation, mirroring, and the main display,
+  when macOS shuffles it: positions, resolution, refresh, mirroring, and the main display,
   restored seconds after hotplug or wake. Each display combination keeps its own layout.
+  (Rotation drift is detected and reported, but auto-restoring it needs the experimental
+  rotation helper from Labs.)
 - **Display groups** — group displays so one brightness slider (or media key) moves them
   all, with per-display offsets the group *learns* from your adjustments instead of
   fighting them. Optional contrast sync.
@@ -193,7 +195,7 @@ toolchain is installed (macOS Xcode 16+ or Linux).
 
 ```sh
 make bootstrap   # ensure a Swift 6 toolchain (installs it on Ubuntu; checks Xcode on macOS)
-make test        # swift build && swift test --parallel   (240 unit/state-machine tests)
+make test        # swift build && swift test --parallel   (549 unit/state-machine tests)
 make lint        # SwiftLint, if installed
 ```
 

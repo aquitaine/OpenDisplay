@@ -1169,6 +1169,5 @@ case "help", "--help", "-h":
     group's base level and each member follows it at its own learned offset.
     """)
 default:
-    fail("unknown command '\(command)' (try: list, diagnose, lux, lid, listen, alias, tag, disconnect, reconnect, recover, scene, layout, brightness, ddc, help)", code: 2)
-    fail("unknown command '\(command)' (try: list, diagnose, lux, lid, listen, alias, tag, disconnect, reconnect, recover, scene, group, brightness, ddc, help)", code: 2)
+    fail("unknown command '\(command)' (try: list, diagnose, lux, lid, listen, alias, tag, disconnect, reconnect, recover, scene, layout, group, brightness, ddc, help)", code: 2)
 }

@@ -181,7 +181,7 @@ IOAVService) — higher maintenance risk across macOS releases.
 
 | Feature | BD tier | OD status | Notes / API / difficulty |
 |---|---|---|---|
-| Display-config protection (res / refresh / VRR / rotation / profile) | Pro | ✅ Have | Protected layout (0.9.0, #38): res/refresh/rotation/mirror/main drift auto-restored via the scene/safety engine. Profiles/VRR not captured. |
+| Display-config protection (res / refresh / VRR / rotation / profile) | Pro | ✅ Have | Protected layout (0.9.0, #38): res/refresh/mirror/main drift auto-restored via the scene/safety engine. Rotation drift is detected and notified but not auto-restored (rotation writes live in the experimental helper). Profiles/VRR not captured. |
 | Layout protection with anchor points | Pro | ✅ Have | Protected layout (0.9.0, #38): arrangement persisted per display set, re-applied on hotplug/wake/launch. |
 | Advanced layout management | Pro | ⬜ Gap | Richer multi-display arrangement tooling. `medium–high` |
 | Custom display groups | Pro | ✅ Have | Display groups (0.9.0, #39): Settings card + CLI `group` verbs, one group per display. |

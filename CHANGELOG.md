@@ -9,10 +9,13 @@ change until 1.0.
 
 ### Added
 - **Protected layout** (Issue #38) — mark your current display arrangement as protected, and
-  OpenDisplay puts it back when something else moves it. Origins, resolution, refresh, rotation,
+  OpenDisplay puts it back when something else moves it. Origins, resolution, refresh,
   mirroring, and the main display are captured per *display set* — your laptop-alone layout and
   your desk layout are protected independently — and re-applied within seconds after hotplug,
   wake, or a stray arrangement change, with a notification saying exactly what was restored.
+  Rotation drift is detected and reported, but not auto-restored: rotation writes require the
+  experimental rotation helper (Labs), so a rotated-out-from-under-you display produces a
+  "couldn't restore" notification rather than a silent half-restore.
   Restores run through the same checkpointed, verified, audited transaction path as every other
   change, so the always-one-display-active guarantee holds throughout; a display you deliberately
   turned off stays off, restore attempts are capped (never a tug-of-war with macOS), and the app's
@@ -27,9 +30,9 @@ change until 1.0.
   can't fight. Groups are configured in Settings → Displays.
 
 ### Notes
-- CLI group edits made while the app is running are overwritten when the app next saves its
-  settings — quit the app first, or use Settings → Displays → Groups. A shared on-disk store is
-  planned.
+- CLI edits to app-owned settings made while the app is running — `group` edits and
+  `layout protect|unprotect` alike — are overwritten when the app next saves its settings.
+  Quit the app first, or use the Settings window. A shared on-disk store is planned.
 
 ## [0.8.2] — 2026-07-27
 
