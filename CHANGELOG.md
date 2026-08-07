@@ -5,6 +5,23 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.10.2] — 2026-08-08
+
+### Fixed
+- **A saved "built-in off" now survives a slow external across lid-open + unlock.** Live case: lid
+  opened, thumbprint unlock, the built-in lit first (the always-one-active net doing its job) — but
+  the ultrawide became an active surface only after the 20-second wake window had closed. At that
+  edge the app concluded the *user* had re-enabled the built-in, erased the owed "off" from the
+  ledger, and when the external finally lit, nothing put the built-in back off (the auto-disconnect
+  edge didn't fire either — the external never left enumeration during this sleep, so there was no
+  "arrival"). The wake's attribution is now *stamped onto the ledger entry* the moment it is made
+  (`relitDuringWakeAt`): a stamped "off" stays owed past the window — time-to-unlock is unbounded —
+  and is paid whenever the covering display actually lights, then the stamp comes off. The stamp
+  persists with the ledger, so an app relaunch mid-convergence doesn't amnesty it; outside a wake,
+  un-stamped entries are still forgotten exactly as before (a System Settings re-enable stays the
+  user's decision). Past the window the backstop poll slows from 2 s to 30 s — the topology event
+  the external raises on activation is what normally answers anyway.
+
 ## [0.10.1] — 2026-08-06
 
 ### Fixed

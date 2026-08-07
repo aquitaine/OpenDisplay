@@ -13,14 +13,23 @@ public struct ManagedOfflineDisplay: Hashable, Sendable, Codable, Identifiable {
     public var cgID: UInt32
     public var name: String
     public var displayClass: DisplayClass
+    /// When macOS relit this display during a wake, while its "off" was still owed. Nil in the
+    /// normal state (the display really is off). The stamp is what lets the owed "off" outlive the
+    /// wake window: the window exists to tell the user's own re-enable apart from macOS's, but the
+    /// covering display's return can outlast it (time-to-unlock is unbounded), and a stamped entry
+    /// decays on *convergence* — the re-assert putting the display back off — not on a clock.
+    /// Optional and absent from old ledgers, so the app and CLI read either format.
+    public var relitDuringWakeAt: Date?
 
     public var id: DisplayRecordID { recordID }
 
-    public init(recordID: DisplayRecordID, cgID: UInt32, name: String, displayClass: DisplayClass) {
+    public init(recordID: DisplayRecordID, cgID: UInt32, name: String, displayClass: DisplayClass,
+                relitDuringWakeAt: Date? = nil) {
         self.recordID = recordID
         self.cgID = cgID
         self.name = name
         self.displayClass = displayClass
+        self.relitDuringWakeAt = relitDuringWakeAt
     }
 
     /// The selector reconnect should use: the raw display id when we have one, since a disabled

@@ -385,6 +385,7 @@ final class AppModel: ObservableObject {
             await refresh()
             await restoreOwedFaceLightState()  // crash-safe recovery: relaunching mid-FaceLight restores it
             await enforceActiveSurfaceInvariant()  // recover if we launched into a stranded (0-active) state
+            await reassertManagedOfflineIntent()  // a stamped owed-"off" survives a relaunch; pay it if covered
             reconcileDisplaySleepGuard()  // hold/release the keep-awake assertion for the launch topology
             #if !PUBLIC_API_ONLY
             reconcileAdaptiveLoop()  // start adaptive brightness/warmth if enabled for this topology
@@ -610,11 +611,15 @@ final class AppModel: ObservableObject {
 
     /// Loads persisted off-displays and reconciles them against the live topology: any that are back
     /// online + active are dropped (they returned on their own); the rest remain as off-cards.
+    /// Entries stamped as relit by a wake are kept even while active — the "off" is still owed, the
+    /// covering display just hasn't returned yet, and an app restart must not amnesty it.
     private func loadManagedOffline() async {
         guard let saved = managedOfflineStore?.load(), !saved.isEmpty else { return }
         let snapshot = await observer.currentSnapshot()
         let activeIDs = Set(snapshot.activeDisplays.map(\.recordID))
-        managedOffline = saved.filter { !activeIDs.contains($0.recordID) }
+        managedOffline = saved.filter {
+            $0.relitDuringWakeAt != nil || !activeIDs.contains($0.recordID)
+        }
         if managedOffline != saved { persistManagedOffline() }
     }
 
@@ -970,6 +975,18 @@ final class AppModel: ObservableObject {
         displaysDarkSince = WakeConvergencePolicy.visibleSurfaces(in: displays).isEmpty
             ? (displaysDarkSince ?? Date())
             : nil
+        // A ledger display lit during the wake window gets the wake's stamp before anything can
+        // judge it: the window can only attribute the relight while it is open, and the external
+        // that must arrive before the "off" can be re-asserted routinely takes longer than the
+        // window lasts (it often lights only after the user unlocks). The stamp is what keeps the
+        // owed "off" alive past that edge — it decays when the re-assert pays it, not on the clock.
+        let stamp = WakeConvergencePolicy.entriesToStampRelit(wakeConvergenceContext())
+        if !stamp.isEmpty {
+            for index in managedOffline.indices where stamp.contains(managedOffline[index].recordID) {
+                managedOffline[index].relitDuringWakeAt = Date()
+            }
+            persistManagedOffline()
+        }
         // Drop any tracked off-display that has come back on its own (e.g. re-enabled elsewhere) —
         // unless we are still inside the wake window, where the same observation means macOS relit
         // it and the entry is the only thing that remembers an "off" is owed.
@@ -3107,6 +3124,13 @@ final class AppModel: ObservableObject {
             let committed = await setDisplayActive(false, for: live, as: .wakeConvergence)
             await appendAudit(
                 WakeConvergencePolicy.reassertAudit(of: offline, committed: committed, at: Date()))
+            // Convergence pays the owed "off", so the wake's stamp comes off with it. Leaving it
+            // would make a later re-enable in System Settings read as still-owed and be undone.
+            if committed,
+               let index = managedOffline.firstIndex(where: { $0.recordID == offline.recordID }) {
+                managedOffline[index].relitDuringWakeAt = nil
+                persistManagedOffline()
+            }
         }
     }
 

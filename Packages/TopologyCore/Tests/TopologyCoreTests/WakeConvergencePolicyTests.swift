@@ -14,9 +14,11 @@ final class WakeConvergencePolicyTests: XCTestCase {
     }
 
     private func offline(_ id: String,
-                         displayClass: DisplayClass = .builtIn) -> ManagedOfflineDisplay {
+                         displayClass: DisplayClass = .builtIn,
+                         stamped: Bool = false) -> ManagedOfflineDisplay {
         ManagedOfflineDisplay(recordID: .init(rawValue: id), cgID: 7, name: id,
-                              displayClass: displayClass)
+                              displayClass: displayClass,
+                              relitDuringWakeAt: stamped ? epoch.addingTimeInterval(-60) : nil)
     }
 
     private func context(_ observations: [DisplayObservation],
@@ -179,6 +181,89 @@ final class WakeConvergencePolicyTests: XCTestCase {
         let forget = WakeConvergencePolicy.entriesToForget(
             context([obs("ext")], offline: [offline("builtin")]))
         XCTAssertTrue(forget.isEmpty)
+    }
+
+    // MARK: - Rule 2: the wake's stamp, which carries the owed "off" past the window
+
+    /// The relight is attributed while the window can still tell whose doing it was — and only
+    /// then. Outside the window a lit ledger display means the user, and gets no stamp.
+    func testAVisibleLedgerDisplayIsStampedInsideTheWakeAndOnlyThere() {
+        let world = { (wokeSecondsAgo: TimeInterval) in
+            self.context([self.obs("builtin", displayClass: .builtIn)],
+                         offline: [self.offline("builtin")], wokeSecondsAgo: wokeSecondsAgo)
+        }
+        XCTAssertEqual(WakeConvergencePolicy.entriesToStampRelit(world(2)),
+                       [.init(rawValue: "builtin")])
+        XCTAssertTrue(WakeConvergencePolicy.entriesToStampRelit(
+            world(WakeConvergencePolicy.defaultWakeWindow)).isEmpty)
+    }
+
+    func testAStillDarkLedgerDisplayGetsNoStamp() {
+        let stamp = WakeConvergencePolicy.entriesToStampRelit(
+            context([obs("ext")], offline: [offline("builtin")], wokeSecondsAgo: 2))
+        XCTAssertTrue(stamp.isEmpty)
+    }
+
+    func testAnAlreadyStampedEntryIsNotStampedAgain() {
+        let stamp = WakeConvergencePolicy.entriesToStampRelit(
+            context([obs("builtin", displayClass: .builtIn)],
+                    offline: [offline("builtin", stamped: true)], wokeSecondsAgo: 2))
+        XCTAssertTrue(stamp.isEmpty)
+    }
+
+    /// The reported bug, second edition: the external lit only after the user's thumbprint, well
+    /// past the 20-second window, and the window closing had *erased* the owed "off" — the built-in
+    /// stayed glowing next to the ultrawide for the rest of the session. A stamped entry is never
+    /// forgotten for being visible, however long ago the window closed.
+    func testAStampedEntryOutlivesTheWakeWindow() {
+        let forget = WakeConvergencePolicy.entriesToForget(
+            context([obs("builtin", displayClass: .builtIn), obs("ext")],
+                    offline: [offline("builtin", stamped: true)],
+                    wokeSecondsAgo: 300))
+        XCTAssertTrue(forget.isEmpty)
+    }
+
+    /// …and when the external finally does light, the "off" is paid — minutes after the window
+    /// would have given up.
+    func testAStampedEntryIsPutBackOffWheneverTheExternalFinallyLights() {
+        let intent = WakeConvergencePolicy.offlineIntent(
+            context([obs("builtin", displayClass: .builtIn), obs("ext")],
+                    offline: [offline("builtin", stamped: true)],
+                    wokeSecondsAgo: 300))
+        XCTAssertEqual(intent.reassert, [offline("builtin", stamped: true)])
+        XCTAssertNil(intent.recheckAfter)
+    }
+
+    /// While the covering display is still missing, the pending wait slows to the long step:
+    /// nothing bounds a lock screen, and the activation's own topology event is what normally
+    /// answers first anyway.
+    func testAStampedEntryWaitsAtTheSlowerPendingPaceOutsideTheWindow() {
+        let intent = WakeConvergencePolicy.offlineIntent(
+            context([obs("builtin", displayClass: .builtIn)],
+                    offline: [offline("builtin", stamped: true)],
+                    wokeSecondsAgo: 300))
+        XCTAssertTrue(intent.reassert.isEmpty)
+        XCTAssertEqual(intent.recheckAfter, WakeConvergencePolicy.defaultPendingRecheckStep)
+    }
+
+    /// The attempts cap is about flicker, not clocks — it binds a stamped entry the same way.
+    func testAStampedEntryStillRespectsTheAttemptsCap() {
+        let spent = [DisplayRecordID(rawValue: "builtin"):
+                        WakeConvergencePolicy.defaultMaximumReassertAttempts]
+        let intent = WakeConvergencePolicy.offlineIntent(
+            context([obs("builtin", displayClass: .builtIn), obs("ext")],
+                    offline: [offline("builtin", stamped: true)],
+                    wokeSecondsAgo: 300, attempts: spent))
+        XCTAssertTrue(intent.reassert.isEmpty)
+        XCTAssertNil(intent.recheckAfter)
+    }
+
+    /// A ledger of old, never-stamped format entries behaves exactly as before the stamp existed.
+    func testAnOldFormatLedgerEntryDecodesWithoutAStamp() throws {
+        let json = #"[{"recordID":{"rawValue":"cg:X"},"cgID":3,"name":"P","displayClass":"builtIn"}]"#
+        let decoded = try JSONDecoder().decode([ManagedOfflineDisplay].self,
+                                               from: Data(json.utf8))
+        XCTAssertNil(decoded.first?.relitDuringWakeAt)
     }
 
     // MARK: - Rule 2: putting the relit display back off
