@@ -34,6 +34,13 @@ public enum WakeConvergencePolicy {
     /// training after a wake is routinely several seconds — so the window has to outlast the
     /// slowest panel while staying short enough that a user re-enabling a display a minute later is
     /// unambiguously their own decision.
+    ///
+    /// The window only needs to catch the *relight* of a ledger display (macOS does that promptly,
+    /// and the net's fallback fires within `defaultRecoveryDeadline`); it does not need to outlast
+    /// the covering display's return. That attribution is stamped onto the entry the moment it is
+    /// made (`entriesToStampRelit`), and a stamped "off" stays owed past the window until the
+    /// re-assert can actually pay it — the external often lights only after the user unlocks, and
+    /// nothing bounds how long that takes.
     public static let defaultWakeWindow: TimeInterval = 20
 
     /// The longest the always-one-active net will wait for a display that looks like it is coming
@@ -52,6 +59,13 @@ public enum WakeConvergencePolicy {
     /// topology signature, so the event stream is what normally ends this wait. Each pass costs a
     /// full topology re-read, and the window it covers is twenty seconds wide.
     public static let defaultReassertRecheckStep: TimeInterval = 2
+
+    /// The re-assert's between-looks wait once the wake window has closed but a stamped entry is
+    /// still owed (see `ManagedOfflineDisplay.relitDuringWakeAt`). Much longer than the in-window
+    /// step because this state can last as long as the lock screen does — the covering display often
+    /// lights only after the user unlocks — and the topology event the activation raises is what
+    /// actually ends the wait; the poll only insures against a missed event.
+    public static let defaultPendingRecheckStep: TimeInterval = 30
 
     /// Times the app will put one display back off per wake before letting it be. Same instinct as
     /// `LayoutProtectionPolicy.defaultMaximumRestoreAttempts`: macOS can insist, and a tug-of-war
@@ -85,6 +99,7 @@ public enum WakeConvergencePolicy {
         public var recoveryDeadline: TimeInterval
         public var recheckStep: TimeInterval
         public var reassertRecheckStep: TimeInterval
+        public var pendingRecheckStep: TimeInterval
         public var maximumReassertAttempts: Int
 
         public init(now: Date,
@@ -99,6 +114,8 @@ public enum WakeConvergencePolicy {
                     recheckStep: TimeInterval = WakeConvergencePolicy.defaultRecheckStep,
                     reassertRecheckStep: TimeInterval =
                         WakeConvergencePolicy.defaultReassertRecheckStep,
+                    pendingRecheckStep: TimeInterval =
+                        WakeConvergencePolicy.defaultPendingRecheckStep,
                     maximumReassertAttempts: Int =
                         WakeConvergencePolicy.defaultMaximumReassertAttempts) {
             self.now = now
@@ -112,6 +129,7 @@ public enum WakeConvergencePolicy {
             self.recoveryDeadline = recoveryDeadline
             self.recheckStep = recheckStep
             self.reassertRecheckStep = reassertRecheckStep
+            self.pendingRecheckStep = pendingRecheckStep
             self.maximumReassertAttempts = maximumReassertAttempts
         }
     }
@@ -201,10 +219,32 @@ public enum WakeConvergencePolicy {
     /// and this entry is the ONLY record that an "off" is still owed. Forgetting it there is what
     /// made the built-in light up on every wake and stay lit, with nothing left that remembered why
     /// it shouldn't be.
+    ///
+    /// A *stamped* entry (`relitDuringWakeAt` set) is never forgotten for being visible: the stamp
+    /// is the durable record that the relight was the wake's doing, kept because the covering
+    /// display's return routinely outlives the window — the external lights only after the user
+    /// unlocks, and nothing bounds how long the lock screen lasts. Dropping the entry at the
+    /// window's edge is exactly the bug that left the built-in glowing beside the external for the
+    /// rest of the session.
     public static func entriesToForget(_ context: Context) -> Set<DisplayRecordID> {
         guard !isWakingUp(context) else { return [] }
         let visible = Set(visibleSurfaces(in: context.observations).map(\.recordID))
-        return Set(context.managedOffline.map(\.recordID).filter(visible.contains))
+        return Set(context.managedOffline
+            .filter { $0.relitDuringWakeAt == nil && visible.contains($0.recordID) }
+            .map(\.recordID))
+    }
+
+    /// Ledger entries lit right now, inside the wake, not yet marked as macOS's doing — the ones
+    /// the caller should stamp (`relitDuringWakeAt`) and persist. Stamping is what carries the
+    /// owed "off" past the window: the window can only *attribute* the relight while it is open,
+    /// so the attribution is recorded the moment it is made, and the owed state then decays on
+    /// convergence (the re-assert succeeding) rather than on the clock.
+    public static func entriesToStampRelit(_ context: Context) -> Set<DisplayRecordID> {
+        guard isWakingUp(context) else { return [] }
+        let visible = Set(visibleSurfaces(in: context.observations).map(\.recordID))
+        return Set(context.managedOffline
+            .filter { $0.relitDuringWakeAt == nil && visible.contains($0.recordID) }
+            .map(\.recordID))
     }
 
     /// The "off"s that are owed right now and whether they can be paid yet.
@@ -227,17 +267,26 @@ public enum WakeConvergencePolicy {
     /// is only applied once a display the ledger does NOT own is lit, so the last thing standing can
     /// never be the thing we turn off. Until then the answer is "ask again" — which is exactly the
     /// wake case the user sees, where the built-in comes back first and the externals follow.
+    ///
+    /// An entry is owed either inside the wake window or — however long ago the window closed —
+    /// while it carries the wake's stamp: the external taking longer to return than the window
+    /// lasts must delay the convergence, never cancel it. Past the window the recheck slows to
+    /// `pendingRecheckStep`; the topology event the covering display raises on activation is what
+    /// normally ends the wait.
     public static func offlineIntent(_ context: Context) -> OfflineIntent {
-        guard isWakingUp(context) else { return OfflineIntent(reassert: []) }
+        let waking = isWakingUp(context)
         let visible = Set(visibleSurfaces(in: context.observations).map(\.recordID))
         let owed = context.managedOffline.filter { offline in
             visible.contains(offline.recordID)
+                && (waking || offline.relitDuringWakeAt != nil)
                 && context.reassertAttempts[offline.recordID, default: 0]
                     < context.maximumReassertAttempts
         }
         guard !owed.isEmpty else { return OfflineIntent(reassert: []) }
         guard hasCoveringSurface(context) else {
-            return OfflineIntent(reassert: [], recheckAfter: context.reassertRecheckStep)
+            return OfflineIntent(
+                reassert: [],
+                recheckAfter: waking ? context.reassertRecheckStep : context.pendingRecheckStep)
         }
         return OfflineIntent(reassert: owed)
     }
