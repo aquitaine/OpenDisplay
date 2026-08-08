@@ -5,6 +5,15 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.10.3] — 2026-08-08
+
+### Added
+- **An app icon.** OpenDisplay finally has a face: a neon-outline display with a power symbol on a
+  dark squircle, in the macOS Big Sur+ icon style. It shows up in Finder, the app switcher,
+  notifications, and System Settings panes — everywhere the generic app placeholder used to be.
+  Both app variants (full and public-API-only) carry it; the 1024px master lives in
+  `Docs/assets/app-icon-1024.png`.
+
 ## [0.10.2] — 2026-08-08
 
 ### Fixed

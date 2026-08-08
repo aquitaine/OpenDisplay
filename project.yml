@@ -41,8 +41,8 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "0.10.2"
-    CURRENT_PROJECT_VERSION: "18"
+    MARKETING_VERSION: "0.10.3"
+    CURRENT_PROJECT_VERSION: "19"
     CODE_SIGN_STYLE: Automatic
     ENABLE_HARDENED_RUNTIME: YES
 
@@ -149,7 +149,10 @@ targets:
   OpenDisplay:
     type: application
     platform: macOS
-    sources: [Apps/OpenDisplay/Sources]
+    sources:
+      - Apps/OpenDisplay/Sources
+      - path: Apps/OpenDisplay/Resources/AppIcon.icns
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.opendisplay.app
@@ -185,7 +188,10 @@ targets:
   OpenDisplay-PublicAPIOnly:
     type: application
     platform: macOS
-    sources: [Apps/OpenDisplay/Sources]
+    sources:
+      - Apps/OpenDisplay/Sources
+      - path: Apps/OpenDisplay/Resources/AppIcon.icns
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.opendisplay.app.publicapionly
