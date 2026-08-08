@@ -8,6 +8,10 @@ sunset, a one-press **video-call fill light**, and **per-input hotkeys** for KVM
 open alternative to **BetterDisplay**, **Lunar**, and **MonitorControl**.
 
 <p align="center">
+  <img src="Docs/images/demo.gif" width="410" alt="Live demo: the OpenDisplay menu-bar popover opens, an external monitor's hardware DDC brightness is dragged up, then the built-in display card is expanded, its brightness adjusted, and XDR 2× brightness toggled on and off" />
+</p>
+
+<p align="center">
   <img src="Docs/images/menubar.png" width="330" alt="OpenDisplay menu-bar popover: per-display cards with resolution and refresh rate, a managed-offline display with one-click reconnect, and tools" />
   &nbsp;
   <img src="Docs/images/settings.png" width="430" alt="OpenDisplay settings: resolution and favourites, rotation and colour, and DDC/CI hardware controls — contrast, input source, and panel power" />
