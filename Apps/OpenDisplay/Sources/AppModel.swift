@@ -374,6 +374,7 @@ final class AppModel: ObservableObject {
         registerHotkeys()
         observeSleepAndWake()  // re-assert what the user turned off once macOS has woken the desk
         reconcileMediaKeyTap()  // Batch-3 #3: arm the media-key tap if enabled + Accessibility granted
+        reconcileXDRPowerAutomation()  // Issue #35: watch power only if an XDR battery rule is armed
         if settings.displayNotificationsEnabled { NotificationDelivery.requestAuthorization() }  // Batch-2 #5
         #if DEBUG
         FileHandle.standardError.write(Data("Global hotkeys registered: \(hotKeys.count)\n".utf8))
@@ -429,6 +430,8 @@ final class AppModel: ObservableObject {
                 self?.sleepGuard.releaseAll()
                 self?.xdrRampTask?.cancel()
                 self?.xdrTrigger.disengage()  // process-bound anyway; one line for tidiness
+                self?.xdrAutoOffTimer.cancel()
+                self?.xdrPowerMonitor.stop()
                 self?.mediaKeyTapRetry?.cancel()
                 self?.mediaKeyTap?.stop()
                 self?.layoutProtectionRecheck.cancel()
@@ -726,6 +729,31 @@ final class AppModel: ObservableObject {
     /// rises. Short-lived (≤ 8 s); replaced on every slider set.
     private var xdrRampTask: Task<Void, Never>?
 
+    /// The power automations' pure state: the fraction a battery-family rule owes back, and when the
+    /// live boost was engaged. Session-only like the boost itself — a relaunch starts at normal
+    /// brightness, so there is never anything to restore across one.
+    private var xdrPowerAutomation = XDRPowerAutomation()
+    /// IOKit power-source + Low Power Mode watcher. Held only while XDR Brightness is on AND a
+    /// battery-family rule is armed (see `reconcileXDRPowerAutomation`).
+    private let xdrPowerMonitor = PowerSourceMonitor()
+    /// The last power state read. Seeded on every monitor start, refreshed by the monitor's
+    /// callback; while the monitor is stopped every rule that could read it is switched off.
+    private var xdrPowerSnapshot = XDRPowerAutomation.PowerSnapshot.onWallPower
+    /// Fires the auto-off deadline. A `RecheckTimer` for the reason Protected Layout uses one: the
+    /// work it fires re-arms (and therefore cancels) the very timer that scheduled it.
+    private let xdrAutoOffTimer = RecheckTimer()
+
+    /// The user's automation settings as the pure policy's `Rules`. Read fresh on every evaluation
+    /// so a toggle flipped mid-suspension takes effect on the next pass rather than the next boost.
+    private var xdrAutomationRules: XDRPowerAutomation.Rules {
+        XDRPowerAutomation.Rules(
+            disableOnBattery: settings.xdrDisableOnBattery,
+            lowBatteryCutoffPercent: settings.xdrLowBatteryCutoffPercent,
+            disableInLowPowerMode: settings.xdrDisableInLowPowerMode,
+            autoOffMinutes: settings.xdrAutoOffMinutes,
+            restoreOnPower: settings.xdrRestoreOnPower)
+    }
+
     /// Whether the XDR row is offered for `observation`: the Labs toggle is on, it's the built-in
     /// panel, and its screen reports EDR potential beyond SDR (only XDR-class panels do).
     func xdrCapable(_ observation: DisplayObservation) -> Bool {
@@ -734,24 +762,56 @@ final class AppModel: ObservableObject {
         return screen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1.0
     }
 
-    /// Sets the XDR boost fraction (0...1) for the built-in XDR panel. A positive fraction shows
-    /// the EDR trigger and starts the ramp follower — the backlight takes several seconds to reach
-    /// full headroom, and each tick re-expresses gamma so brightness rides the ramp up. Zero
-    /// cancels the follower, drops the trigger, and re-expresses neutral (boost-1) gamma.
+    /// Sets the XDR boost fraction (0...1) the **user** asked for — the slider, the menu's one-tap
+    /// toggle, and the Labs switch turning itself off. Applies it, then tells the power automations
+    /// that this fraction is the user's own: their auto-off clock restarts from here, and anything
+    /// they were owing is forgotten, so no automation can later overwrite a level the user just
+    /// chose with a stale one it remembered.
+    ///
+    /// Automation writes deliberately do NOT come through here — they call `applyXDRBoost` directly,
+    /// so a suspend can't erase the fraction it is saving.
     func setXDRBoost(_ fraction: Float, for observation: DisplayObservation) {
-        guard let cgID = observation.cgDisplayID else { return }
+        applyXDRBoost(fraction, for: observation)
+        // The applied fraction, not the requested one: a boost asked for on a display that turned
+        // out to be offline lands as zero, and the automations must record what actually happened.
+        xdrPowerAutomation.noteUserSet(fraction: xdrBoostFraction[observation.recordID] ?? 0, at: Date())
+        evaluateXDRPowerAutomation()
+    }
+
+    /// The mechanical half of the boost funnel — every boost write, user or automation, ends here.
+    /// A positive fraction shows the EDR trigger and starts the ramp follower: the backlight takes
+    /// several seconds to reach full headroom, and each tick re-expresses gamma so brightness rides
+    /// the ramp up. Zero cancels the follower, drops the trigger, and re-expresses neutral
+    /// (boost-1) gamma.
+    ///
+    /// Zero must land display-or-not, which is why the two directions are split. A boosted panel can
+    /// leave CG enumeration while its record lingers in `displays` — a lid-closed or managed-offline
+    /// built-in keeps its `DisplayRecordID` with `cgDisplayID == nil`, and `pruneControlCaches` only
+    /// forgets the fraction once the record itself goes — and that absence is precisely when the
+    /// automation's cleanup rule fires a zero. So zero always clears the session state (fraction,
+    /// ramp follower, EDR trigger) and skips only the gamma re-express, the one step that needs a
+    /// display to write to; otherwise the stale fraction and its lit menu toggle would outlive the
+    /// panel forever, every later evaluation re-deciding the same no-op suspend. A positive fraction
+    /// still can't land on a panel that isn't there and returns having changed nothing — `setXDRBoost`
+    /// records the *applied* fraction afterward, so the automations see the zero that really happened.
+    private func applyXDRBoost(_ fraction: Float, for observation: DisplayObservation) {
         let id = observation.recordID
         let fraction = min(max(fraction, 0), 1)
-        xdrBoostFraction[id] = fraction > 0 ? fraction : nil
-        xdrRampTask?.cancel()
-        xdrRampTask = nil
         guard fraction > 0 else {
+            xdrBoostFraction[id] = nil
+            xdrRampTask?.cancel()
+            xdrRampTask = nil
             xdrTrigger.disengage()
-            guard !blackedOut.contains(id) else { return }  // Black Out stays the last gamma writer
+            // Black Out stays the last gamma writer; a departed panel has no gamma to re-express.
+            guard let cgID = observation.cgDisplayID, !blackedOut.contains(id) else { return }
             let split = DimmingComposer.split(method: settings.dimmingMethod, level: softwareDim[id] ?? 1)
             writeGamma(level: split.gammaLevel, id: id, cgID: cgID)
             return
         }
+        guard let cgID = observation.cgDisplayID else { return }  // gone from CG: nothing to boost
+        xdrBoostFraction[id] = fraction
+        xdrRampTask?.cancel()
+        xdrRampTask = nil
         guard let screen = Self.screen(for: cgID) else {  // offline / mid-reconfig: nothing to boost
             xdrBoostFraction[id] = nil
             return
@@ -802,6 +862,124 @@ final class AppModel: ObservableObject {
         }
         settings.xdrBrightnessEnabled = enabled
         persistSettings()
+        reconcileXDRPowerAutomation()  // the automations are inert while the feature is off
+    }
+
+    // MARK: - XDR power automations (battery / Low Power Mode / auto-off)
+
+    /// Runs the pure policy against the live power state, topology, and boost, and performs whatever
+    /// it decides through the same funnel a user's slider uses. Idempotent, so it is safe (and
+    /// intended) to call on every power change, Low Power Mode change, topology change, timer fire,
+    /// settings change, and manual boost — missing an edge is the only real failure mode.
+    private func evaluateXDRPowerAutomation() {
+        let boosted = displays.first { xdrBoostFraction[$0.recordID] != nil }
+        // "Active", not merely present: a lid-closed built-in can linger in enumeration with the
+        // boost's fraction still set, which is exactly the stale state rule 6 exists to clear.
+        let builtIn = displays.first { $0.displayClass == .builtIn && $0.isActive }
+        let decision = xdrPowerAutomation.evaluate(
+            rules: xdrAutomationRules,
+            power: xdrPowerSnapshot,
+            boostFraction: boosted.flatMap { xdrBoostFraction[$0.recordID] },
+            builtInActive: builtIn != nil,
+            now: Date())
+        switch decision {
+        case .none:
+            break
+        case .suspend(let reason):
+            if let boosted { applyXDRBoost(0, for: boosted) }
+            postXDRAutomationNotification(reason)
+        case .restore(let fraction):
+            // The panel has to still be there and still be XDR-capable (which also re-checks the
+            // Labs toggle). If it isn't, the suspension is simply dropped — the policy has already
+            // forgotten it, and a boost is never owed across a display's absence.
+            guard let builtIn, xdrCapable(builtIn) else { break }
+            applyXDRBoost(fraction, for: builtIn)
+        }
+        reconcileXDRPowerAutomation()
+    }
+
+    /// Starts or stops the power monitor and arms or cancels the auto-off deadline for the current
+    /// settings. Pure setup — it never evaluates, so the evaluate → reconcile → evaluate cycle a
+    /// self-refreshing monitor callback would create can't form.
+    private func reconcileXDRPowerAutomation() {
+        let rules = xdrAutomationRules
+        if settings.xdrBrightnessEnabled, rules.needsPowerMonitoring {
+            let wasRunning = xdrPowerMonitor.isRunning
+            xdrPowerMonitor.start { [weak self] snapshot in
+                guard let self else { return }
+                self.xdrPowerSnapshot = snapshot
+                self.evaluateXDRPowerAutomation()
+            }
+            // Seed from a fresh read on the way up: a rule enabled while already on battery must act
+            // on that, not wait for the next power transition to tell it something it could look up.
+            if !wasRunning { xdrPowerSnapshot = PowerSourceMonitor.currentSnapshot() }
+        } else {
+            xdrPowerMonitor.stop()
+            xdrPowerSnapshot = .onWallPower  // no listeners, no readings — don't act on a stale one
+        }
+        if settings.xdrBrightnessEnabled, let deadline = xdrPowerAutomation.autoOffDeadline(rules: rules) {
+            xdrAutoOffTimer.arm(after: deadline.timeIntervalSinceNow) { [weak self] in
+                self?.evaluateXDRPowerAutomation()
+            }
+        } else {
+            xdrAutoOffTimer.cancel()
+        }
+    }
+
+    /// Tells the user why their screen just dimmed, through the existing notifications path and only
+    /// when they've turned notifications on. A boost vanishing without explanation is the failure
+    /// mode this whole feature would otherwise introduce. Reasons that carry no body (the built-in
+    /// going away) stay silent by design — see `SuspensionReason.notificationBody`.
+    private func postXDRAutomationNotification(_ reason: XDRPowerAutomation.SuspensionReason) {
+        guard settings.displayNotificationsEnabled, let body = reason.notificationBody else { return }
+        NotificationDelivery.post(NotificationPolicy.DisplayNotification(
+            title: XDRPowerAutomation.notificationTitle, body: body))
+    }
+
+    /// Turn an active boost off when the Mac switches to battery power.
+    func setXDRDisableOnBattery(_ enabled: Bool) {
+        guard settings.xdrDisableOnBattery != enabled else { return }
+        settings.xdrDisableOnBattery = enabled
+        persistSettings()
+        reconcileXDRPowerAutomation()  // start/stop the monitor before anything reads its snapshot
+        evaluateXDRPowerAutomation()
+    }
+
+    /// Turn an active boost off below this battery percentage (nil = never).
+    func setXDRLowBatteryCutoffPercent(_ percent: Int?) {
+        let percent = percent.map { min(max($0, 1), 100) }
+        guard settings.xdrLowBatteryCutoffPercent != percent else { return }
+        settings.xdrLowBatteryCutoffPercent = percent
+        persistSettings()
+        reconcileXDRPowerAutomation()
+        evaluateXDRPowerAutomation()
+    }
+
+    /// Turn an active boost off while macOS Low Power Mode is on.
+    func setXDRDisableInLowPowerMode(_ enabled: Bool) {
+        guard settings.xdrDisableInLowPowerMode != enabled else { return }
+        settings.xdrDisableInLowPowerMode = enabled
+        persistSettings()
+        reconcileXDRPowerAutomation()
+        evaluateXDRPowerAutomation()
+    }
+
+    /// Turn an active boost off this many minutes after it was engaged (nil = never). Changing it
+    /// re-arms against the *existing* engagement, so shortening the limit can expire a boost at once.
+    func setXDRAutoOffMinutes(_ minutes: Int?) {
+        let minutes = minutes.map { max($0, 1) }
+        guard settings.xdrAutoOffMinutes != minutes else { return }
+        settings.xdrAutoOffMinutes = minutes
+        persistSettings()
+        evaluateXDRPowerAutomation()
+    }
+
+    /// Put a boost a battery-family rule suspended back when all of those conditions clear.
+    func setXDRRestoreOnPower(_ enabled: Bool) {
+        guard settings.xdrRestoreOnPower != enabled else { return }
+        settings.xdrRestoreOnPower = enabled
+        persistSettings()
+        evaluateXDRPowerAutomation()  // enabling it can pay a restore that's already owed
     }
 
     /// Displays currently blacked out (gamma driven to zero — the panel stays logically connected so it
@@ -969,6 +1147,11 @@ final class AppModel: ObservableObject {
         }
         displays = snapshot.observations.sorted { $0.recordID.rawValue < $1.recordID.rawValue }
         pruneControlCaches(to: Set(displays.map(\.recordID)))
+        // The trigger window has just been re-fitted (or dropped) for the new topology; the boost
+        // FRACTION it was paired with is what the automations look after. A built-in that stopped
+        // being an active surface — lid closed, clamshell — leaves the fraction set and the slider
+        // up on a panel nobody is looking at, so it's cleared here through the normal funnel.
+        evaluateXDRPowerAutomation()
         // The start of the current dark spell, stamped here because this is the one place the app
         // looks at the world. The safety net measures its "give up waiting and light something"
         // deadline from it, so it has to survive across the several events a wake emits.
@@ -3423,6 +3606,10 @@ final class AppModel: ObservableObject {
         xdrRampTask?.cancel()
         xdrBoostFraction.removeAll()
         xdrTrigger.disengage()  // process-bound anyway; dropped now so the backlight relaxes at once
+        // A user-driven "put everything back" is the user setting the boost to zero: it disarms the
+        // auto-off deadline and cancels any restore the automations were still owing.
+        xdrPowerAutomation.noteUserSet(fraction: 0, at: Date())
+        reconcileXDRPowerAutomation()
         sleepGuard.releaseAll()
     }
 

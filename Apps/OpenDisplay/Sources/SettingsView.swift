@@ -641,6 +641,9 @@ private struct HealthSection: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                if model.settings.xdrBrightnessEnabled {
+                    XDRPowerAutomationRows()
+                }
 
                 Divider()
 
@@ -667,6 +670,74 @@ private struct HealthSection: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .navigationTitle("Health & Recovery")
+    }
+}
+
+// MARK: - XDR Brightness power automations (Issue #35)
+
+/// The rules that turn an XDR boost back off on their own, shown under the Labs toggle only while
+/// XDR Brightness is on — they are meaningless otherwise, and the Labs section is long enough.
+///
+/// Indented under the feature they qualify, like the automatic-update row under its check toggle.
+/// The restore row is last and reads as the softener it is: it only ever undoes the three rules
+/// above it, and the auto-off timer deliberately isn't one of them.
+private struct XDRPowerAutomationRows: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: Binding(
+                get: { model.settings.xdrDisableOnBattery },
+                set: { model.setXDRDisableOnBattery($0) }
+            )) {
+                Text("Turn off on battery power")
+            }
+            Toggle(isOn: Binding(
+                get: { model.settings.xdrDisableInLowPowerMode },
+                set: { model.setXDRDisableInLowPowerMode($0) }
+            )) {
+                Text("Turn off in Low Power Mode")
+            }
+            HStack(spacing: 16) {
+                Picker("Turn off below", selection: Binding(
+                    get: { model.settings.xdrLowBatteryCutoffPercent },
+                    set: { model.setXDRLowBatteryCutoffPercent($0) })) {
+                    Text("Never").tag(Int?.none)
+                    ForEach(XDRPowerAutomation.lowBatteryCutoffOptions, id: \.self) { percent in
+                        Text("\(percent)% battery").tag(Int?.some(percent))
+                    }
+                }
+                .fixedSize()
+                Picker("Turn off after", selection: Binding(
+                    get: { model.settings.xdrAutoOffMinutes },
+                    set: { model.setXDRAutoOffMinutes($0) })) {
+                    Text("Never").tag(Int?.none)
+                    ForEach(XDRPowerAutomation.autoOffMinuteOptions, id: \.self) { minutes in
+                        Text(Self.durationLabel(minutes)).tag(Int?.some(minutes))
+                    }
+                }
+                .fixedSize()
+            }
+            Toggle(isOn: Binding(
+                get: { model.settings.xdrRestoreOnPower },
+                set: { model.setXDRRestoreOnPower($0) }
+            )) {
+                Text("Bring the boost back when power returns")
+            }
+            Text("The boost is the biggest single draw on the battery, so these switch it off for "
+                 + "you. The first three are conditions \u{2014} when they all clear, the last one "
+                 + "puts the exact brightness you had back, unless you\u{2019}ve changed it "
+                 + "yourself since. The timer isn\u{2019}t: time spent is spent.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(.leading, ODSpacing.lg)
+    }
+
+    /// "30 min" / "1 hour" / "2 hours" — minutes below an hour, whole hours above.
+    private static func durationLabel(_ minutes: Int) -> String {
+        guard minutes >= 60 else { return "\(minutes) min" }
+        let hours = minutes / 60
+        return hours == 1 ? "1 hour" : "\(hours) hours"
     }
 }
 

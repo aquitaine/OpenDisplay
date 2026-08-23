@@ -110,6 +110,51 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(store.load().xdrBrightnessEnabled)
     }
 
+    func testXDRPowerAutomationsDefaultOffExceptRestoreAndRoundTrip() throws {
+        let defaults = OpenDisplaySettings.default
+        XCTAssertFalse(defaults.xdrDisableOnBattery)
+        XCTAssertNil(defaults.xdrLowBatteryCutoffPercent)
+        XCTAssertFalse(defaults.xdrDisableInLowPowerMode)
+        XCTAssertNil(defaults.xdrAutoOffMinutes)
+        XCTAssertTrue(defaults.xdrRestoreOnPower)  // the one default-on rule: rules that undo themselves
+        let store = SettingsStore(directory: directory)
+        let settings = OpenDisplaySettings(
+            xdrBrightnessEnabled: true, xdrDisableOnBattery: true, xdrLowBatteryCutoffPercent: 20,
+            xdrDisableInLowPowerMode: true, xdrAutoOffMinutes: 30, xdrRestoreOnPower: false)
+        try store.save(settings)
+        XCTAssertEqual(store.load(), settings)
+        XCTAssertEqual(store.load().xdrLowBatteryCutoffPercent, 20)
+        XCTAssertEqual(store.load().xdrAutoOffMinutes, 30)
+    }
+
+    func testXDRPowerAutomationFieldsDefaultOnAFileFromBeforeTheyExisted() throws {
+        // A settings file written by 0.10.x carries the XDR toggle but none of the automations:
+        // the toggle must survive and the new keys take their defaults (restore on, rest off/nil).
+        try Data(#"{"confirmationCountdownSeconds":8,"xdrBrightnessEnabled":true}"#.utf8)
+            .write(to: directory.appendingPathComponent("settings.json"))
+        let loaded = SettingsStore(directory: directory).load()
+        XCTAssertTrue(loaded.xdrBrightnessEnabled)
+        XCTAssertFalse(loaded.xdrDisableOnBattery)
+        XCTAssertNil(loaded.xdrLowBatteryCutoffPercent)
+        XCTAssertNil(loaded.xdrAutoOffMinutes)
+        XCTAssertTrue(loaded.xdrRestoreOnPower)
+        XCTAssertEqual(loaded.confirmationCountdownSeconds, 8)
+    }
+
+    func testAnUndecodableXDRCutoffLosesOnlyThatKey() throws {
+        // A reshaped cutoff (e.g. after a downgrade) must not cost the user the whole file — least
+        // of all the FaceLight/app-preset restore ledgers that share it.
+        let json = #"""
+        {"xdrBrightnessEnabled":true,"xdrLowBatteryCutoffPercent":"twenty",
+         "xdrDisableOnBattery":true}
+        """#
+        try Data(json.utf8).write(to: directory.appendingPathComponent("settings.json"))
+        let loaded = SettingsStore(directory: directory).load()
+        XCTAssertNil(loaded.xdrLowBatteryCutoffPercent)
+        XCTAssertTrue(loaded.xdrDisableOnBattery)
+        XCTAssertTrue(loaded.xdrBrightnessEnabled)
+    }
+
     func testLayoutProtectionDefaultsOffAndRoundTrips() throws {
         let defaults = OpenDisplaySettings.default
         XCTAssertFalse(defaults.layoutProtectionEnabled)

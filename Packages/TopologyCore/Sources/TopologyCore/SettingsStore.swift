@@ -119,6 +119,22 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
     /// for SDR content via `XDRBrightnessPolicy`. Only this opt-in toggle persists — the boost
     /// level itself is session-only, so a relaunch always starts at normal brightness. Default off.
     public var xdrBrightnessEnabled: Bool
+    /// XDR power automations (`XDRPowerAutomation`): zero an active boost when the Mac switches to
+    /// battery power. Default off — the boost stays a manual, deliberate thing unless asked.
+    public var xdrDisableOnBattery: Bool
+    /// Zero an active boost when, on battery, the charge falls to or below this percentage. Nil =
+    /// never. Independent of `xdrDisableOnBattery`: the boost can be allowed on battery right up
+    /// until the charge gets low.
+    public var xdrLowBatteryCutoffPercent: Int?
+    /// Zero an active boost while macOS Low Power Mode is on. Default off.
+    public var xdrDisableInLowPowerMode: Bool
+    /// Zero an active boost this many minutes after it was engaged. Nil = never. Unlike the rules
+    /// above this is an event, not a condition — an elapsed allowance is never given back.
+    public var xdrAutoOffMinutes: Int?
+    /// Put a boost that a battery-family rule suspended back when every one of those conditions
+    /// clears. Default ON: without it those rules are a one-way trip that silently re-dims the
+    /// screen for the rest of the session. Inert while none of them is enabled.
+    public var xdrRestoreOnPower: Bool
     /// Protected Layout (Batch-4 #A): when on, an arrangement the user marked protected is put back
     /// automatically after macOS (or another app) moves it. Default off.
     public var layoutProtectionEnabled: Bool
@@ -170,6 +186,11 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         appPresets: [AppPresetPolicy.AppPreset] = [],
         appPresetPriorStateByDisplay: [String: AppPresetPolicy.PriorState] = [:],
         xdrBrightnessEnabled: Bool = false,
+        xdrDisableOnBattery: Bool = false,
+        xdrLowBatteryCutoffPercent: Int? = nil,
+        xdrDisableInLowPowerMode: Bool = false,
+        xdrAutoOffMinutes: Int? = nil,
+        xdrRestoreOnPower: Bool = true,
         layoutProtectionEnabled: Bool = false,
         protectedLayouts: [String: ProtectedConfig] = [:],
         displayGroups: [DisplayGroup] = []
@@ -210,6 +231,11 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         self.appPresets = appPresets
         self.appPresetPriorStateByDisplay = appPresetPriorStateByDisplay
         self.xdrBrightnessEnabled = xdrBrightnessEnabled
+        self.xdrDisableOnBattery = xdrDisableOnBattery
+        self.xdrLowBatteryCutoffPercent = xdrLowBatteryCutoffPercent
+        self.xdrDisableInLowPowerMode = xdrDisableInLowPowerMode
+        self.xdrAutoOffMinutes = xdrAutoOffMinutes
+        self.xdrRestoreOnPower = xdrRestoreOnPower
         self.layoutProtectionEnabled = layoutProtectionEnabled
         self.protectedLayouts = protectedLayouts
         self.displayGroups = displayGroups
@@ -252,6 +278,11 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
         case appPresets
         case appPresetPriorStateByDisplay
         case xdrBrightnessEnabled
+        case xdrDisableOnBattery
+        case xdrLowBatteryCutoffPercent
+        case xdrDisableInLowPowerMode
+        case xdrAutoOffMinutes
+        case xdrRestoreOnPower
         case layoutProtectionEnabled
         case protectedLayouts
         case displayGroups
@@ -339,6 +370,16 @@ public struct OpenDisplaySettings: Hashable, Sendable, Codable {
             ?? defaults.appPresetPriorStateByDisplay
         xdrBrightnessEnabled = container.lenient(Bool.self, forKey: .xdrBrightnessEnabled)
             ?? defaults.xdrBrightnessEnabled
+        xdrDisableOnBattery = container.lenient(Bool.self, forKey: .xdrDisableOnBattery)
+            ?? defaults.xdrDisableOnBattery
+        xdrLowBatteryCutoffPercent = container.lenient(Int.self, forKey: .xdrLowBatteryCutoffPercent)
+            ?? defaults.xdrLowBatteryCutoffPercent
+        xdrDisableInLowPowerMode = container.lenient(Bool.self, forKey: .xdrDisableInLowPowerMode)
+            ?? defaults.xdrDisableInLowPowerMode
+        xdrAutoOffMinutes = container.lenient(Int.self, forKey: .xdrAutoOffMinutes)
+            ?? defaults.xdrAutoOffMinutes
+        xdrRestoreOnPower = container.lenient(Bool.self, forKey: .xdrRestoreOnPower)
+            ?? defaults.xdrRestoreOnPower
         layoutProtectionEnabled = container.lenient(Bool.self, forKey: .layoutProtectionEnabled)
             ?? defaults.layoutProtectionEnabled
         protectedLayouts = container.lenient([String: ProtectedConfig].self, forKey: .protectedLayouts)

@@ -5,6 +5,28 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [Unreleased]
+
+### Added
+- **XDR Brightness now knows about your battery.** The boost drives the built-in panel's backlight
+  to its HDR maximum — the single largest power draw a laptop has — and until now nothing ever
+  turned it back off. Four opt-in rules, under the Labs toggle in Settings → Health & Recovery, each
+  independent: turn the boost off when the Mac switches to battery power, turn it off below a
+  battery percentage you choose (10/20/30/50%), turn it off while Low Power Mode is on, and turn it
+  off a set time after you engaged it (15 min / 30 min / 1 h / 2 h). The first three are conditions,
+  so a fifth setting — "Bring the boost back when power returns", on by default — puts the *exact*
+  brightness you had back once all of them clear, and stays out of the way if you changed the boost
+  yourself in the meantime. The timer is not: time spent is spent, and an elapsed allowance is never
+  given back. Each automatic switch-off says why in a notification ("Battery at 18%") if you have
+  display notifications on. The power watcher is only held while XDR Brightness is on *and* one of
+  the battery-family rules is enabled — no IOKit listeners for a user who asked for none — and a
+  desktop Mac, which reports no battery at all, is unaffected by every one of these rules.
+- **A boost no longer outlives the panel it was applied to.** Closing the lid (or otherwise taking
+  the built-in out of service) while boosted used to leave the fraction set and the slider up on a
+  display nobody was looking at. It's now cleared through the normal path, with no restore when the
+  panel comes back — the same session-only rule the feature has always stated, where a relaunch
+  starts at normal brightness.
+
 ## [0.10.3] — 2026-08-08
 
 ### Added
