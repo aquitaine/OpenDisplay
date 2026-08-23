@@ -5,7 +5,7 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
-## [Unreleased]
+## [0.11.0] — 2026-08-24
 
 ### Added
 - **XDR Brightness now knows about your battery.** The boost drives the built-in panel's backlight
