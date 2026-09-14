@@ -243,6 +243,12 @@ final class AppModel: ObservableObject {
     /// Tags every write OpenDisplay issues itself (a group fan-out, a FaceLight restore) so it never
     /// re-enters `setBrightness` as a leader event — see `GroupSyncPolicy.SyncEcho`.
     private var groupSyncEcho = GroupSyncPolicy.SyncEcho()
+    #if !PUBLIC_API_ONLY
+    private var groupBrightnessLoop: Task<Void, Never>?
+    private var nativeMonitors: [DisplayRecordID: BrightnessMonitor] = [:]
+    private var nativeTargets: [DisplayRecordID: Float] = [:]
+    private var nativeWriters: [DisplayRecordID: Task<Void, Never>] = [:]
+    #endif
     /// The coalescing timer behind `persistDisplayGroupsSoon` — one pending disk write for a whole
     /// slider drag, replaced on every tick and flushed on quit.
     private var groupPersistTask: Task<Void, Never>?
@@ -439,6 +445,7 @@ final class AppModel: ObservableObject {
                 self?.offlineIntentRecheck.cancel()
                 self?.stopObservingSleepAndWake()
                 #if !PUBLIC_API_ONLY
+                self?.groupBrightnessLoop?.cancel()
                 self?.adaptiveLoop?.cancel()
                 self?.stopAppPresetObserver()
                 #endif
@@ -1147,6 +1154,9 @@ final class AppModel: ObservableObject {
         }
         displays = snapshot.observations.sorted { $0.recordID.rawValue < $1.recordID.rawValue }
         pruneControlCaches(to: Set(displays.map(\.recordID)))
+        #if !PUBLIC_API_ONLY
+        reconcileGroupBrightnessLoop()
+        #endif
         // The trigger window has just been re-fitted (or dropped) for the new topology; the boost
         // FRACTION it was paired with is what the automations look after. A built-in that stopped
         // being an active surface — lid closed, clamshell — leaves the fraction set and the slider
@@ -1216,24 +1226,25 @@ final class AppModel: ObservableObject {
     }
 
     /// Resolves and caches the best brightness route for a display, then reads its current level:
-    /// built-in via DisplayServices (`native`), external via DDC (`hardware`), or — when neither
+    /// DisplayServices (`native`), then external DDC (`hardware`), or — when neither
     /// answers — software gamma (`software`), which works on any display including DDC-less externals.
     /// This is what lets the popover show a single, always-usable brightness slider.
     func refreshBrightness(for observation: DisplayObservation) async {
         guard let cgID = observation.cgDisplayID else { return }
         let id = observation.recordID
         #if !PUBLIC_API_ONLY
-        if observation.displayClass == .builtIn {
-            // DisplayServices is private SPI with a blocking IPC round-trip — read it off the main actor.
-            let control = brightnessControl
-            if let value = await Task.detached(priority: .userInitiated, operation: {
-                control.brightness(for: cgID)
-            }).value {
-                brightness[id] = value
-                brightnessMethod[id] = .native
-                return
-            }
-        } else if let controller = await ddcController(for: observation) {
+        // Apple external displays also expose DisplayServices brightness. Probe native control
+        // before DDC regardless of display class (notably Pro Display XDR and Studio Display).
+        let control = brightnessControl
+        if let value = await Task.detached(priority: .userInitiated, operation: {
+            control.brightness(for: cgID)
+        }).value {
+            clearBrightnessDim(id: id, cgID: cgID)
+            brightness[id] = value
+            brightnessMethod[id] = .native
+            return
+        }
+        if observation.displayClass != .builtIn, let controller = await ddcController(for: observation) {
             // The probe tracker keeps a DDC-less external from paying the full retried read
             // (~0.7s) on every refresh before falling back to gamma — after a couple of failures
             // it goes straight to software, rechecking hardware only occasionally. The controller
@@ -1248,11 +1259,7 @@ final class AppModel: ObservableObject {
                     // from the fallback era, or the two dimming layers stack and the panel stays
                     // dark no matter where the (now hardware) slider sits. Never while Black Out
                     // holds the panel at gamma 0 — a background refresh must not light it up.
-                    if let dim = softwareDim[id], dim < 1.0, !blackedOut.contains(id) {
-                        writeGamma(level: 1.0, id: id, cgID: cgID)  // keep any warmth, clear the dim
-                        dimOverlay.remove(for: cgID)
-                        softwareDim[id] = nil
-                    }
+                    clearBrightnessDim(id: id, cgID: cgID)
                     brightness[id] = Float(reading.current) / Float(reading.max)
                     brightnessMax[id] = reading.max
                     brightnessMethod[id] = .hardware
@@ -1267,6 +1274,14 @@ final class AppModel: ObservableObject {
         brightness[id] = softwareDim[id] ?? 1.0
     }
 
+    /// Remove fallback dimming when real backlight control becomes available.
+    private func clearBrightnessDim(id: DisplayRecordID, cgID: CGDirectDisplayID) {
+        guard let dim = softwareDim[id], dim < 1.0, !blackedOut.contains(id) else { return }
+        writeGamma(level: 1.0, id: id, cgID: cgID)
+        dimOverlay.remove(for: cgID)
+        softwareDim[id] = nil
+    }
+
     /// The caption for a display's brightness slider ("Hardware · DDC", "Software · gamma"), or nil for
     /// native control where no qualifier is needed.
     func brightnessCaption(for observation: DisplayObservation) -> String? {
@@ -1274,8 +1289,8 @@ final class AppModel: ObservableObject {
     }
 
     /// Sets a display's brightness (0...1) through whichever route was resolved for it, updating the
-    /// cache optimistically. Native writes are immediate; DDC writes are coalesced so a fast slider
-    /// drag never floods the I2C bus; the software route maps onto gamma dimming with a usable floor.
+    /// cache optimistically. Native and DDC writes are coalesced so a fast slider drag settles in
+    /// order without flooding the I2C bus; software uses gamma dimming with a usable floor.
     ///
     /// This is the USER funnel — sliders and media keys — so a write here is what makes a display
     /// its group's leader (Issue #39). `syncToken` marks the write as OpenDisplay's own hand instead
@@ -1295,11 +1310,7 @@ final class AppModel: ObservableObject {
         switch method {
         case .native:
             #if !PUBLIC_API_ONLY
-            // Private DisplayServices SPI off the main actor; the optimistic cache is already updated.
-            // DisplayServices is fast IPC (unlike slow I2C), so a fire-and-forget per tick is fine —
-            // no DDC-style coalescing needed.
-            let control = brightnessControl
-            Task.detached(priority: .userInitiated) { _ = control.setBrightness(value, for: cgID) }
+            writeNativeBrightness(value, for: observation)
             #endif
         case .hardware:
             #if !PUBLIC_API_ONLY
@@ -1323,6 +1334,73 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: - Display Groups (Issue #39): brightness/contrast fan-out
+
+    #if !PUBLIC_API_ONLY
+    /// Poll native group members even when the popover is closed. DisplayServices also sees
+    /// brightness changes from macOS keys, System Settings, and automatic brightness.
+    private func reconcileGroupBrightnessLoop() {
+        let members = Set(settings.displayGroups.filter(\.syncBrightness).flatMap(\.memberRecordIDs))
+        let active = Set(displays.filter { $0.isActive && members.contains($0.recordID) }.map(\.recordID))
+        nativeMonitors = nativeMonitors.filter { active.contains($0.key) || nativeWriters[$0.key] != nil }
+        guard !active.isEmpty else {
+            groupBrightnessLoop?.cancel()
+            groupBrightnessLoop = nil
+            return
+        }
+        guard groupBrightnessLoop == nil else { return }
+        groupBrightnessLoop = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.pollGroupBrightness()
+                // Sample native brightness at 20 Hz to keep external changes responsive.
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+    }
+
+    private func pollGroupBrightness() async {
+        for observation in displays where observation.isActive {
+            let id = observation.recordID
+            guard DisplayGroupStore.isGroupGoverned(id, in: settings.displayGroups),
+                  let cgID = observation.cgDisplayID, CGDisplayIsAsleep(cgID) == 0 else { continue }
+            if brightnessMethod[id] == nil { await refreshBrightness(for: observation) }
+            guard brightnessMethod[id] == .native else { continue }
+            let revision = nativeMonitors[id, default: BrightnessMonitor()].revision
+            let control = brightnessControl
+            let sample = await Task.detached(priority: .utility) { control.brightness(for: cgID) }.value
+            guard !Task.isCancelled,
+                  displays.contains(where: { $0.recordID == id && $0.cgDisplayID == cgID && $0.isActive }),
+                  DisplayGroupStore.isGroupGoverned(id, in: settings.displayGroups),
+                  let sample else { continue }
+            if nativeMonitors[id, default: BrightnessMonitor()].observe(sample, revision: revision) {
+                brightness[id] = sample
+                // This is already a hardware change. Only write followers, with no duplicate OSD.
+                syncGroupBrightness(sample, from: observation, token: nil)
+            }
+        }
+    }
+
+    /// Serialize native writes and baseline their readback so polling never echoes our own work.
+    private func writeNativeBrightness(_ value: Float, for observation: DisplayObservation) {
+        guard let cgID = observation.cgDisplayID else { return }
+        let id = observation.recordID
+        nativeMonitors[id, default: BrightnessMonitor()].beginWrite()
+        nativeTargets[id] = value
+        guard nativeWriters[id] == nil else { return }
+        nativeWriters[id] = Task { [weak self] in
+            guard let self else { return }
+            let control = brightnessControl
+            var sample: Float?
+            while let target = nativeTargets.removeValue(forKey: id) {
+                sample = await Task.detached(priority: .userInitiated) {
+                    control.setBrightness(target, for: cgID)
+                    return control.brightness(for: cgID)
+                }.value
+            }
+            nativeMonitors[id, default: BrightnessMonitor()].endWrite(value: sample)
+            nativeWriters[id] = nil
+        }
+    }
+    #endif
 
     /// Fans a leader's brightness out to the rest of its group, or re-learns a follower's offset when
     /// the write is the user correcting what sync just did. Everything is decided by the pure
@@ -1379,8 +1457,7 @@ final class AppModel: ObservableObject {
         switch method {
         case .native:
             #if !PUBLIC_API_ONLY
-            let control = brightnessControl
-            Task.detached(priority: .userInitiated) { _ = control.setBrightness(value, for: cgID) }
+            writeNativeBrightness(value, for: observation)
             #endif
         case .hardware:
             #if !PUBLIC_API_ONLY
@@ -3115,6 +3192,9 @@ final class AppModel: ObservableObject {
     /// Persists `settings` to the on-disk store (best-effort; a write failure leaves the in-memory
     /// value authoritative for this session).
     private func persistSettings() {
+        #if !PUBLIC_API_ONLY
+        reconcileGroupBrightnessLoop()
+        #endif
         try? settingsStore?.save(settings)
     }
 
