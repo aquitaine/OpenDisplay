@@ -345,6 +345,7 @@ private struct HealthSection: View {
                 Divider()
 
                 Text("Behavior").font(.title3)
+                LaunchAtLoginToggle()
                 Toggle(isOn: Binding(
                     get: { model.settings.preventDisplaySleepWithExternal },
                     set: { model.setPreventDisplaySleepWithExternal($0) }

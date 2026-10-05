@@ -37,7 +37,13 @@ struct OpenDisplayApp: App {
         let mine = ProcessInfo.processInfo.processIdentifier
         let hasOlderSibling = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             .contains { !$0.isTerminated && $0.processIdentifier != mine && $0.processIdentifier < mine }
-        if hasOlderSibling { exit(0) }
+        guard hasOlderSibling else { return }
+        // Don't vanish without a trace: have the instance that's already running open its Settings
+        // window, so launching a second copy still puts something on screen.
+        DistributedNotificationCenter.default().postNotificationName(
+            .openDisplayShowSettingsFromSibling, object: bundleID, userInfo: nil,
+            deliverImmediately: true)
+        exit(0)
     }
 }
 
@@ -110,6 +116,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
 
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(showSettings), name: .openDisplayShowSettingsFromSibling,
+            object: Bundle.main.bundleIdentifier, suspensionBehavior: .deliverImmediately)
+
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.image = NSImage(systemSymbolName: "display", accessibilityDescription: "OpenDisplay")
         item.button?.action = #selector(togglePopover(_:))
@@ -134,6 +144,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func dismissPopover() {
         if popover.isShown { popover.performClose(nil) }
+    }
+
+    /// Opening the app while it is already running (Finder, Spotlight, Launchpad) opens Settings.
+    /// The menu-bar icon is the app's only standing UI, and macOS can hide it without telling
+    /// anyone — behind the notch when the bar is full, or switched off under System Settings →
+    /// Menu Bar — which otherwise leaves a running app with nothing to click (issue #44).
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        showSettings()
+        return false
     }
 
     /// Opens (or re-focuses) the Settings window on the screen the user is looking at. Hosting it in our
@@ -221,6 +240,9 @@ extension Notification.Name {
     /// Posted by the menu's gear / "Displays & arrangement…" rows to ask the delegate to open the
     /// Settings window (AppKit-owned, so it lands on the screen the user clicked from).
     static let openDisplayShowSettings = Notification.Name("OpenDisplayShowSettings")
+    /// Posted across processes by a second copy of the app as it bows out to the one already
+    /// running (see `enforceSingleInstance`), asking that one to show its Settings window.
+    static let openDisplayShowSettingsFromSibling = Notification.Name("dev.opendisplay.app.showSettings")
     /// Posted by the menu's "About OpenDisplay" item; the delegate owns the About window.
     static let openDisplayShowAbout = Notification.Name("OpenDisplayShowAbout")
 }
