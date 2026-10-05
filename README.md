@@ -53,7 +53,9 @@ no Dock icon.
   reported, but auto-restoring it needs the experimental rotation helper from Labs.)
 - **Display groups** — group displays so one brightness slider (or media key) moves them
   all, with per-display offsets the group *learns* from your adjustments instead of
-  fighting them. Optional contrast sync.
+  fighting them. On displays with native brightness control, including Pro Display XDR
+  and Studio Display, changes from macOS brightness keys and System Settings also sync
+  while the menu is closed (full build). Optional contrast sync.
 - **FaceLight** — one press turns your monitor into a warm video-call fill light; press
   again and your exact previous brightness, contrast, and dimming come back.
 - **XDR Brightness** (Labs) — one tap drives the MacBook Pro's XDR panel to **2× its normal
