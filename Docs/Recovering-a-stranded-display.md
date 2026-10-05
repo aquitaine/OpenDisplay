@@ -52,21 +52,32 @@ Plus*, for example) makes the display reappear. That works because the monitor t
 itself differently, so the bad saved entry no longer matches — but it usually costs you the high
 refresh-rate mode. Use it to get a picture if you need one, then do the reset above.
 
-## Help us fix this properly
+## Before you reset: export diagnostics
 
-Since 0.11.2, OpenDisplay copies macOS's saved display configuration aside just before it turns a
-display off, keeping the five most recent copies in:
+The reset destroys the evidence of what went wrong, so please capture it first. It takes a few
+seconds and nothing is sent anywhere.
 
-```
-~/Library/Application Support/OpenDisplay/display-config-backups/
-```
+- In the app: **Settings → Health & Recovery → Diagnostics → Export Diagnostics…**
+- Or, if the app's window is on the display that went missing, in Terminal:
 
-If you hit this, please attach the newest folder from there to issue #40, together with a copy of
-the current files **taken before you delete them**:
+  ```bash
+  /Applications/OpenDisplay.app/Contents/Helpers/opendisplay diagnose --bundle
+  ```
 
-```bash
-cp /Library/Preferences/com.apple.windowserver.displays.plist ~/Desktop/stranded-system.plist
-```
+Either one saves `OpenDisplay-diagnostics-<date>.zip` to your Desktop. Attach it to
+[issue #40](https://github.com/aquitaine/OpenDisplay/issues/40). **Export while the display is
+still missing** — that is the state we have never been able to look at.
 
-The difference between the two is exactly what we need to find the entry macOS can't apply. The
-files contain display names, serial-derived identifiers, and arrangement data, and nothing else.
+The file contains:
+
+- OpenDisplay's own records: a timeline of what macOS reported about your displays each time
+  something changed, its audit log, the displays it turned off, and its settings (with location
+  and app presets removed).
+- macOS's saved display configuration as it is now, and as OpenDisplay copied it just before each
+  of your last five disconnects.
+- What macOS reports about the displays, the DisplayPort link, and Thunderbolt devices. This
+  includes model names and serial numbers of your displays and docks.
+- The last 30 minutes of display-related system log lines.
+
+It does not contain window titles, file names, screen contents, or your location. It is a plain
+zip; you can open it and look before sharing.

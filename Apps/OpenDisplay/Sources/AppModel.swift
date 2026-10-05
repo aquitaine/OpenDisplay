@@ -394,6 +394,7 @@ final class AppModel: ObservableObject {
             await setUpRegistry()
             await setUpScenes()
             await loadManagedOffline()
+            logDisplayEvent("launch")
             await refresh()
             await restoreOwedFaceLightState()  // crash-safe recovery: relaunching mid-FaceLight restores it
             await enforceActiveSurfaceInvariant()  // recover if we launched into a stranded (0-active) state
@@ -3041,6 +3042,7 @@ final class AppModel: ObservableObject {
             persistManagedOffline()
         }
         await refresh()
+        logDisplayEvent("disconnect:\(committed ? "committed" : "failed") \(offline.name)")
         return committed
     }
 
@@ -3080,6 +3082,7 @@ final class AppModel: ObservableObject {
             Self.err("reconnect failed for \(offline.name): \(error) — keeping it owed")
             #endif
             await refresh()
+            logDisplayEvent("reconnect:rejected \(offline.name)")
             if forgettingIntent { await noteReconnectFailure(of: offline) }
             return false
         }
@@ -3088,11 +3091,13 @@ final class AppModel: ObservableObject {
             return true
         }
         guard await verifyReconnect(of: offline) else {
+            logDisplayEvent("reconnect:notLit \(offline.name)")
             await noteReconnectFailure(of: offline)
             return false
         }
         managedOffline.removeAll { $0.recordID == offline.recordID }
         persistManagedOffline()
+        logDisplayEvent("reconnect:lit \(offline.name)")
         return true
     }
 
@@ -3117,6 +3122,7 @@ final class AppModel: ObservableObject {
                 escalated = true
                 phaseStart = Date()
                 await appendAudit(ReconnectVerification.escalateAudit(of: offline, actor: .ui, at: Date()))
+                logDisplayEvent("reconnect:escalating \(offline.name)")
                 CoreGraphicsProvider.restorePermanentConfiguration()
             }
         }
@@ -3139,6 +3145,39 @@ final class AppModel: ObservableObject {
         persistManagedOffline()
     }
 
+    // MARK: - Diagnostics (display event timeline + exportable bundle)
+
+    /// Adds one line to the display event timeline: what Core Graphics reports right now, and why
+    /// we looked. Cheap (a handful of CG calls) and written off the main actor.
+    func logDisplayEvent(_ reason: String) {
+        let entry = DisplayEventLog.Entry(at: Date(), reason: reason, owed: managedOffline.map(\.name),
+                                          displays: DisplayTruth.rows())
+        Task.detached(priority: .utility) {
+            guard let directory = try? DiskDisplayEventLog.defaultDirectory() else { return }
+            await DiskDisplayEventLog(directory: directory).append(entry)
+        }
+    }
+
+    /// Builds the diagnostics bundle on the Desktop and returns it, or nil if it couldn't be
+    /// written. Nothing is sent anywhere — the user attaches the file themselves.
+    func exportDiagnostics() async -> URL? {
+        logDisplayEvent("export")
+        let info = Bundle.main.infoDictionary
+        #if PUBLIC_API_ONLY
+        let flavor = "public-api-only"
+        #else
+        let flavor = "full"
+        #endif
+        let app = DiagnosticsBundle.AppInfo(
+            version: info?["CFBundleShortVersionString"] as? String ?? "?",
+            build: info?["CFBundleVersion"] as? String ?? "?", flavor: flavor)
+        return await Task.detached(priority: .userInitiated) {
+            let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+                ?? FileManager.default.temporaryDirectory
+            return try? DiagnosticsBundle.export(to: desktop, app: app)
+        }.value
+    }
+
     /// Copies macOS's saved display configuration aside before a disconnect, off the main actor
     /// (`WindowServerConfigBackup` explains why). Best-effort; never delays or blocks the disconnect.
     private func backUpWindowServerConfig(before name: String) {
@@ -3159,6 +3198,7 @@ final class AppModel: ObservableObject {
             // just come back (or gone away), so any negative probe knowledge is stale.
             resetDDCProbeCache()
             await refresh()
+            logDisplayEvent("topology")
             await enforceActiveSurfaceInvariant()
             reconcileDisplaySleepGuard()  // external arrived/left → acquire or release the keep-awake assertion
             #if !PUBLIC_API_ONLY
@@ -3410,7 +3450,10 @@ final class AppModel: ObservableObject {
         sleepWakeObservers = [
             center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil,
                                queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.isBetweenSleepAndWake = true }
+                MainActor.assumeIsolated {
+                    self?.isBetweenSleepAndWake = true
+                    self?.logDisplayEvent("sleep")
+                }
             },
             center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil,
                                queue: .main) { [weak self] _ in
@@ -3438,6 +3481,7 @@ final class AppModel: ObservableObject {
     /// re-armed by the topology events that keep arriving as displays finish waking, so a display
     /// that takes ten seconds to light up is still converged on when it does.
     private func convergeAfterWake() async {
+        logDisplayEvent("wake")
         lastWakeAt = Date()
         isBetweenSleepAndWake = false  // the transition is over; the bounded window starts now
         offlineReassertAttempts.removeAll()  // a new wake is a fresh world; prior attempts don't count

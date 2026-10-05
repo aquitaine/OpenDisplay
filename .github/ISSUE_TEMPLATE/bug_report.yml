@@ -77,4 +77,9 @@ body:
     id: logs
     attributes:
       label: Logs / diagnostics bundle
-      description: Attach a redacted diagnostics bundle if available.
+      description: >-
+        Please attach a diagnostics file (0.11.3 or later): Settings → Health & Recovery →
+        Diagnostics → Export Diagnostics…, or run
+        `/Applications/OpenDisplay.app/Contents/Helpers/opendisplay diagnose --bundle` in Terminal.
+        It is saved to your Desktop, is not sent anywhere, and lists what it contains before you
+        export. If a display is missing or black, export while it is still in that state.

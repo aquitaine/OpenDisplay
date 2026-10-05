@@ -1,5 +1,6 @@
 #if os(macOS)
 import AppKit
+import CoreGraphicsProvider
 import DisplayDomain
 import OpenDisplayDesignSystem
 import SwiftUI
@@ -286,6 +287,51 @@ private struct SaveSceneRow: View {
     }
 }
 
+// MARK: - Diagnostics bundle export
+
+/// "Export diagnostics…" — builds the bundle a bug report needs (`DiagnosticsBundle`) on the
+/// Desktop and reveals it. Lists exactly what goes in before the user clicks, because the file is
+/// meant to be attached to a public issue.
+private struct DiagnosticsExportSection: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var exporting = false
+    @State private var result: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: ODSpacing.sm) {
+            Text("Diagnostics").font(.title3)
+            Text("If a display misbehaves, export a diagnostics file and attach it to your issue. "
+                 + "It is saved to your Desktop and is not sent anywhere. It contains:")
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(DiagnosticsBundle.contents, id: \.self) { item in
+                Text("\u{2022} " + item).font(.caption).foregroundStyle(.secondary)
+            }
+            HStack(spacing: ODSpacing.sm) {
+                Button {
+                    exporting = true
+                    result = nil
+                    Task {
+                        let url = await model.exportDiagnostics()
+                        exporting = false
+                        if let url {
+                            result = "Saved \(url.lastPathComponent) to your Desktop."
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                        } else {
+                            result = "Couldn\u{2019}t write the diagnostics file."
+                        }
+                    }
+                } label: {
+                    Label(exporting ? "Collecting\u{2026}" : "Export Diagnostics\u{2026}",
+                          systemImage: "square.and.arrow.up")
+                }
+                .disabled(exporting)
+                if exporting { ProgressView().controlSize(.small) }
+            }
+            if let result { Text(result).font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+}
+
 // MARK: - Health & Recovery (diagnostics + recovery + Labs + activity)
 
 private struct HealthSection: View {
@@ -337,6 +383,10 @@ private struct HealthSection: View {
                     Label("Reconnect All", systemImage: "arrow.triangle.2.circlepath")
                 }
                 .disabled(model.busy)
+
+                Divider()
+
+                DiagnosticsExportSection()
 
                 Divider()
 

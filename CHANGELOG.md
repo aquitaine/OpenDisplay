@@ -5,6 +5,23 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.11.3] — 2026-10-05
+
+### Added
+- **Export Diagnostics.** Settings → Health & Recovery → Diagnostics builds one zip on your Desktop
+  with everything needed to explain a display problem after the fact: OpenDisplay's own records,
+  macOS's saved display configuration (now, and as it was before your recent disconnects), what
+  macOS reports about the displays, the DisplayPort link and Thunderbolt devices, and the last 30
+  minutes of display-related system log lines. The app lists what goes in before you export, the
+  file is never sent anywhere, and it leaves out window titles, file names, screen contents,
+  location, and your app presets. Also available as `opendisplay diagnose --bundle` for when the
+  app's window is on the display that went missing. (#40)
+- **A display event timeline.** Every time the display arrangement changes — hotplug, sleep, wake,
+  a disconnect or reconnect and how it ended — the app records what macOS reported about each
+  display at that moment. Kept locally in a small rolling file and included in the diagnostics
+  export. This is the record that was missing when a monitor failed to come back: by the time it
+  was reported, the moment that mattered was gone.
+
 ## [0.11.2] — 2026-10-05
 
 ### Fixed

@@ -41,8 +41,8 @@ packages:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "0.11.2"
-    CURRENT_PROJECT_VERSION: "21"
+    MARKETING_VERSION: "0.11.3"
+    CURRENT_PROJECT_VERSION: "22"
     CODE_SIGN_STYLE: Automatic
     ENABLE_HARDENED_RUNTIME: YES
 
@@ -117,16 +117,21 @@ targets:
     platform: macOS
     settings: *frameworkSettings
     sources: [Providers/CoreGraphicsProvider/Sources]
-    dependencies: &providerDeps
+    # TopologyCore on top of the shared provider deps: the diagnostics bundle lives here (the one
+    # macOS module both the app and the CLI link) and reads the stores TopologyCore owns.
+    dependencies:
       - target: DisplayDomain
       - target: ProviderInterfaces
+      - target: TopologyCore
 
   CaptureProvider:
     type: framework
     platform: macOS
     settings: *frameworkSettings
     sources: [Providers/CaptureProvider/Sources]
-    dependencies: *providerDeps
+    dependencies: &providerDeps
+      - target: DisplayDomain
+      - target: ProviderInterfaces
 
   ExperimentalLifecycleProvider:
     type: framework

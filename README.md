@@ -206,7 +206,7 @@ toolchain is installed (macOS Xcode 16+ or Linux).
 
 ```sh
 make bootstrap   # ensure a Swift 6 toolchain (installs it on Ubuntu; checks Xcode on macOS)
-make test        # swift build && swift test --parallel   (670 unit/state-machine tests)
+make test        # swift build && swift test --parallel   (680 unit/state-machine tests)
 make lint        # SwiftLint, if installed
 ```
 

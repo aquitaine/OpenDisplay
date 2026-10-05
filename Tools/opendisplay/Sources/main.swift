@@ -292,7 +292,38 @@ func runList() async {
     }
 }
 
+/// One line in the shared display event timeline, from the CLI's side of an action.
+func logDisplayEvent(_ reason: String) async {
+    guard let directory = try? DiskDisplayEventLog.defaultDirectory() else { return }
+    await DiskDisplayEventLog(directory: directory).append(DisplayEventLog.Entry(
+        at: Date(), reason: "cli " + reason, owed: managedOfflineDisplays.map(\.name),
+        displays: DisplayTruth.rows()))
+}
+
+/// `diagnose --bundle [directory]`: the same diagnostics zip the app's Export Diagnostics button
+/// builds, for when the app's window is on the display that went missing.
+func runDiagnoseBundle() async {
+    await logDisplayEvent("export")
+    let directory = selectorArg.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+        ?? FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+        ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let info = Bundle.main.infoDictionary
+    let app = DiagnosticsBundle.AppInfo(
+        version: info?["CFBundleShortVersionString"] as? String ?? "cli",
+        build: info?["CFBundleVersion"] as? String ?? "cli", flavor: "cli")
+    print("Collecting diagnostics (this takes a few seconds)…")
+    do {
+        let zip = try DiagnosticsBundle.export(to: directory, app: app)
+        print("Saved \(zip.path)")
+        print("Nothing was sent anywhere. It contains:")
+        for item in DiagnosticsBundle.contents { print("  - \(item)") }
+    } catch {
+        fail("could not write the diagnostics bundle: \(error)")
+    }
+}
+
 func runDiagnose() async {
+    if flags.contains("--bundle") { return await runDiagnoseBundle() }
     let probes = [
         ("coregraphics", false, await observer.probe(environment)),
         ("experimentalLifecycle", true, await experimental.probe(environment))
@@ -403,6 +434,7 @@ func runDisconnect() async {
             name: name(for: target),
             displayClass: target.observation.displayClass))
     }
+    await logDisplayEvent("disconnect:\(envelope.status == .committed ? "committed" : "failed") \(name(for: target))")
     emitEnvelope(envelope)
 }
 
@@ -427,6 +459,7 @@ func runReconnect() async {
     // Accepted is not back (issue #40): only forget the display once it is observed lit. If it
     // never appears, the record stays — it is the only thing that still knows the display exists.
     guard await verifyReconnect(of: offline) else {
+        await logDisplayEvent("reconnect:notLit \(offline.name)")
         rememberManagedOffline(ManagedOfflineDisplay(
             recordID: offline.recordID, cgID: offline.cgID, name: offline.name,
             displayClass: offline.displayClass, relitDuringWakeAt: offline.relitDuringWakeAt,
@@ -436,6 +469,7 @@ func runReconnect() async {
             + ReconnectVerification.recoveryGuideURL.absoluteString)
     }
     forgetManagedOffline(recordID)
+    await logDisplayEvent("reconnect:lit \(offline.name)")
     if asJSON { emit(["status": "committed", "target": recordID.rawValue]) }
     else { print("reconnected \(name(for: target))") }
 }
@@ -1191,6 +1225,7 @@ case "help", "--help", "-h":
     USAGE:
       opendisplay list [--json]
       opendisplay diagnose [--json]
+      opendisplay diagnose --bundle [directory]   # diagnostics zip for a bug report (default: Desktop)
       opendisplay lux [--json]
       opendisplay lid [--json]
       opendisplay listen
