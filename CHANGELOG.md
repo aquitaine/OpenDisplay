@@ -5,6 +5,38 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.11.1] — 2026-10-05
+
+### Added
+- **Launch at login.** A switch under Settings → Health & Recovery → Behavior registers OpenDisplay
+  as a login item, so you no longer add it by hand in System Settings. Off by default. It shows the
+  system's own state, and says so when macOS is waiting for you to approve it under Login Items.
+  (#43)
+- **Opening OpenDisplay again opens Settings.** The menu-bar icon is the app's only standing UI, and
+  macOS can hide it — behind the notch when the bar is full, or switched off under System Settings →
+  Menu Bar — leaving a running app with nothing to click. Launching the app while it is already
+  running (Finder, Spotlight, a second copy) now brings up the Settings window instead of doing
+  nothing. (#44)
+
+### Fixed
+- **Display groups follow the macOS brightness keys and System Settings**, not only OpenDisplay's
+  own controls. Grouped displays with native brightness control are watched in the background, and
+  a change made anywhere — keys, Control Center, System Settings, auto-brightness, Shortcuts, the
+  CLI — moves the rest of the group. Thanks to Sam Potts for the report and the fix. (#41, #42)
+- **Pro Display XDR and Studio Display get real backlight control.** Apple's own external displays
+  have no DDC and were falling back to software dimming; they now use the same native route as the
+  built-in panel. Third-party monitors stay on DDC.
+- **A group's learned offsets are no longer overwritten by driving another display.** Moving a
+  second member of a group within 30 seconds of the first was always read as a "correction", so
+  riding the brightness keys to the top on another display taught it a large offset and the rest of
+  the group stopped following (the known issue noted in 0.10.1). Now only a display's own slider
+  teaches an offset; keys, hotkeys, and changes made outside the app always move the group.
+- **Leadership changes hands without the group jumping.** When a member with a learned offset led
+  the group, its own offset was ignored, so the others landed somewhere different than when they
+  led. The offset is now applied in both directions.
+- The offset slider in Settings no longer writes back a stale copy of the group, which could undo an
+  offset learned while the window was open.
+
 ## [0.11.0] — 2026-08-24
 
 ### Added
@@ -70,7 +102,7 @@ change until 1.0.
 ### Notes
 - Known issue: driving a group leader's brightness to its maximum can overwrite the group's
   learned per-display offsets, after which followers track the leader too bright. Recreating the
-  group resets the offsets; a proper fix is in progress.
+  group resets the offsets; fixed in 0.11.1.
 
 ## [0.10.0] — 2026-08-06
 

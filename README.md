@@ -53,8 +53,8 @@ no Dock icon.
   reported, but auto-restoring it needs the experimental rotation helper from Labs.)
 - **Display groups** — group displays so one brightness slider (or media key) moves them
   all, with per-display offsets the group *learns* from your adjustments instead of
-  fighting them. On displays with native brightness control, including Pro Display XDR
-  and Studio Display, changes from macOS brightness keys and System Settings also sync
+  fighting them. On the built-in panel and Apple's own displays (Pro Display XDR, Studio
+  Display), changes made with the macOS brightness keys or System Settings sync too, even
   while the menu is closed (full build). Optional contrast sync.
 - **FaceLight** — one press turns your monitor into a warm video-call fill light; press
   again and your exact previous brightness, contrast, and dimming come back.
@@ -162,8 +162,8 @@ Then click the display glyph in the menu bar. Two optional one-time steps:
   (**Media keys** section). macOS will ask once for the **Accessibility** permission
   (needed to capture the keys); the feature arms itself the moment you grant it — no
   relaunch needed.
-- **Start at login** — add OpenDisplay in *System Settings → General → Login Items* if you
-  want it always available.
+- **Start at login** — turn on **Launch at login** in *Settings → Health & Recovery →
+  Behavior* if you want it always available.
 
 ### Option 2 — build from source
 
@@ -206,7 +206,7 @@ toolchain is installed (macOS Xcode 16+ or Linux).
 
 ```sh
 make bootstrap   # ensure a Swift 6 toolchain (installs it on Ubuntu; checks Xcode on macOS)
-make test        # swift build && swift test --parallel   (549 unit/state-machine tests)
+make test        # swift build && swift test --parallel   (661 unit/state-machine tests)
 make lint        # SwiftLint, if installed
 ```
 
