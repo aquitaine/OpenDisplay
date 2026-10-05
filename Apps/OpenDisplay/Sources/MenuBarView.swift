@@ -350,13 +350,24 @@ private struct OfflineDisplayCard: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(offline.name).font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary).lineLimit(1)
-                Text("Managed offline").font(.system(size: 11)).foregroundStyle(.tertiary)
+                if offline.reconnectFailedAt == nil {
+                    Text("Managed offline").font(.system(size: 11)).foregroundStyle(.tertiary)
+                } else {
+                    // Issue #40: macOS accepted the reconnect and no display appeared. Say so, and
+                    // keep the way out one click away — the usual controls can't fix this state.
+                    Text("Didn\u{2019}t come back on").font(.system(size: 11)).foregroundStyle(.orange)
+                    Button("Recovery steps\u{2026}") {
+                        NSWorkspace.shared.open(ReconnectVerification.recoveryGuideURL)
+                    }
+                    .buttonStyle(.link).font(.system(size: 11))
+                }
             }
             Spacer(minLength: 6)
             Button {
                 Task { await model.reconnectOffline(offline) }
             } label: {
-                Label("Reconnect", systemImage: "arrow.triangle.2.circlepath").font(.system(size: 11))
+                Label(offline.reconnectFailedAt == nil ? "Reconnect" : "Try again",
+                      systemImage: "arrow.triangle.2.circlepath").font(.system(size: 11))
             }
             .buttonStyle(.bordered).controlSize(.small).disabled(model.busy)
         }

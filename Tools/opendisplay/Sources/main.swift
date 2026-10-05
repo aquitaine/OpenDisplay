@@ -384,6 +384,12 @@ func runDisconnect() async {
         return
     }
 
+    // Same pre-disconnect copy of macOS's saved display configuration the app takes (issue #40).
+    if let root = try? WindowServerConfigBackup.defaultDirectory() {
+        WindowServerConfigBackup.snapshot(
+            sources: WindowServerConfigBackup.defaultSources(), into: root, label: name(for: target),
+            now: Date())
+    }
     let envelope = await gateway.disconnect(
         target.observation.recordID, options: DisconnectOptions(actor: .cli, identityConfidence: 1.0)
     )
@@ -410,13 +416,49 @@ func runReconnect() async {
     let reconnectID = managedOfflineDisplays.first { $0.recordID == recordID }?.reconnectID
         ?? target.observation.cgDisplayID.map { DisplayRecordID(rawValue: "cgid:\($0)") }
         ?? recordID
+    let offline = managedOfflineDisplays.first { $0.recordID == recordID }
+        ?? ManagedOfflineDisplay(recordID: recordID, cgID: target.observation.cgDisplayID ?? 0,
+                                 name: name(for: target), displayClass: target.observation.displayClass)
     do {
         try await lifecycle.reconnect(reconnectID, deadline: Date().addingTimeInterval(15))
-        forgetManagedOffline(recordID)
-        if asJSON { emit(["status": "committed", "target": recordID.rawValue]) }
-        else { print("reconnected \(name(for: target))") }
     } catch {
         fail("reconnect failed: \(error)")
+    }
+    // Accepted is not back (issue #40): only forget the display once it is observed lit. If it
+    // never appears, the record stays — it is the only thing that still knows the display exists.
+    guard await verifyReconnect(of: offline) else {
+        rememberManagedOffline(ManagedOfflineDisplay(
+            recordID: offline.recordID, cgID: offline.cgID, name: offline.name,
+            displayClass: offline.displayClass, relitDuringWakeAt: offline.relitDuringWakeAt,
+            reconnectFailedAt: Date()))
+        fail("macOS accepted the reconnect but \(offline.name) did not come back. It is still "
+            + "recorded as turned off. If it is plugged in and powered, see "
+            + ReconnectVerification.recoveryGuideURL.absoluteString)
+    }
+    forgetManagedOffline(recordID)
+    if asJSON { emit(["status": "committed", "target": recordID.rawValue]) }
+    else { print("reconnected \(name(for: target))") }
+}
+
+/// The app's reconnect check, for the CLI: watch the topology, escalate once to the public
+/// permanent-configuration restore, and report whether the display was ever seen lit.
+func verifyReconnect(of offline: ManagedOfflineDisplay) async -> Bool {
+    var phaseStart = Date()
+    var escalated = false
+    while true {
+        let observations = await observer.currentSnapshot().observations
+        switch ReconnectVerification.next(
+            isLit: ReconnectVerification.isLit(offline, in: observations),
+            waited: Date().timeIntervalSince(phaseStart), escalated: escalated) {
+        case .confirmed: return true
+        case .failed: return false
+        case .lookAgain(let delay):
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        case .escalate:
+            escalated = true
+            phaseStart = Date()
+            CoreGraphicsProvider.restorePermanentConfiguration()
+        }
     }
 }
 

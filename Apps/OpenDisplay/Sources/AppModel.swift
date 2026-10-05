@@ -3029,6 +3029,7 @@ final class AppModel: ObservableObject {
             cgID: observation.cgDisplayID ?? 0,
             name: displayName(for: observation),
             displayClass: observation.displayClass)
+        backUpWindowServerConfig(before: offline.name)
         let result = try? await coordinator.disconnect(
             observation.recordID,
             options: DisconnectOptions(actor: actor, identityConfidence: 1.0))
@@ -3059,10 +3060,16 @@ final class AppModel: ObservableObject {
     /// what left the built-in lit with nothing left that remembered why it shouldn't be. The ledger
     /// entry survives, and `WakeConvergencePolicy` puts the display away again once a real screen is
     /// back to cover it — or drops the entry itself once the wake window closes with no rescue.
+    ///
+    /// The user's own reconnect is also VERIFIED (issue #40): the window server accepting the
+    /// request is not a display coming back, and forgetting the entry on acceptance alone is how a
+    /// stranded monitor lost its only record. The entry goes when the display is observed lit; if
+    /// it never is, the entry stays, stamped, and the off card says what happened.
     @discardableResult
     private func reconnectOffline(_ offline: OfflineDisplay, forgettingIntent: Bool) async -> Bool {
         busy = true
         defer { busy = false }
+        if forgettingIntent { stampReconnectFailure(nil, for: offline) }  // a fresh attempt
         do {
             try await lifecycle.reconnect(offline.reconnectID, deadline: Date().addingTimeInterval(10))
         } catch {
@@ -3073,14 +3080,73 @@ final class AppModel: ObservableObject {
             Self.err("reconnect failed for \(offline.name): \(error) — keeping it owed")
             #endif
             await refresh()
+            if forgettingIntent { await noteReconnectFailure(of: offline) }
             return false
         }
-        if forgettingIntent {
-            managedOffline.removeAll { $0.recordID == offline.recordID }
-            persistManagedOffline()
+        guard forgettingIntent else {
+            await refresh()
+            return true
         }
-        await refresh()
+        guard await verifyReconnect(of: offline) else {
+            await noteReconnectFailure(of: offline)
+            return false
+        }
+        managedOffline.removeAll { $0.recordID == offline.recordID }
+        persistManagedOffline()
         return true
+    }
+
+    /// Watches the topology until the display is really lit, per `ReconnectVerification`: a patient
+    /// wait, one escalation to the public permanent-configuration restore, a second wait.
+    private func verifyReconnect(of offline: OfflineDisplay) async -> Bool {
+        var phaseStart = Date()
+        var escalated = false
+        while true {
+            await refresh()
+            let step = ReconnectVerification.next(
+                isLit: ReconnectVerification.isLit(offline, in: displays),
+                waited: Date().timeIntervalSince(phaseStart), escalated: escalated)
+            switch step {
+            case .confirmed:
+                return true
+            case .failed:
+                return false
+            case .lookAgain(let delay):
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            case .escalate:
+                escalated = true
+                phaseStart = Date()
+                await appendAudit(ReconnectVerification.escalateAudit(of: offline, actor: .ui, at: Date()))
+                CoreGraphicsProvider.restorePermanentConfiguration()
+            }
+        }
+    }
+
+    /// Records a reconnect that produced no display: stamps the ledger entry (which is what the
+    /// off card reads), writes the audit entry, and notifies if the user has notifications on.
+    private func noteReconnectFailure(of offline: OfflineDisplay) async {
+        stampReconnectFailure(Date(), for: offline)
+        await appendAudit(ReconnectVerification.failureAudit(of: offline, actor: .ui, at: Date()))
+        if settings.displayNotificationsEnabled {
+            NotificationDelivery.post(ReconnectVerification.failureNotification(for: offline))
+        }
+    }
+
+    private func stampReconnectFailure(_ date: Date?, for offline: OfflineDisplay) {
+        guard let index = managedOffline.firstIndex(where: { $0.recordID == offline.recordID }),
+              managedOffline[index].reconnectFailedAt != date else { return }
+        managedOffline[index].reconnectFailedAt = date
+        persistManagedOffline()
+    }
+
+    /// Copies macOS's saved display configuration aside before a disconnect, off the main actor
+    /// (`WindowServerConfigBackup` explains why). Best-effort; never delays or blocks the disconnect.
+    private func backUpWindowServerConfig(before name: String) {
+        Task.detached(priority: .utility) {
+            guard let root = try? WindowServerConfigBackup.defaultDirectory() else { return }
+            WindowServerConfigBackup.snapshot(
+                sources: WindowServerConfigBackup.defaultSources(), into: root, label: name, now: Date())
+        }
     }
 
     /// Long-lived subscription to the observer's reconfiguration events: every hotplug, unplug,

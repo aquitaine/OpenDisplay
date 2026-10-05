@@ -20,16 +20,23 @@ public struct ManagedOfflineDisplay: Hashable, Sendable, Codable, Identifiable {
     /// decays on *convergence* — the re-assert putting the display back off — not on a clock.
     /// Optional and absent from old ledgers, so the app and CLI read either format.
     public var relitDuringWakeAt: Date?
+    /// When a reconnect the user asked for last ended with this display still missing (see
+    /// `ReconnectVerification`). Nil normally. While set, the entry is a display that should be on
+    /// and isn't, and the off card says so instead of quietly offering "Reconnect" again. Cleared
+    /// by the next attempt; the entry itself goes once the display is really back. Optional and
+    /// absent from old ledgers.
+    public var reconnectFailedAt: Date?
 
     public var id: DisplayRecordID { recordID }
 
     public init(recordID: DisplayRecordID, cgID: UInt32, name: String, displayClass: DisplayClass,
-                relitDuringWakeAt: Date? = nil) {
+                relitDuringWakeAt: Date? = nil, reconnectFailedAt: Date? = nil) {
         self.recordID = recordID
         self.cgID = cgID
         self.name = name
         self.displayClass = displayClass
         self.relitDuringWakeAt = relitDuringWakeAt
+        self.reconnectFailedAt = reconnectFailedAt
     }
 
     /// The selector reconnect should use: the raw display id when we have one, since a disabled

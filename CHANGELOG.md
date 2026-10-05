@@ -5,6 +5,34 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.11.2] — 2026-10-05
+
+### Fixed
+- **A display that doesn't come back is no longer forgotten.** Clicking Reconnect (or running
+  `opendisplay reconnect`) used to drop the app's record of a turned-off display as soon as macOS
+  *accepted* the request. If no picture ever appeared, the off card vanished while the monitor
+  stayed black, and nothing was left that knew the display existed. A reconnect is now confirmed
+  against what macOS actually reports: the app waits for the display to light, tries the stronger
+  system-wide restore once if it doesn't, and only then forgets it. (#40)
+- **When a reconnect fails, the app says so.** The display stays in the menu marked "Didn't come
+  back on", with a Try again button and a link to
+  [recovery steps](Docs/Recovering-a-stranded-display.md). The failure is written to the audit log,
+  and posted as a notification if you have display notifications on. The CLI exits with an error
+  and the same pointer instead of printing "reconnected".
+
+### Added
+- **A copy of macOS's saved display configuration is taken before every disconnect**, kept in
+  `~/Library/Application Support/OpenDisplay/display-config-backups/` (five most recent). The
+  stranded-display bug in #40 comes from one of those saved entries, and until now a report could
+  only be pieced together afterwards. Nothing is sent anywhere, and the originals are never
+  modified.
+
+### Known issues
+- The underlying cause of #40 — a display that macOS refuses to bring back after a disconnect, on
+  some monitor and dock combinations — is not fixed. This release makes the failure visible and
+  recoverable; it does not prevent it. If a display you depend on has no other way back (no DDC,
+  behind a dock), be cautious about turning it off.
+
 ## [0.11.1] — 2026-10-05
 
 ### Added
