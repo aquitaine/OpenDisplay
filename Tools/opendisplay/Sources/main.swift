@@ -307,10 +307,15 @@ func runDiagnoseBundle() async {
     let directory = selectorArg.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
         ?? FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
         ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-    let info = Bundle.main.infoDictionary
+    // The CLI has no Info.plist of its own. When it runs from inside the app bundle
+    // (Contents/Helpers/opendisplay, also what the Homebrew symlink points at), report the app's
+    // version — the first thing anyone reading a bundle needs to know.
+    let appPlist = Bundle.main.executableURL?.resolvingSymlinksInPath()
+        .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Info.plist")
+    let info = appPlist.flatMap { NSDictionary(contentsOf: $0) as? [String: Any] }
     let app = DiagnosticsBundle.AppInfo(
-        version: info?["CFBundleShortVersionString"] as? String ?? "cli",
-        build: info?["CFBundleVersion"] as? String ?? "cli", flavor: "cli")
+        version: info?["CFBundleShortVersionString"] as? String ?? "unknown",
+        build: info?["CFBundleVersion"] as? String ?? "unknown", flavor: "cli")
     print("Collecting diagnostics (this takes a few seconds)…")
     do {
         let zip = try DiagnosticsBundle.export(to: directory, app: app)
