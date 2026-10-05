@@ -7,11 +7,14 @@ import Foundation
 /// `SyncEcho` through, and receives the writes to issue. Every hardware write, OSD, and persistence
 /// decision belongs to `AppModel`.
 ///
-/// Two rules carry the feature. **Any member leads**: a user's slider move (or media key) on any
-/// present member fans out to the others at `leader + learned offset`. **A correction teaches**: a
-/// move on a *different* member shortly after a fan-out is read as the user fixing what sync just
-/// did, so the group re-learns that member's offset instead of fanning the correction back out —
-/// which is what stops two sliders from chasing each other. ::
+/// Two rules carry the feature. **Any member leads**: a brightness change on any present member —
+/// a slider, a media key, or a change macOS made that the app only observed — fans out to the
+/// others at `base + learned offset`, where `base` is the leader's value with its own offset taken
+/// back out. **A correction teaches**: a *slider* move on a different member shortly after a
+/// fan-out is read as the user fixing what sync just did, so the group re-learns that member's
+/// offset instead of fanning the correction back out — which is what stops two sliders from
+/// chasing each other. Only the slider teaches (`ManualWrite.Origin`): a key press or an observed
+/// change is someone driving the group, never a fix to one panel. ::
 ///
 ///     classify(0.60 on builtIn, group {builtIn, desk}, offset[desk] = +0.10)
 ///     ok: .leader — desk written at 0.70, builtIn is now the leader at 0.60
@@ -153,22 +156,48 @@ public enum GroupSyncPolicy {
     /// One user-originated write arriving at the funnel. `token` is non-nil only when OpenDisplay
     /// itself issued the write (a sync fan-out, a FaceLight restore) — see `SyncEcho`.
     public struct ManualWrite: Hashable, Sendable {
+        /// Where the change came from, which decides whether it may teach an offset. Reaching for
+        /// one display's own slider right after a fan-out is the only gesture that reads as "this
+        /// panel is wrong"; everything else is the user (or macOS) driving the group, and reading
+        /// it as a correction would both swallow the fan-out and learn an offset nobody chose —
+        /// e.g. `1.0 - 0.5 = +0.5` from riding the brightness key to the top on a second display. ::
+        ///
+        ///     classify(0.80 on desk via .slider, 4s after builtIn led)
+        ///     ok: .followerCorrection — desk's offset re-learned
+        ///
+        ///     classify(0.80 on desk via .keys or .observed, 4s after builtIn led)
+        ///     ok: .leader — desk leads, builtIn follows, no offset touched
+        public enum Origin: Hashable, Sendable {
+            /// The display's own slider in the app.
+            case slider
+            /// Brightness keys or a hotkey handled by the app.
+            case keys
+            /// A change made outside the app (macOS keys, System Settings, auto-brightness, another
+            /// tool) that the app only read back from the display.
+            case observed
+
+            var canTeach: Bool { self == .slider }
+        }
+
         public var value: Float
         public var display: DisplayRecordID
         public var token: SyncEcho.Token?
         public var now: Date
         public var world: World
         public var correctionWindow: TimeInterval
+        public var origin: Origin
 
         public init(value: Float, display: DisplayRecordID, token: SyncEcho.Token? = nil,
                     now: Date, world: World,
-                    correctionWindow: TimeInterval = GroupSyncPolicy.defaultCorrectionWindow) {
+                    correctionWindow: TimeInterval = GroupSyncPolicy.defaultCorrectionWindow,
+                    origin: Origin = .slider) {
             self.value = value
             self.display = display
             self.token = token
             self.now = now
             self.world = world
             self.correctionWindow = correctionWindow
+            self.origin = origin
         }
     }
 
@@ -226,11 +255,27 @@ public enum GroupSyncPolicy {
 
     // MARK: - Brightness
 
-    /// The writes a leader's brightness owes the rest of the group: `clamp01(value + offset)` per
+    /// The writes a leader's brightness owes the rest of the group: `clamp01(base + offset)` per
     /// follower, the leader excluded, absent and governed members reported rather than written.
+    /// `base` is the leader's value with its OWN offset removed, so leadership can change hands
+    /// without the group jumping. ::
+    ///
+    ///     offsets {desk: -0.30}; builtIn leads at 0.60
+    ///     ok: desk written at 0.30
+    ///
+    ///     then desk leads at 0.30
+    ///     ok: builtIn written at 0.60 — the same pairing, read from the other side
     public static func followerWrites(leader: DisplayRecordID, value: Float,
                                       group: DisplayGroup, world: World) -> FanOut {
-        groupWrites(value, group: group, world: world, excluding: leader)
+        groupWrites(baseLevel(leader: leader, value: value, group: group), group: group,
+                    world: world, excluding: leader)
+    }
+
+    /// The group's base level implied by one member sitting at `value`. Deliberately unclamped: a
+    /// member pinned at 100% with a negative offset implies a base above 1, and clamping it here
+    /// would pull every other member down from a rail they should stay on.
+    static func baseLevel(leader: DisplayRecordID, value: Float, group: DisplayGroup) -> Float {
+        value - group.offset(for: leader)
     }
 
     /// Every member's write when the GROUP ITSELF is the target — the `group:<name>` CLI selector,
@@ -277,15 +322,17 @@ public enum GroupSyncPolicy {
     }
 
     /// The offset this write teaches, or nil when it is a leader event instead. A correction is a
-    /// move on a member other than the current leader, inside the correction window, while that
-    /// leader is still part of the group.
+    /// slider move on a member other than the current leader, inside the correction window, while
+    /// that leader is still part of the group. The offset is measured against the group's base
+    /// level, the same one `followerWrites` adds it back to.
     private static func correctionOffset(_ write: ManualWrite, group: DisplayGroup,
                                          state: GroupSyncState) -> Float? {
-        guard let leader = state.leaderRecordID, let leaderValue = state.leaderValue,
+        guard write.origin.canTeach,
+              let leader = state.leaderRecordID, let leaderValue = state.leaderValue,
               let lastFanOutAt = state.lastFanOutAt,
               leader != write.display, group.contains(leader),
               write.now.timeIntervalSince(lastFanOutAt) < write.correctionWindow else { return nil }
-        return write.value - leaderValue
+        return write.value - baseLevel(leader: leader, value: leaderValue, group: group)
     }
 
     // MARK: - Contrast

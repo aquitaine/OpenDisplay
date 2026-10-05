@@ -14,14 +14,19 @@ public struct DisplayServicesBrightnessProvider: Sendable {
     /// `(CGDirectDisplayID, float value 0...1) -> 0 on success`.
     private typealias SetFn = @convention(c) (CGDirectDisplayID, Float) -> Int32
 
+    /// `(CGDirectDisplayID) -> true when the framework drives this display's backlight`.
+    private typealias CanChangeFn = @convention(c) (CGDirectDisplayID) -> Bool
+
     private let getFn: GetFn?
     private let setFn: SetFn?
+    private let canChangeFn: CanChangeFn?
 
     public init() {
         let handle = dlopen(
             "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_LAZY)
         getFn = Self.lookup(handle, "DisplayServicesGetBrightness", as: GetFn.self)
         setFn = Self.lookup(handle, "DisplayServicesSetBrightness", as: SetFn.self)
+        canChangeFn = Self.lookup(handle, "DisplayServicesCanChangeBrightness", as: CanChangeFn.self)
     }
 
     private static func lookup<T>(_ handle: UnsafeMutableRawPointer?, _ name: String, as type: T.Type) -> T? {
@@ -31,6 +36,13 @@ public struct DisplayServicesBrightnessProvider: Sendable {
 
     /// True if the brightness symbols resolved on this OS.
     public var isAvailable: Bool { getFn != nil && setFn != nil }
+
+    /// Whether the framework says it controls this display's backlight (the built-in panel, Apple
+    /// displays, and the few third-party ones built for it). False when the symbol is missing, so
+    /// an external falls back to DDC rather than trusting a read alone.
+    public func canChangeBrightness(for id: CGDirectDisplayID) -> Bool {
+        canChangeFn?(id) ?? false
+    }
 
     /// The display's current brightness in 0...1, or nil if it can't be read (e.g. an external the
     /// framework doesn't drive — the caller should treat that as "brightness unsupported here").

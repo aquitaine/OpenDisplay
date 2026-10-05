@@ -248,6 +248,11 @@ final class AppModel: ObservableObject {
     private var nativeMonitors: [DisplayRecordID: BrightnessMonitor] = [:]
     private var nativeTargets: [DisplayRecordID: Float] = [:]
     private var nativeWriters: [DisplayRecordID: Task<Void, Never>] = [:]
+    /// When the poll last saw a native member change — what switches it to the fast cadence.
+    private var groupBrightnessLastChange: Date?
+    private static let groupBrightnessIdleInterval: TimeInterval = 0.25
+    private static let groupBrightnessTrackingInterval: TimeInterval = 0.05
+    private static let groupBrightnessTrackingWindow: TimeInterval = 3
     #endif
     /// The coalescing timer behind `persistDisplayGroupsSoon` — one pending disk write for a whole
     /// slider drag, replaced on every tick and flushed on quit.
@@ -1226,17 +1231,25 @@ final class AppModel: ObservableObject {
     }
 
     /// Resolves and caches the best brightness route for a display, then reads its current level:
-    /// DisplayServices (`native`), then external DDC (`hardware`), or — when neither
-    /// answers — software gamma (`software`), which works on any display including DDC-less externals.
+    /// DisplayServices for the built-in and Apple's externals (`native`), DDC for other externals
+    /// (`hardware`), or — when neither answers — software gamma (`software`), which works on any
+    /// display including DDC-less externals.
     /// This is what lets the popover show a single, always-usable brightness slider.
     func refreshBrightness(for observation: DisplayObservation) async {
         guard let cgID = observation.cgDisplayID else { return }
         let id = observation.recordID
         #if !PUBLIC_API_ONLY
-        // Apple external displays also expose DisplayServices brightness. Probe native control
-        // before DDC regardless of display class (notably Pro Display XDR and Studio Display).
+        // Apple's own externals (Pro Display XDR, Studio Display) have no DDC; their backlight is
+        // driven through DisplayServices exactly like the built-in panel, so they take the native
+        // route too. Third-party monitors do NOT, even when the framework claims them: an LG
+        // ultrawide was measured answering "can change", accepting writes and reading them back
+        // while its real backlight (DDC) never moved. Trusting that would take a working DDC
+        // slider and make it do nothing.
         let control = brightnessControl
-        if let value = await Task.detached(priority: .userInitiated, operation: {
+        let nativeCapable = observation.displayClass == .builtIn
+            || (CGDisplayVendorNumber(cgID) == Self.appleDisplayVendorID
+                && control.canChangeBrightness(for: cgID))
+        if nativeCapable, let value = await Task.detached(priority: .userInitiated, operation: {
             control.brightness(for: cgID)
         }).value {
             clearBrightnessDim(id: id, cgID: cgID)
@@ -1274,6 +1287,9 @@ final class AppModel: ObservableObject {
         brightness[id] = softwareDim[id] ?? 1.0
     }
 
+    /// Apple's PNP vendor id ("APP") as `CGDisplayVendorNumber` reports it.
+    private static let appleDisplayVendorID: UInt32 = 0x610
+
     /// Remove fallback dimming when real backlight control becomes available.
     private func clearBrightnessDim(id: DisplayRecordID, cgID: CGDirectDisplayID) {
         guard let dim = softwareDim[id], dim < 1.0, !blackedOut.contains(id) else { return }
@@ -1294,11 +1310,13 @@ final class AppModel: ObservableObject {
     ///
     /// This is the USER funnel — sliders and media keys — so a write here is what makes a display
     /// its group's leader (Issue #39). `syncToken` marks the write as OpenDisplay's own hand instead
-    /// (a group fan-out, a FaceLight restore); those never lead. `SetBrightnessIntent` does NOT come
-    /// through here (it writes DisplayServices/DDC directly), so a Shortcuts-driven change leads no
-    /// group yet — routing the intent through this funnel is its own change.
+    /// (a group fan-out, a FaceLight restore); those never lead. `origin` says which gesture it was:
+    /// only the slider can teach a group offset, keys always lead. `SetBrightnessIntent` does NOT
+    /// come through here (it writes DisplayServices/DDC directly); on a natively controlled display
+    /// the group picks that change up by observation instead (`pollGroupBrightness`).
     func setBrightness(_ value: Float, for observation: DisplayObservation,
-                       syncToken: GroupSyncPolicy.SyncEcho.Token? = nil) {
+                       syncToken: GroupSyncPolicy.SyncEcho.Token? = nil,
+                       origin: GroupSyncPolicy.ManualWrite.Origin = .slider) {
         guard let cgID = observation.cgDisplayID else { return }
         let id = observation.recordID
         brightness[id] = value
@@ -1330,7 +1348,7 @@ final class AppModel: ObservableObject {
             writeGamma(level: gamma, id: id, cgID: cgID)  // brightness emulation keeps the warmth
         }
         presentOSD(kind: .brightness, value: value, for: observation)  // Batch-3 #4
-        syncGroupBrightness(value, from: observation, token: syncToken)  // Issue #39 — one OSD, above
+        syncGroupBrightness(value, from: observation, token: syncToken, origin: origin)  // Issue #39
     }
 
     // MARK: - Display Groups (Issue #39): brightness/contrast fan-out
@@ -1338,6 +1356,11 @@ final class AppModel: ObservableObject {
     #if !PUBLIC_API_ONLY
     /// Poll native group members even when the popover is closed. DisplayServices also sees
     /// brightness changes from macOS keys, System Settings, and automatic brightness.
+    ///
+    /// The cadence is two-speed: a held brightness key needs ~20 Hz for followers to track it
+    /// smoothly, but a group can exist for weeks untouched and a private-IPC read per member twenty
+    /// times a second forever is a standing wake-up cost for nothing. So the loop idles slowly and
+    /// samples fast only for a short while after it last saw a change.
     private func reconcileGroupBrightnessLoop() {
         let members = Set(settings.displayGroups.filter(\.syncBrightness).flatMap(\.memberRecordIDs))
         let active = Set(displays.filter { $0.isActive && members.contains($0.recordID) }.map(\.recordID))
@@ -1350,9 +1373,14 @@ final class AppModel: ObservableObject {
         guard groupBrightnessLoop == nil else { return }
         groupBrightnessLoop = Task { [weak self] in
             while !Task.isCancelled {
-                await self?.pollGroupBrightness()
-                // Sample native brightness at 20 Hz to keep external changes responsive.
-                try? await Task.sleep(nanoseconds: 50_000_000)
+                guard let self else { return }
+                await self.pollGroupBrightness()
+                let tracking = self.groupBrightnessLastChange.map {
+                    Date().timeIntervalSince($0) < Self.groupBrightnessTrackingWindow
+                } ?? false
+                let interval = tracking ? Self.groupBrightnessTrackingInterval
+                                        : Self.groupBrightnessIdleInterval
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
             }
         }
     }
@@ -1373,8 +1401,11 @@ final class AppModel: ObservableObject {
                   let sample else { continue }
             if nativeMonitors[id, default: BrightnessMonitor()].observe(sample, revision: revision) {
                 brightness[id] = sample
+                groupBrightnessLastChange = Date()
                 // This is already a hardware change. Only write followers, with no duplicate OSD.
-                syncGroupBrightness(sample, from: observation, token: nil)
+                // Observed changes always lead: auto-brightness or a key press is never the user
+                // correcting one panel, so it must not teach an offset.
+                syncGroupBrightness(sample, from: observation, token: nil, origin: .observed)
             }
         }
     }
@@ -1408,12 +1439,13 @@ final class AppModel: ObservableObject {
     /// path (no per-follower OSD — the leader already showed one — and no manual-cooldown teaching),
     /// and persists a re-learned offset.
     private func syncGroupBrightness(_ value: Float, from observation: DisplayObservation,
-                                     token: GroupSyncPolicy.SyncEcho.Token?) {
+                                     token: GroupSyncPolicy.SyncEcho.Token?,
+                                     origin: GroupSyncPolicy.ManualWrite.Origin) {
         let leader = observation.recordID
         guard let group = DisplayGroupStore.group(containing: leader, in: settings.displayGroups)
         else { return }
         let write = GroupSyncPolicy.ManualWrite(value: value, display: leader, token: token,
-                                                now: Date(), world: groupSyncWorld())
+                                                now: Date(), world: groupSyncWorld(), origin: origin)
         let result = GroupSyncPolicy.classify(write, group: group,
                                               state: groupSyncStates[group.id] ?? .init(),
                                               echo: groupSyncEcho)
@@ -2663,7 +2695,9 @@ final class AppModel: ObservableObject {
     /// and the disk write is coalesced — same rule as an offset the group learns from a correction
     /// (see `storeDisplayGroupOffsets`).
     func setDisplayGroupOffset(_ offset: Float, for member: DisplayRecordID, in group: DisplayGroup) {
-        var edited = group
+        // Edit the live group, not the caller's copy: a view's snapshot can predate an offset the
+        // group learned since, and writing the whole snapshot back would undo it.
+        guard var edited = settings.displayGroups.first(where: { $0.id == group.id }) else { return }
         edited.setOffset(offset, for: member)
         storeDisplayGroupOffsets(edited)
     }
@@ -3783,7 +3817,7 @@ final class AppModel: ObservableObject {
     func adjustMainBrightness(by delta: Float) async {
         guard let main = displays.first(where: { $0.isMain }) else { return }
         let current = brightness[main.recordID] ?? 0.5
-        setBrightness(max(0, min(1, current + delta)), for: main)
+        setBrightness(max(0, min(1, current + delta)), for: main, origin: .keys)
     }
 
     // MARK: - OSD HUD + media keys (Batch-3)
@@ -3835,7 +3869,8 @@ final class AppModel: ObservableObject {
         switch action {
         case .brightnessUp, .brightnessDown:
             let current = brightness[id] ?? 0.5
-            setBrightness(min(1, max(0, current + action.signedDelta(fineStep: fineStep))), for: target)
+            setBrightness(min(1, max(0, current + action.signedDelta(fineStep: fineStep))), for: target,
+                          origin: .keys)
         case .volumeUp, .volumeDown:
             let current = ddcControl(.volume, for: target) ?? 0.5
             setHardwareControl(.volume, min(1, max(0, current + action.signedDelta(fineStep: fineStep))),

@@ -28,9 +28,10 @@ final class GroupSyncPolicyTests: XCTestCase {
 
     private func write(_ value: Float, on display: DisplayRecordID,
                        token: Policy.SyncEcho.Token? = nil, at now: Date? = nil,
-                       world: Policy.World? = nil) -> Policy.ManualWrite {
+                       world: Policy.World? = nil,
+                       via origin: Policy.ManualWrite.Origin = .slider) -> Policy.ManualWrite {
         Policy.ManualWrite(value: value, display: display, token: token, now: now ?? epoch,
-                           world: world ?? self.world())
+                           world: world ?? self.world(), origin: origin)
     }
 
     /// The fan-out a leader event produced, or a failure when the outcome was something else.
@@ -323,6 +324,56 @@ final class GroupSyncPolicyTests: XCTestCase {
         let result = Policy.classify(write(0.9, on: desk, at: epoch.addingTimeInterval(1)),
                                      group: led.group, state: stretched, echo: Policy.SyncEcho())
         XCTAssertEqual(result.group.offset(for: desk), DisplayGroup.offsetLimit)
+    }
+
+    // MARK: - Who may teach, and the leader's own offset
+
+    func testAKeyPressOnAnotherMemberInsideTheWindowLeadsInsteadOfLearning() {
+        let led = Policy.classify(write(0.5, on: desk), group: group(),
+                                  state: Policy.GroupSyncState(), echo: Policy.SyncEcho())
+        // Riding the brightness key to the top on a second display used to teach it +0.5.
+        let keyed = Policy.classify(write(1.0, on: builtIn, at: epoch.addingTimeInterval(4), via: .keys),
+                                    group: led.group, state: led.state, echo: Policy.SyncEcho())
+        assertWrites(fanOut(of: keyed), [desk: 1.0, side: 1.0])
+        XCTAssertEqual(keyed.group.offset(for: builtIn), 0)
+        XCTAssertEqual(keyed.state.leaderRecordID, builtIn)
+    }
+
+    func testAnObservedChangeInsideTheWindowLeadsInsteadOfLearning() {
+        let led = Policy.classify(write(0.6, on: builtIn), group: group(offsets: [desk: 0.1]),
+                                  state: Policy.GroupSyncState(), echo: Policy.SyncEcho())
+        let seen = Policy.classify(write(0.4, on: desk, at: epoch.addingTimeInterval(4), via: .observed),
+                                   group: led.group, state: led.state, echo: Policy.SyncEcho())
+        assertWrites(fanOut(of: seen), [builtIn: 0.3, side: 0.3])
+        XCTAssertEqual(seen.group.offset(for: desk), 0.1, accuracy: 0.0001)
+    }
+
+    func testLeadershipChangesHandsWithoutMovingTheGroup() {
+        let paired = group(offsets: [desk: -0.3])
+        let first = Policy.classify(write(0.6, on: builtIn), group: paired,
+                                    state: Policy.GroupSyncState(), echo: Policy.SyncEcho())
+        assertWrites(fanOut(of: first), [desk: 0.3, side: 0.6])
+        // desk now leads from exactly where the fan-out left it: nobody else should move.
+        let later = epoch.addingTimeInterval(Policy.defaultCorrectionWindow + 1)
+        let second = Policy.classify(write(0.3, on: desk, at: later), group: first.group,
+                                     state: first.state, echo: Policy.SyncEcho())
+        assertWrites(fanOut(of: second), [builtIn: 0.6, side: 0.6])
+    }
+
+    func testALeaderPinnedAtARailDoesNotPullFollowersOffTheirs() {
+        // desk at 100% with a -0.3 offset implies a base above 1; the others stay at 100%.
+        let result = Policy.classify(write(1.0, on: desk), group: group(offsets: [desk: -0.3]),
+                                     state: Policy.GroupSyncState(), echo: Policy.SyncEcho())
+        assertWrites(fanOut(of: result), [builtIn: 1.0, side: 1.0])
+    }
+
+    func testACorrectionIsMeasuredAgainstTheBaseWhenTheLeaderCarriesAnOffset() {
+        let led = Policy.classify(write(0.3, on: desk), group: group(offsets: [desk: -0.3]),
+                                  state: Policy.GroupSyncState(), echo: Policy.SyncEcho())
+        // base is 0.6; nudging side to 0.7 teaches +0.1, not 0.7 - 0.3.
+        let corrected = Policy.classify(write(0.7, on: side, at: epoch.addingTimeInterval(4)),
+                                        group: led.group, state: led.state, echo: Policy.SyncEcho())
+        XCTAssertEqual(learnedOffset(of: corrected), 0.1, accuracy: 0.0001)
     }
 
     // MARK: - Contrast (flat mirror)
