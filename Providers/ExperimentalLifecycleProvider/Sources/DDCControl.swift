@@ -16,6 +16,9 @@ public actor ExternalDisplayDDC {
     /// Common VCP feature codes (Monitor Control Command Set). Any other code a panel implements is
     /// reachable through the raw `read(vcp:)` / `write(vcp:_:)` overloads.
     public enum Feature: UInt8, Sendable {
+        /// Restore Factory Defaults (MCCS). Write-only, any non-zero value triggers it; the panel
+        /// decides what "factory" covers (typically brightness, contrast, colour mode and gains).
+        case restoreFactoryDefaults = 0x04
         case brightness = 0x10
         case contrast = 0x12
         case volume = 0x62

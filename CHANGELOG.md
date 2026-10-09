@@ -5,6 +5,29 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.11.5] — 2026-10-09
+
+### Added
+- **Brightness in the Controls card.** Settings → Displays → Controls now starts with the same
+  brightness slider as the menu bar (with its "Hardware · DDC" / "Software · gamma" caption), so you
+  no longer have to go back to the menu bar to adjust the display you're looking at. It's there
+  even on monitors that report no other hardware controls.
+- **Reset to defaults.** A new "Reset to defaults…" button at the bottom of the Controls card asks
+  the monitor to restore its factory settings (brightness, contrast, colour mode and whatever else
+  it resets) and clears OpenDisplay's software dimming and colour temperature for that display, then
+  re-reads everything. Also available as `opendisplay ddc <selector> reset`.
+- **Detect supported colour modes.** Beside the Colour mode menu, "Detect…" asks the monitor which
+  colour modes it actually supports and narrows the menu to those. It only runs when you click it:
+  a few monitors stop answering DDC after this query until they're power-cycled.
+
+### Fixed
+- **Controls and colour mode now tell you when the monitor ignores a change** instead of showing a
+  value the monitor isn't at. Some monitors accept a change and silently drop it — an LG HDR WQHD+
+  ignores contrast while its picture mode locks it, and only honours three of its twelve colour
+  modes. After you stop dragging (or pick a mode), OpenDisplay reads the setting back; if the
+  monitor stayed put, the slider or menu moves back to the real value and a short note says the
+  monitor ignored the change.
+
 ## [0.11.4] — 2026-10-09
 
 ### Fixed

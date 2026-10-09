@@ -719,11 +719,12 @@ func runDDC() async {
         "sharpness": .sharpness, "red": .redGain, "green": .greenGain, "blue": .blueGain,
         "mute": .audioMute,
     ]
-    let usage = "usage: opendisplay ddc <selector> <brightness|contrast|volume|input|colour|sharpness|red|green|blue|mute|power|caps|vcp <0xNN>> [value]"
+    let usage = "usage: opendisplay ddc <selector> <brightness|contrast|volume|input|colour|sharpness|red|green|blue|mute|power|caps|reset|vcp <0xNN>> [value]"
     guard let sel = selectorArg, let featureArg = valueArg else { fail(usage) }
     let featureKey = featureArg.lowercased()
     let isCaps = featureKey == "caps" || featureKey == "capabilities"
-    guard isCaps || featureKey == "power" || featureKey == "vcp" || featureNames[featureKey] != nil else {
+    let isReset = featureKey == "reset"
+    guard isCaps || isReset || featureKey == "power" || featureKey == "vcp" || featureNames[featureKey] != nil else {
         fail("unknown feature '\(featureArg)' — \(usage)")
     }
     let pairs = await resolveCurrentDisplays()
@@ -742,6 +743,15 @@ func runDDC() async {
         } else {
             print("capabilities: unavailable")
         }
+        return
+    }
+    // Restore Factory Defaults (VCP 0x04, MCCS): the monitor resets brightness, contrast, colour
+    // mode and whatever else its firmware ties to "factory". One-shot, no value — the same write
+    // the app's "Reset to defaults…" sends. A panel that ignores it still ACKs, so "sent" is all
+    // the CLI can honestly claim; read the features back to see what changed.
+    if isReset {
+        let ok = await ddc.write(.restoreFactoryDefaults, 1)
+        print(ok ? "factory reset sent (VCP 0x04)" : "DDC write failed")
         return
     }
     let setValue = positional.count > 3 ? positional[3] : nil
@@ -1245,6 +1255,7 @@ case "help", "--help", "-h":
       opendisplay group <add|remove> <name> <selector>
       opendisplay brightness <selector> [0..1]
       opendisplay ddc <selector> <brightness|contrast|volume|input|colour|sharpness|red|green|blue|mute|power|caps> [value]
+      opendisplay ddc <selector> reset                # restore the monitor's factory defaults (VCP 0x04)
       opendisplay ddc <selector> vcp <0xNN> [value]   # any raw MCCS feature code
       opendisplay edid <selector> [--out <path.bin>]
       opendisplay favorite <list|set|unset> <selector> [WxH[@Hz][@2x]]

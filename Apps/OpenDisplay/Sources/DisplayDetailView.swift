@@ -213,6 +213,10 @@ private struct ResolutionCard: View {
 private struct AppearanceCard: View {
     @EnvironmentObject private var model: AppModel
     let display: DisplayObservation
+    @State private var detectingModes = false
+    /// Set when an explicit "Detect…" came back empty; cleared after a few seconds so a transient
+    /// failure doesn't sit on the card as if it were a permanent property of the monitor.
+    @State private var detectFoundNothing = false
 
     /// Displayed kelvin for the temperature slider (absent cache = neutral).
     private var temperature: Float {
@@ -260,18 +264,39 @@ private struct AppearanceCard: View {
                     // wedge panels, so the app never runs it automatically) — until then this takes
                     // the 1...max fallback path.
                     let codes = model.colorPresetCodes(for: display)
-                    if codes.isEmpty {
-                        Text(model.colorPreset[display.recordID].map { model.presetName($0) } ?? "—")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                    } else {
-                        Menu(model.colorPreset[display.recordID].map { model.presetName($0) } ?? "—") {
-                            ForEach(codes, id: \.self) { code in
-                                Button(model.presetName(code)) { model.setColorPreset(code, for: display) }
-                            }
+                    HStack(spacing: 8) {
+                        #if !PUBLIC_API_ONLY
+                        if model.ddcCapabilities[display.recordID] == nil {
+                            Button(detectingModes ? "Detecting…" : "Detect…") { detectModes() }
+                                .buttonStyle(.link).controlSize(.small)
+                                .disabled(detectingModes)
+                                .help("Ask the monitor which colour modes it supports")
                         }
-                        .menuStyle(.borderlessButton).fixedSize()
+                        #endif
+                        if codes.isEmpty {
+                            Text(model.colorPreset[display.recordID].map { model.presetName($0) } ?? "—")
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                        } else {
+                            Menu(model.colorPreset[display.recordID].map { model.presetName($0) } ?? "—") {
+                                ForEach(codes, id: \.self) { code in
+                                    Button(model.presetName(code)) { model.setColorPreset(code, for: display) }
+                                }
+                            }
+                            .menuStyle(.borderlessButton).fixedSize()
+                        }
                     }
                 }
+                if model.ddcWriteWasIgnored(0x14, for: display), let current = model.colorPreset[display.recordID] {
+                    secondaryNote("The monitor stayed on \(model.presetName(current)).")
+                }
+                #if !PUBLIC_API_ONLY
+                if detectFoundNothing {
+                    secondaryNote("No capabilities reported")
+                } else if model.ddcCapabilities[display.recordID] == nil {
+                    secondaryNote("Detecting asks the monitor which modes it supports. A few monitors stop "
+                                  + "answering DDC afterwards until power-cycled.")
+                }
+                #endif
             }
             ODDivider()
             ODRow("Colour profile") {
@@ -293,6 +318,30 @@ private struct AppearanceCard: View {
             Text(reason).font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 10)
         }
     }
+
+    private func secondaryNote(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11)).foregroundStyle(.secondary)
+            .padding(.horizontal, 10).padding(.bottom, 4)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Explicit, user-initiated capabilities read (the 0xF3 read is never run automatically — see
+    /// `AppModel.refreshCapabilities`). Re-reads the preset afterwards so the menu, now narrowed to
+    /// the advertised codes, shows the panel's real current mode.
+    private func detectModes() {
+        detectingModes = true
+        detectFoundNothing = false
+        Task {
+            await model.refreshCapabilities(for: display)
+            await model.refreshColorPreset(for: display)
+            detectingModes = false
+            guard model.ddcCapabilities[display.recordID] == nil else { return }
+            detectFoundNothing = true
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            detectFoundNothing = false
+        }
+    }
 }
 
 // MARK: - Hardware controls (DDC, external only)
@@ -300,13 +349,27 @@ private struct AppearanceCard: View {
 private struct ControlsCard: View {
     @EnvironmentObject private var model: AppModel
     let display: DisplayObservation
+    @State private var confirmingReset = false
+    @State private var resetting = false
+
+    /// Shown under a slider whose last write the panel answered with a different value.
+    private static let ignoredNote = "The monitor ignored this change. Its picture mode may lock this setting."
 
     var body: some View {
         ODCard(title: "Controls",
                footnote: "Hardware controls sent over DDC/CI. Availability depends on the monitor.") {
+            // Brightness first, and always: it has a software fallback, so it's usable even on a
+            // panel that reports none of the DDC extras below. Same model funnel as the popover.
+            ODRow("Brightness", secondary: model.brightnessCaption(for: display)) {
+                sliderWithReadout(level: model.brightness[display.recordID] ?? 1) { value in
+                    model.setBrightness(value, for: display)
+                }
+            }
+            if model.ddcWriteWasIgnored(0x10, for: display) { ignoredCaption(Self.ignoredNote) }
+            ODDivider()
             let controls = HardwareControl.allCases.filter { model.ddcControl($0, for: display) != nil }
             if controls.isEmpty {
-                ODRow("No adjustable hardware controls reported") {}
+                ODRow("No other adjustable hardware controls reported") {}
                 // A panel that answers nothing usually isn't DDC-less — its scaler's DDC channel is
                 // often just stuck (a state that survives display sleep; only its own power button
                 // clears it). Say so, or "unsupported" reads as a dead feature the user can't act on.
@@ -322,6 +385,7 @@ private struct ControlsCard: View {
                             model.setHardwareControl(control, value, for: display)
                         }
                     }
+                    if model.ddcWriteWasIgnored(control.vcp, for: display) { ignoredCaption(Self.ignoredNote) }
                 }
             }
             if let caption = model.groupSyncCaption(for: display) {
@@ -356,7 +420,37 @@ private struct ControlsCard: View {
                 }
                 .menuStyle(.borderlessButton).fixedSize()
             }
+            #if !PUBLIC_API_ONLY
+            ODDivider()
+            ODRow("Reset to defaults", secondary: "Restores the monitor's factory settings") {
+                Button(resetting ? "Resetting…" : "Reset to defaults…") { confirmingReset = true }
+                    .controlSize(.small)
+                    .disabled(resetting)
+            }
+            #endif
         }
+        .confirmationDialog("Reset \(model.displayName(for: display)) to defaults?",
+                            isPresented: $confirmingReset, titleVisibility: .visible) {
+            Button("Reset to Defaults", role: .destructive) {
+                resetting = true
+                Task {
+                    await model.resetToDefaults(for: display)
+                    resetting = false
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The monitor restores its factory settings — brightness, contrast, colour mode, and "
+                 + "anything else it resets. OpenDisplay also clears its software dimming and colour "
+                 + "temperature for this display.")
+        }
+    }
+
+    private func ignoredCaption(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11)).foregroundStyle(.secondary)
+            .padding(.horizontal, 10).padding(.bottom, 4)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func sliderWithReadout(level: Float, set: @escaping (Float) -> Void) -> some View {

@@ -132,6 +132,13 @@ final class AppModel: ObservableObject {
     /// Current DDC colour-preset code (VCP 0x14) per external display, and the max code it reports.
     @Published private(set) var colorPreset: [DisplayRecordID: Int] = [:]
     @Published private(set) var colorPresetMax: [DisplayRecordID: Int] = [:]
+    /// VCP codes, per display, whose last DDC write the panel answered with a different value — it
+    /// ACKed and then ignored (or clamped) the change, e.g. an LG whose picture mode locks contrast,
+    /// or a colour-preset code the panel doesn't implement. The cached level has already been snapped
+    /// back to the panel's value; this only drives the quiet "the monitor ignored this" caption.
+    /// Set by the post-drain read-back (`DDCWriteVerification`); cleared by the next verified write
+    /// or successful read of that feature, by a factory reset, and when the display leaves.
+    @Published private(set) var ddcWriteIgnored: [DisplayRecordID: Set<UInt8>] = [:]
     /// Current ICC colour-profile name per display (ColorSync), for the Colour profile row.
     @Published private(set) var colorProfileName: [DisplayRecordID: String] = [:]
     /// Whether each display exposes a ColorSync device that profile writes can target — resolved
@@ -1108,6 +1115,7 @@ final class AppModel: ObservableObject {
         if !inputSource.keys.allSatisfy(ids.contains) { inputSource = inputSource.filter { ids.contains($0.key) } }
         if !colorProfileName.keys.allSatisfy(ids.contains) { colorProfileName = colorProfileName.filter { ids.contains($0.key) } }
         if !softwareDim.keys.allSatisfy(ids.contains) { softwareDim = softwareDim.filter { ids.contains($0.key) } }
+        if !ddcWriteIgnored.keys.allSatisfy(ids.contains) { ddcWriteIgnored = ddcWriteIgnored.filter { ids.contains($0.key) } }
         if !colorTemperature.keys.allSatisfy(ids.contains) {
             colorTemperature = colorTemperature.filter { ids.contains($0.key) }
         }
@@ -1277,6 +1285,7 @@ final class AppModel: ObservableObject {
                     clearBrightnessDim(id: id, cgID: cgID)
                     brightness[id] = Float(reading.current) / Float(reading.max)
                     brightnessMax[id] = reading.max
+                    clearWriteIgnored(vcp, id: id)
                     brightnessMethod[id] = .hardware
                     return
                 }
@@ -1605,13 +1614,88 @@ final class AppModel: ObservableObject {
 
     private func drainDDCWrites(_ id: DisplayRecordID, _ observation: DisplayObservation) async {
         guard let controller = await ddcController(for: observation) else { ddcWriters[id] = nil; return }
-        while let target = ddcTarget[id] {
-            ddcTarget[id] = nil
-            await controller.write(.brightness, target)
+        let vcp = ExternalDisplayDDC.Feature.brightness.rawValue
+        while true {
+            var lastTarget: Int?
+            while let target = ddcTarget[id] {
+                ddcTarget[id] = nil
+                lastTarget = target
+                await controller.write(.brightness, target)
+            }
+            guard let lastTarget else { break }
+            switch await readBackAfterDrain(controller, vcp: vcp, settleNanos: Self.continuousSettleNanos,
+                                            superseded: { [weak self] in self?.ddcTarget[id] != nil }) {
+            case .cancelled: return  // pruned: the map entry is already gone, don't touch state
+            case .superseded: continue  // a newer target arrived; write it, verify that one instead
+            case .reading(let reading):
+                let outcome = DDCWriteVerification.outcome(
+                    target: lastTarget, readback: reading?.current, tolerance: 1)
+                noteWriteVerification(outcome, vcp: vcp, id: id)
+                if case .ignored(let actual) = outcome, let reading, reading.max > 0,
+                   brightnessMethod[id] == .hardware {
+                    brightness[id] = Float(actual) / Float(reading.max)
+                }
+            }
+            break
         }
         ddcWriters[id] = nil
     }
+
+    /// Settle time between a coalesced writer's LAST write and its verification read. Panels apply a
+    /// Set-VCP asynchronously; reading back immediately can return the pre-write value and report a
+    /// good write as ignored. Colour presets get longer — a mode switch reprograms the scaler's whole
+    /// colour pipeline and some panels keep answering with the old code for a beat.
+    private static let continuousSettleNanos: UInt64 = 250_000_000
+    private static let presetSettleNanos: UInt64 = 1_000_000_000
+
+    /// What the post-drain read-back saw.
+    private enum DrainReadBack {
+        /// The writer task was cancelled (display pruned) — abandon without touching any state.
+        case cancelled
+        /// A newer target was queued while settling/reading — the user is still moving; verify later.
+        case superseded
+        /// The panel's answer (nil = no reply, which `DDCWriteVerification` treats as unknown).
+        case reading((current: Int, max: Int)?)
+    }
+
+    /// Verify-after-write for the coalesced DDC writers. Called once the target map is EMPTY (the user
+    /// stopped dragging), never per tick, so a drag costs one read total — not one per step. The DDC
+    /// actor serialises the read behind any in-flight write; `superseded` is re-checked on both sides
+    /// of each await because the main actor is free to queue new targets while we're suspended.
+    private func readBackAfterDrain(_ controller: ExternalDisplayDDC, vcp: UInt8, settleNanos: UInt64,
+                                    superseded: () -> Bool) async -> DrainReadBack {
+        try? await Task.sleep(nanoseconds: settleNanos)
+        if Task.isCancelled { return .cancelled }
+        if superseded() { return .superseded }
+        let reading = await controller.read(vcp: vcp)
+        if Task.isCancelled { return .cancelled }
+        if superseded() { return .superseded }
+        return .reading(reading)
+    }
+
+    /// Records a read-back verdict in `ddcWriteIgnored`. `.unknown` (no reply) changes nothing: a
+    /// flaky read is not evidence either way, so neither a fresh nor a stale "ignored" note moves.
+    private func noteWriteVerification(_ outcome: DDCWriteVerification, vcp: UInt8, id: DisplayRecordID) {
+        switch outcome {
+        case .applied: clearWriteIgnored(vcp, id: id)
+        case .ignored: ddcWriteIgnored[id, default: []].insert(vcp)
+        case .unknown: break
+        }
+    }
+
+    /// Drops the "ignored" note for one feature — a verified write or a fresh successful read means
+    /// the cache reflects the panel again. Only touches the published map when there's a note to drop.
+    private func clearWriteIgnored(_ vcp: UInt8, id: DisplayRecordID) {
+        guard ddcWriteIgnored[id]?.contains(vcp) == true else { return }
+        ddcWriteIgnored[id]?.remove(vcp)
+        if ddcWriteIgnored[id]?.isEmpty == true { ddcWriteIgnored[id] = nil }
+    }
     #endif
+
+    /// True when the panel ignored the last DDC write to `vcp` on this display (see `ddcWriteIgnored`).
+    func ddcWriteWasIgnored(_ vcp: UInt8, for observation: DisplayObservation) -> Bool {
+        ddcWriteIgnored[observation.recordID]?.contains(vcp) == true
+    }
 
     /// Cached level (0...1) of a DDC hardware control, or nil if the display doesn't report it.
     func ddcControl(_ control: HardwareControl, for observation: DisplayObservation) -> Float? {
@@ -1688,6 +1772,7 @@ final class AppModel: ObservableObject {
                 ddcProbe[id, default: DDCProbeTracker()].recordSuccess(vcp)
                 ddcControlLevel[id, default: [:]][vcp] = Float(reading.current) / Float(reading.max)
                 ddcControlMax[DDCControlKey(id: id, vcp: vcp)] = reading.max
+                clearWriteIgnored(vcp, id: id)
             } else {
                 ddcProbe[id, default: DDCProbeTracker()].recordFailure(vcp)
             }
@@ -1717,9 +1802,30 @@ final class AppModel: ObservableObject {
     #if !PUBLIC_API_ONLY
     private func drainHardwareWrites(_ key: DDCControlKey, _ control: HardwareControl, _ observation: DisplayObservation) async {
         guard let controller = await ddcController(for: observation) else { ddcControlWriter[key] = nil; return }
-        while let target = ddcControlTarget[key] {
-            ddcControlTarget[key] = nil
-            await controller.write(vcp: key.vcp, target)
+        while true {
+            var lastTarget: Int?
+            while let target = ddcControlTarget[key] {
+                ddcControlTarget[key] = nil
+                lastTarget = target
+                await controller.write(vcp: key.vcp, target)
+            }
+            guard let lastTarget else { break }
+            switch await readBackAfterDrain(controller, vcp: key.vcp, settleNanos: Self.continuousSettleNanos,
+                                            superseded: { [weak self] in self?.ddcControlTarget[key] != nil }) {
+            case .cancelled: return
+            case .superseded: continue
+            case .reading(let reading):
+                let outcome = DDCWriteVerification.outcome(
+                    target: lastTarget, readback: reading?.current, tolerance: 1)
+                noteWriteVerification(outcome, vcp: key.vcp, id: key.id)
+                // Snap the slider to where the panel actually is, so it stops showing a level the
+                // monitor isn't at (LG: contrast 40 written, panel stays at 18/70).
+                if case .ignored(let actual) = outcome, let reading, reading.max > 0 {
+                    ddcControlLevel[key.id, default: [:]][key.vcp] = Float(actual) / Float(reading.max)
+                    ddcControlMax[key] = reading.max
+                }
+            }
+            break
         }
         ddcControlWriter[key] = nil
     }
@@ -1978,6 +2084,7 @@ final class AppModel: ObservableObject {
         ddcProbe[id, default: DDCProbeTracker()].recordSuccess(vcp)
         colorPreset[id] = reading.current
         colorPresetMax[id] = max(reading.max, 1)
+        clearWriteIgnored(vcp, id: id)
         #endif
     }
 
@@ -2001,12 +2108,77 @@ final class AppModel: ObservableObject {
         #endif
     }
 
+    /// Restores the monitor's factory settings (MCCS VCP 0x04) and clears OpenDisplay's own software
+    /// layers for the display, so "Reset to defaults" means the picture really is back at baseline —
+    /// a factory-fresh panel under a leftover gamma dim or warmth would still look "wrong".
+    ///
+    /// Order matters: queued coalesced writes are dropped FIRST so a drag still draining can't land
+    /// on top of the reset; the re-read waits ~2 s because panels take a moment to reload defaults
+    /// (and some NAK reads meanwhile); the probe cache is forgotten before re-reading so a feature
+    /// that had been negatively cached (e.g. one the old picture mode locked) gets probed again.
+    /// External displays only — the built-in has no DDC.
+    func resetToDefaults(for observation: DisplayObservation) async {
+        #if !PUBLIC_API_ONLY
+        guard observation.displayClass != .builtIn, let cgID = observation.cgDisplayID,
+              let controller = await ddcController(for: observation) else { return }
+        let id = observation.recordID
+        ddcTarget[id] = nil
+        colorPresetTarget[id] = nil
+        inputSourceTarget[id] = nil
+        ddcControlTarget = ddcControlTarget.filter { $0.key.id != id }
+        let sent = await controller.write(.restoreFactoryDefaults, 1)
+
+        // OpenDisplay's software layers: dim (gamma + overlay) and colour temperature. Cleared in the
+        // cache first so `writeGamma` re-expresses a neutral slot. Under Black Out the panel is held
+        // at gamma 0 on purpose — the cache still resets, and lifting the blackout restores neutral.
+        softwareDim[id] = nil
+        colorTemperature[id] = nil
+        if !blackedOut.contains(id) {
+            writeGamma(level: 1.0, id: id, cgID: cgID)
+            dimOverlay.remove(for: cgID)
+        }
+        ddcWriteIgnored[id] = nil
+
+        await appendAudit(AuditEntry(
+            timestamp: Date(), actor: .ui, command: "factoryReset",
+            transactionId: "txn_factoryReset", status: sent ? "sent" : "failed",
+            targets: [id.rawValue]))
+
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        resetDDCProbeCache(for: id)
+        await refreshBrightness(for: observation)
+        await refreshHardwareControls(for: observation)
+        await refreshColorPreset(for: observation)
+        await refreshInputSource(for: observation)
+        #endif
+    }
+
     #if !PUBLIC_API_ONLY
     private func drainColorPresetWrites(_ id: DisplayRecordID, _ observation: DisplayObservation) async {
         guard let controller = await ddcController(for: observation) else { colorPresetWriter[id] = nil; return }
-        while let target = colorPresetTarget[id] {
-            colorPresetTarget[id] = nil
-            await controller.write(.colorPreset, target)
+        let vcp = ExternalDisplayDDC.Feature.colorPreset.rawValue
+        while true {
+            var lastTarget: Int?
+            while let target = colorPresetTarget[id] {
+                colorPresetTarget[id] = nil
+                lastTarget = target
+                await controller.write(.colorPreset, target)
+            }
+            guard let lastTarget else { break }
+            switch await readBackAfterDrain(controller, vcp: vcp, settleNanos: Self.presetSettleNanos,
+                                            superseded: { [weak self] in self?.colorPresetTarget[id] != nil }) {
+            case .cancelled: return
+            case .superseded: continue
+            case .reading(let reading):
+                // Discrete enum: exact match only. A panel that doesn't implement the code stays on
+                // its current one (LG honours only 5/8/11), so show that instead of the pick. The
+                // adaptive warmth loop sees the snapped value too, and treats a refused evening
+                // preset as drift — it stops re-sending a write the panel will never take.
+                let outcome = DDCWriteVerification.outcome(target: lastTarget, readback: reading?.current)
+                noteWriteVerification(outcome, vcp: vcp, id: id)
+                if case .ignored(let actual) = outcome { colorPreset[id] = actual }
+            }
+            break
         }
         colorPresetWriter[id] = nil
     }
