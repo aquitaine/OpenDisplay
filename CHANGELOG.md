@@ -5,6 +5,17 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.11.4] — 2026-10-09
+
+### Fixed
+- **Colour mode menu no longer hangs the app on monitors that report 65535 colour presets** (LG HDR
+  WQHD+ and many others). Until the monitor's capabilities have been read, the Colour mode menu
+  guessed its choices from the "highest preset" the monitor reports — but colour presets are a fixed
+  list, not a range, and some monitors report 65535 there. Opening the menu then tried to build
+  65,535 entries and the app beachballed. The guess is now limited to the 12 standard presets
+  (sRGB through User 2, now including 11500K and User 2 by name), and the monitor's current preset
+  is always listed so the menu shows what it's actually set to.
+
 ## [0.11.3] — 2026-10-05
 
 ### Added

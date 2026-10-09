@@ -141,11 +141,12 @@ final class AppModel: ObservableObject {
     /// and parses every installed profile from disk, so it must never run during a SwiftUI body).
     @Published private(set) var availableColorProfilesCache: [ICCProfile] = []
 
-    /// Standard DDC colour-preset labels (VCP 0x14). Monitors vary; the menu offers 1...max and labels
-    /// the standard ones, falling back to "Preset N".
+    /// Standard DDC colour-preset labels (VCP 0x14, MCCS 2.2 codes 0x01…0x0C). Monitors vary; the
+    /// menu offers the advertised codes (or a bounded 1...max guess) and labels the standard ones,
+    /// falling back to "Preset N".
     static let presetNames: [Int: String] = [
         1: "sRGB", 2: "Display native", 3: "4000K", 4: "5000K", 5: "6500K",
-        6: "7500K", 7: "8200K", 8: "9300K", 9: "10000K", 11: "User 1",
+        6: "7500K", 7: "8200K", 8: "9300K", 9: "10000K", 10: "11500K", 11: "User 1", 12: "User 2",
     ]
     func presetName(_ code: Int) -> String { Self.presetNames[code] ?? "Preset \(code)" }
 
@@ -1949,11 +1950,14 @@ final class AppModel: ObservableObject {
     /// **non-continuous** enum: the panel only honours the specific values it advertises in its DDC
     /// capabilities, so we offer those (when known) rather than a contiguous 1...max range — otherwise
     /// most selections are codes the monitor silently ignores and the control appears to "do nothing".
-    /// Falls back to 1...max only when capabilities haven't been read.
+    /// Falls back to 1...max only when capabilities haven't been read, clamped to the MCCS-defined
+    /// preset range (some panels report max = 65535 for this feature, which would build a 65,535-item
+    /// menu and hang the app). The current preset is always included so the menu stays truthful.
     func colorPresetCodes(for observation: DisplayObservation) -> [Int] {
         DDCCapabilities.offeredValues(
             ddcCapabilities[observation.recordID], for: 0x14,
-            fallbackMax: colorPresetMax[observation.recordID] ?? 5)
+            fallbackMax: colorPresetMax[observation.recordID] ?? 5,
+            current: colorPreset[observation.recordID])
     }
 
     /// Reads the external display's current DDC colour preset (VCP 0x14) + its max code into the cache.

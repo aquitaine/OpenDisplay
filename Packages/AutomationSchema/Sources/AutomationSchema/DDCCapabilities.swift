@@ -30,15 +30,39 @@ public struct DDCCapabilities: Hashable, Sendable, Codable {
     /// continuous control like brightness, or simply absent).
     public func values(for code: UInt8) -> [Int]? { discreteValues[code] }
 
+    /// The highest VCP `0x14` (Select Color Preset) code MCCS 2.2 defines: `0x01`…`0x0C` are sRGB,
+    /// display native, 4000K, 5000K, 6500K, 7500K, 8200K, 9300K, 10000K, 11500K, User 1, User 2.
+    /// 0x14 is a **non-continuous** feature, so the "max" field of its Get-VCP reply is meaningless —
+    /// and some panels (e.g. LG HDR WQHD+) report 0xFFFF there. A `1...max` fallback built from that
+    /// reply would be a 65,535-item menu, so the colour-preset fallback is clamped to this ceiling.
+    public static let colorPresetCodeCeiling = 0x0C
+
     /// The values a picker should offer for a feature. For a **non-continuous** code (e.g. `0x14`
     /// Select Color Preset, `0x60` Input Source) the only values the panel honors are the discrete ones
     /// it advertised — offering a contiguous `1...max` range instead makes most selections silent no-ops,
     /// because the monitor ignores codes it never listed. So: prefer the advertised discrete values; fall
     /// back to `1...fallbackMax` only when capabilities are unavailable (`caps == nil`) or the panel
     /// didn't enumerate this code. `caps` is optional so callers can pass a possibly-unread cache.
-    public static func offeredValues(_ caps: DDCCapabilities?, for code: UInt8, fallbackMax: Int) -> [Int] {
-        if let values = caps?.values(for: code), !values.isEmpty { return values }
-        return fallbackMax >= 1 ? Array(1...fallbackMax) : []
+    ///
+    /// For `0x14` the fallback is clamped to `colorPresetCodeCeiling`, because the reported max is not
+    /// a real bound for a non-continuous feature (see there). `current` — the panel's live value, when
+    /// known — is always included (sorted, de-duplicated), so a picker's label and selection stay
+    /// truthful even when the panel sits on a code outside the offered set (e.g. a vendor-specific 0xFF).
+    public static func offeredValues(
+        _ caps: DDCCapabilities?, for code: UInt8, fallbackMax: Int, current: Int? = nil
+    ) -> [Int] {
+        var values: [Int]
+        if let advertised = caps?.values(for: code), !advertised.isEmpty {
+            values = advertised
+        } else {
+            let upper = code == 0x14 ? min(fallbackMax, colorPresetCodeCeiling) : fallbackMax
+            values = upper >= 1 ? Array(1...upper) : []
+        }
+        if let current, !values.contains(current) {
+            values.append(current)
+            values.sort()
+        }
+        return values
     }
 
     /// Parses an MCCS capabilities string. Returns nil when there's no balanced `vcp(...)` block to read

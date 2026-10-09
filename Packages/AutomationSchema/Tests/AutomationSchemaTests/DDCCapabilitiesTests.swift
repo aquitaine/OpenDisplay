@@ -100,4 +100,31 @@ final class DDCCapabilitiesTests: XCTestCase {
         // Degenerate fallback max → empty, never a crash.
         XCTAssertEqual(DDCCapabilities.offeredValues(nil, for: 0x14, fallbackMax: 0), [])
     }
+
+    // Regression: some panels (LG HDR WQHD+) answer Get-VCP 0x14 with max = 65535. 0x14 is
+    // non-continuous, so that max is meaningless; a 1...max fallback built a 65,535-item menu and
+    // beachballed the app. The fallback must stay inside the MCCS-defined preset range.
+    func testColorPresetFallbackIsClampedToMCCSRange() {
+        let offered = DDCCapabilities.offeredValues(nil, for: 0x14, fallbackMax: 65535)
+        XCTAssertEqual(offered, Array(1...DDCCapabilities.colorPresetCodeCeiling))
+        XCTAssertLessThanOrEqual(offered.count, 12)
+        // Unread-but-present capabilities without a 0x14 list take the same bounded path.
+        let caps = DDCCapabilities.parse("vcp(10 14)")!
+        XCTAssertEqual(DDCCapabilities.offeredValues(caps, for: 0x14, fallbackMax: 0xFFFF).count, 12)
+        // The clamp is specific to the colour preset; other codes keep their caller's fallback.
+        XCTAssertEqual(DDCCapabilities.offeredValues(nil, for: 0x60, fallbackMax: 20).count, 20)
+    }
+
+    func testOfferedValuesIncludesCurrentCodeOutsideRange() {
+        // A vendor-specific current preset outside the fallback range is still offered, sorted.
+        XCTAssertEqual(DDCCapabilities.offeredValues(nil, for: 0x14, fallbackMax: 5, current: 0xFF),
+                       [1, 2, 3, 4, 5, 0xFF])
+        XCTAssertEqual(DDCCapabilities.offeredValues(nil, for: 0x14, fallbackMax: 65535, current: 0xFF).count, 13)
+        // A current code missing from the advertised list is merged in, not duplicated when present.
+        let caps = DDCCapabilities.parse("vcp(14(05 08 0B))")!
+        XCTAssertEqual(DDCCapabilities.offeredValues(caps, for: 0x14, fallbackMax: 5, current: 3), [3, 5, 8, 11])
+        XCTAssertEqual(DDCCapabilities.offeredValues(caps, for: 0x14, fallbackMax: 5, current: 8), [5, 8, 11])
+        // Degenerate fallback still surfaces the live value so the menu label has something to match.
+        XCTAssertEqual(DDCCapabilities.offeredValues(nil, for: 0x14, fallbackMax: 0, current: 3), [3])
+    }
 }
