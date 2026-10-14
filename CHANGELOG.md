@@ -5,6 +5,16 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.11.6] — 2026-10-14
+
+### Fixed
+- **Brightness and other monitor controls stop working after the Mac sleeps.** While the Mac is
+  asleep, macOS can quietly rebuild the connection OpenDisplay uses to control an external
+  monitor (seen on an LG over HDMI). OpenDisplay kept using the old connection, so brightness keys,
+  sliders and the other hardware controls did nothing until the app was relaunched. It now notices
+  when that connection has gone away, or keeps failing, and reconnects on its own — and it starts
+  fresh after every wake. Each reconnect is recorded in the diagnostics bundle's display timeline.
+
 ## [0.11.5] — 2026-10-09
 
 ### Added

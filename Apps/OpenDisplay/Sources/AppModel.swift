@@ -205,6 +205,10 @@ final class AppModel: ObservableObject {
     /// In-flight DDC-controller constructions, so concurrent first-uses of one display await the same
     /// build instead of each spinning up (and binding) a duplicate IOAVService.
     private var ddcBuilders: [DisplayRecordID: Task<ExternalDisplayDDC?, Never>] = [:]
+    /// Bumped whenever every cached binding is invalidated at once (wake). A build that was already
+    /// in flight when it changed was bound against the pre-wake registry, so its result is not
+    /// cached; its awaiters re-resolve instead (see `buildDDCController`).
+    private var ddcBindingGeneration = 0
     private var brightnessMax: [DisplayRecordID: Int] = [:]
     private var ddcTarget: [DisplayRecordID: Int] = [:]
     private var ddcWriters: [DisplayRecordID: Task<Void, Never>] = [:]
@@ -1599,28 +1603,115 @@ final class AppModel: ObservableObject {
     /// — `ExternalDisplayDDC.init` does `dlopen` + IOKit registry enumeration, which must not run on
     /// the UI thread when a display row first expands. Concurrent first-uses await one shared build,
     /// so a display can't end up with two bound IOAVService handles.
+    ///
+    /// A cached controller is health-checked on every resolve (`DDCBindingPolicy`): macOS can tear
+    /// down and re-create a display's AV service proxy across sleep without the display ever leaving
+    /// the topology, and a controller bound to the old proxy silently writes to nothing. A stale one
+    /// is dropped and rebuilt through the same single-flight builder, so this is also the point where
+    /// every new drain picks up a fresh binding.
     private func ddcController(for observation: DisplayObservation) async -> ExternalDisplayDDC? {
         let id = observation.recordID
-        if let existing = ddc[id] { return existing }
-        if let building = ddcBuilders[id] { return await building.value }
+        if let existing = ddc[id] {
+            // `isBound` is a synchronous registry query; only the failure count needs the hop.
+            let failures = await existing.consecutiveIOFailures
+            guard let reason = DDCBindingPolicy.rebindReason(serviceInPlane: existing.isBound,
+                                                             consecutiveIOFailures: failures)
+            else { return existing }
+            // Someone else (a concurrent resolve, or the wake invalidation) already replaced or
+            // dropped this binding while we were suspended — take whatever is current instead.
+            guard ddc[id] === existing else { return await ddcController(for: observation) }
+            ddc[id] = nil
+            let fresh = await buildDDCController(id, for: observation)
+            // No fresh binding at all (the proxy hasn't been re-created yet) is still worth a
+            // timeline line; the next resolve simply tries the build again.
+            if fresh.map({ DDCBindingPolicy.isNewBinding(previousEntryID: existing.registryEntryID,
+                                                         currentEntryID: $0.registryEntryID) }) ?? true {
+                noteDDCRebind(reason, id: id, observation: observation)
+            }
+            return fresh
+        }
+        return await buildDDCController(id, for: observation)
+    }
+
+    /// The single-flight build behind `ddcController`. Concurrent callers share one in-flight build.
+    /// Map writes are guarded twice: by builder identity (a prune may have dropped this build and
+    /// another may have started — this one must not clobber it), and by `ddcBindingGeneration` (a
+    /// wake while building means this binding predates the wake: don't cache it, re-resolve).
+    private func buildDDCController(_ id: DisplayRecordID,
+                                    for observation: DisplayObservation) async -> ExternalDisplayDDC? {
+        if let building = ddcBuilders[id] {
+            let generation = ddcBindingGeneration
+            let controller = await building.value
+            guard generation == ddcBindingGeneration else { return await ddcController(for: observation) }
+            return controller
+        }
         guard let cgID = observation.cgDisplayID else { return nil }
+        let generation = ddcBindingGeneration
         let builder = Task.detached(priority: .utility) { ExternalDisplayDDC(displayID: cgID) }
         ddcBuilders[id] = builder
         let controller = await builder.value
+        guard generation == ddcBindingGeneration else { return await ddcController(for: observation) }
+        guard ddcBuilders[id] == builder else { return controller }  // pruned meanwhile: don't re-cache
         ddcBuilders[id] = nil
         if let controller { ddc[id] = controller }
         return controller
     }
 
+    /// Follow-up to a rebind that landed on a NEW proxy: one timeline line for the diagnostics
+    /// bundle, forget negative probe results earned against the dead handle (every read through it
+    /// failed, so features were cached as unsupported), and re-probe brightness once so a display
+    /// that fell back to software gamma returns to hardware control. Not run when a failure-run
+    /// rebind found the same proxy — see `DDCBindingPolicy.isNewBinding`.
+    private func noteDDCRebind(_ reason: DDCBindingPolicy.Reason, id: DisplayRecordID,
+                               observation: DisplayObservation) {
+        logDisplayEvent("ddc-rebind:\(reason.rawValue) \(displayName(for: observation))")
+        resetDDCProbeCache(for: id)
+        let current = displays.first { $0.recordID == id } ?? observation
+        Task { [weak self] in await self?.refreshBrightness(for: current) }
+    }
+
+    /// Wake belt-and-braces: drop EVERY cached external binding so the next use rebinds against the
+    /// post-wake registry, rather than relying on each stale handle being noticed. Nothing in flight
+    /// is cancelled — drains holding an old controller finish on it, and their next resolve gets a
+    /// fresh one. In-flight builds are forgotten (not awaited) and the generation bump stops them
+    /// from re-caching a pre-wake binding when they land. Rebinding is cheap: one registry walk,
+    /// off the main actor, on first use.
+    private func invalidateDDCBindings() {
+        for observation in displays where ddc[observation.recordID] != nil {
+            logDisplayEvent("ddc-rebind:\(DDCBindingPolicy.Reason.wake.rawValue) \(displayName(for: observation))")
+        }
+        ddcBindingGeneration &+= 1
+        ddc.removeAll()
+        ddcBuilders.removeAll()
+        resetDDCProbeCache()
+    }
+
+    /// One coalesced-drain write with a single stale-binding recovery: if the write fails and the
+    /// re-resolve hands back a DIFFERENT controller (the policy just rebound, or a wake already
+    /// did), the drain switches to it for the rest of its run and retries this write once. A failed
+    /// write on a binding the policy still trusts (a busy panel) is not retried — the drain's
+    /// read-back verification reports it like any other ignored write.
+    private func drainWrite(vcp: UInt8, _ value: Int, via controller: inout ExternalDisplayDDC,
+                            retryAvailable: inout Bool, observation: DisplayObservation) async -> Bool {
+        if await controller.write(vcp: vcp, value) { return true }
+        guard retryAvailable, let current = await ddcController(for: observation),
+              current !== controller else { return false }
+        retryAvailable = false
+        controller = current
+        return await controller.write(vcp: vcp, value)
+    }
+
     private func drainDDCWrites(_ id: DisplayRecordID, _ observation: DisplayObservation) async {
-        guard let controller = await ddcController(for: observation) else { ddcWriters[id] = nil; return }
+        guard var controller = await ddcController(for: observation) else { ddcWriters[id] = nil; return }
         let vcp = ExternalDisplayDDC.Feature.brightness.rawValue
+        var retryAvailable = true
         while true {
             var lastTarget: Int?
             while let target = ddcTarget[id] {
                 ddcTarget[id] = nil
                 lastTarget = target
-                await controller.write(.brightness, target)
+                _ = await drainWrite(vcp: vcp, target, via: &controller, retryAvailable: &retryAvailable,
+                                     observation: observation)
             }
             guard let lastTarget else { break }
             switch await readBackAfterDrain(controller, vcp: vcp, settleNanos: Self.continuousSettleNanos,
@@ -1801,13 +1892,15 @@ final class AppModel: ObservableObject {
 
     #if !PUBLIC_API_ONLY
     private func drainHardwareWrites(_ key: DDCControlKey, _ control: HardwareControl, _ observation: DisplayObservation) async {
-        guard let controller = await ddcController(for: observation) else { ddcControlWriter[key] = nil; return }
+        guard var controller = await ddcController(for: observation) else { ddcControlWriter[key] = nil; return }
+        var retryAvailable = true
         while true {
             var lastTarget: Int?
             while let target = ddcControlTarget[key] {
                 ddcControlTarget[key] = nil
                 lastTarget = target
-                await controller.write(vcp: key.vcp, target)
+                _ = await drainWrite(vcp: key.vcp, target, via: &controller, retryAvailable: &retryAvailable,
+                                     observation: observation)
             }
             guard let lastTarget else { break }
             switch await readBackAfterDrain(controller, vcp: key.vcp, settleNanos: Self.continuousSettleNanos,
@@ -1867,10 +1960,12 @@ final class AppModel: ObservableObject {
 
     #if !PUBLIC_API_ONLY
     private func drainInputSourceWrites(_ id: DisplayRecordID, _ observation: DisplayObservation) async {
-        guard let controller = await ddcController(for: observation) else { inputSourceWriter[id] = nil; return }
+        guard var controller = await ddcController(for: observation) else { inputSourceWriter[id] = nil; return }
+        var retryAvailable = true
         while let target = inputSourceTarget[id] {
             inputSourceTarget[id] = nil
-            await controller.write(.inputSource, target)
+            _ = await drainWrite(vcp: ExternalDisplayDDC.Feature.inputSource.rawValue, target, via: &controller,
+                                 retryAvailable: &retryAvailable, observation: observation)
         }
         inputSourceWriter[id] = nil
     }
@@ -2155,14 +2250,16 @@ final class AppModel: ObservableObject {
 
     #if !PUBLIC_API_ONLY
     private func drainColorPresetWrites(_ id: DisplayRecordID, _ observation: DisplayObservation) async {
-        guard let controller = await ddcController(for: observation) else { colorPresetWriter[id] = nil; return }
+        guard var controller = await ddcController(for: observation) else { colorPresetWriter[id] = nil; return }
         let vcp = ExternalDisplayDDC.Feature.colorPreset.rawValue
+        var retryAvailable = true
         while true {
             var lastTarget: Int?
             while let target = colorPresetTarget[id] {
                 colorPresetTarget[id] = nil
                 lastTarget = target
-                await controller.write(.colorPreset, target)
+                _ = await drainWrite(vcp: vcp, target, via: &controller, retryAvailable: &retryAvailable,
+                                     observation: observation)
             }
             guard let lastTarget else { break }
             switch await readBackAfterDrain(controller, vcp: vcp, settleNanos: Self.presetSettleNanos,
@@ -3635,7 +3732,23 @@ final class AppModel: ObservableObject {
                                queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
+                    #if !PUBLIC_API_ONLY
+                    // Before convergence touches any display: macOS may have rebuilt the AV
+                    // service proxies while asleep, so no pre-sleep DDC binding is trusted.
+                    self.invalidateDDCBindings()
+                    #endif
                     Task { await self.convergeAfterWake() }
+                }
+            },
+            // Displays can wake later than the machine (and DarkWake cycles wake the Mac without
+            // them) — the proxies are re-created around the screens waking, so drop the bindings
+            // again then. Nothing else hangs off this notification.
+            center.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil,
+                               queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    #if !PUBLIC_API_ONLY
+                    self?.invalidateDDCBindings()
+                    #endif
                 }
             }
         ]

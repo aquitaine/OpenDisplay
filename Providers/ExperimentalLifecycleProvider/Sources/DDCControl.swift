@@ -42,6 +42,45 @@ public actor ExternalDisplayDDC {
     private let writeFn: WriteFn
     private let readFn: ReadFn
 
+    /// The `DCPAVServiceProxy` registry entry `service` was created from, retained for this actor's
+    /// lifetime (released in `deinit`). Kept so the binding can tell when it has gone stale: macOS
+    /// may terminate and re-create the proxy across sleep/DarkWake while the display itself never
+    /// leaves the topology, and an `IOAVService` made from the old proxy then quietly talks to
+    /// nothing. Holding our own reference keeps the entry object valid to *ask* about, even after
+    /// IOKit has terminated it.
+    private let boundProxy: io_service_t
+
+    /// Registry entry id of the bound proxy — stable for the proxy's life and never reused, so two
+    /// controllers with different ids are bound to different proxies. Lets the app tell a real
+    /// rebind (new proxy) from one that landed back on the same, live proxy.
+    public nonisolated let registryEntryID: UInt64
+
+    /// True while the bound proxy is still attached to the IOService plane. A terminated service is
+    /// detached from the plane, so false means this binding is dead and must be rebuilt. One cheap
+    /// synchronous IOKit call, safe from any thread — no actor hop, no bus traffic.
+    public nonisolated var isBound: Bool {
+        IORegistryEntryInPlane(boundProxy, kIOServicePlane) != 0
+    }
+
+    /// I2C calls (`IOAVServiceWriteI2C` / `ReadI2C`) that have failed in a row; any success resets
+    /// it. A transiently busy panel produces a few; a dead handle produces nothing else. Fed to
+    /// `DDCBindingPolicy` together with `isBound` — this actor only reports, the app decides.
+    public private(set) var consecutiveIOFailures = 0
+
+    /// Every I2C call goes through these two so the failure run is counted in exactly one place.
+    private func i2cWrite(_ bytes: UnsafePointer<UInt8>, _ length: UInt32) -> Bool {
+        noteI2C(writeFn(service, Self.i2cChip, Self.i2cSource, bytes, length) == 0)
+    }
+
+    private func i2cRead(_ bytes: UnsafeMutablePointer<UInt8>, _ length: UInt32) -> Bool {
+        noteI2C(readFn(service, Self.i2cChip, Self.i2cSource, bytes, length) == 0)
+    }
+
+    private func noteI2C(_ ok: Bool) -> Bool {
+        consecutiveIOFailures = ok ? 0 : consecutiveIOFailures + 1
+        return ok
+    }
+
     private static let i2cChip: UInt32 = 0x37    // DDC/CI 7-bit I2C address
     private static let i2cSource: UInt32 = 0x51  // host source address (the "dataAddress" arg)
 
@@ -106,9 +145,18 @@ public actor ExternalDisplayDDC {
         writeFn = unsafeBitCast(writePtr, to: WriteFn.self)
         readFn = unsafeBitCast(readPtr, to: ReadFn.self)
         guard let svc = Self.avService(for: displayID) else { return nil }
-        defer { IOObjectRelease(svc) }
-        guard let av = create(kCFAllocatorDefault, svc) else { return nil }
+        guard let av = create(kCFAllocatorDefault, svc) else { IOObjectRelease(svc); return nil }
+        var entryID: UInt64 = 0
+        IORegistryEntryGetRegistryEntryID(svc, &entryID)
+        // `avService` hands us an owned reference; keep it (see `boundProxy`) rather than
+        // releasing it here, so `isBound` can keep asking IOKit about this exact entry.
+        boundProxy = svc
+        registryEntryID = entryID
         service = av.takeRetainedValue()
+    }
+
+    deinit {
+        IOObjectRelease(boundProxy)
     }
 
     /// Reads a VCP feature: (current, max) in the display's native units (brightness/contrast 0...100
@@ -144,12 +192,12 @@ public actor ExternalDisplayDDC {
         let checksum = UInt8(0x6e ^ Int(Self.i2cSource) ^ 0x82 ^ 0x01) ^ code
         await paceBus()
         var request: [UInt8] = [0x82, 0x01, code, checksum]
-        let wrote = writeFn(service, Self.i2cChip, Self.i2cSource, &request, 4) == 0
+        let wrote = i2cWrite(&request, 4)
         markTransaction()
         guard wrote else { return nil }  // paceBus() spaces the retry
         try? await Task.sleep(nanoseconds: attempt == 0 ? Self.readReplyFirstNanos : Self.readReplyNanos)
         var buffer = [UInt8](repeating: 0, count: Self.readWindow)
-        let readOK = readFn(service, Self.i2cChip, Self.i2cSource, &buffer, UInt32(Self.readWindow)) == 0
+        let readOK = i2cRead(&buffer, UInt32(Self.readWindow))
         markTransaction()
         guard readOK else { return nil }
         return Self.scanReply(in: buffer, vcp: code)
@@ -203,7 +251,7 @@ public actor ExternalDisplayDDC {
         var packet: [UInt8] = [0x84, 0x03, code, high, low, checksum]
         await lockBus()
         await paceBus()
-        let ok = writeFn(service, Self.i2cChip, Self.i2cSource, &packet, 6) == 0
+        let ok = i2cWrite(&packet, 6)
         markTransaction()
         unlockBus()
         return ok
@@ -240,12 +288,12 @@ public actor ExternalDisplayDDC {
             let checksum = UInt8(0x6e ^ Int(Self.i2cSource) ^ 0x83 ^ 0xf3) ^ high ^ low
             var request: [UInt8] = [0x83, 0xf3, high, low, checksum]
             await paceBus()
-            let wrote = writeFn(service, Self.i2cChip, Self.i2cSource, &request, 5) == 0
+            let wrote = i2cWrite(&request, 5)
             markTransaction()
             guard wrote else { break }
             try? await Task.sleep(nanoseconds: 50_000_000)
             var buffer = [UInt8](repeating: 0, count: 64)
-            let readOK = readFn(service, Self.i2cChip, Self.i2cSource, &buffer, 64) == 0
+            let readOK = i2cRead(&buffer, 64)
             markTransaction()
             guard readOK,
                   buffer[0] == 0x6e, buffer[2] == 0xe3 else { break }  // 0xE3 = Capabilities Reply
