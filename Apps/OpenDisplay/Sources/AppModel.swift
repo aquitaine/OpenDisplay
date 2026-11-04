@@ -316,6 +316,7 @@ final class AppModel: ObservableObject {
     private let osdHUD = OSDHUDController()
     /// Active media-key event tap (Batch-3 #3) when interception is on AND Accessibility is granted.
     private var mediaKeyTap: MediaKeyTap?
+    let monitorAudio = MonitorAudioController()
     /// Re-arms the media-key tap once the Accessibility grant lands. TCC has no notification API, so
     /// without this poll the user must relaunch the app after granting — the #1 "keys don't work" trap.
     private var mediaKeyTapRetry: Task<Void, Never>?
@@ -458,6 +459,7 @@ final class AppModel: ObservableObject {
                 self?.xdrPowerMonitor.stop()
                 self?.mediaKeyTapRetry?.cancel()
                 self?.mediaKeyTap?.stop()
+                self?.monitorAudio.stop()
                 self?.layoutProtectionRecheck.cancel()
                 self?.activeSurfaceRecheck.cancel()
                 self?.offlineIntentRecheck.cancel()
@@ -4255,6 +4257,13 @@ final class AppModel: ObservableObject {
     /// others (e.g. volume on the built-in) pass through to macOS.
     @discardableResult
     func handleMediaKey(_ action: MediaKeyAction, fineStep: Bool) -> Bool {
+        if monitorAudio.handle(action, fineStep: fineStep) {
+            let audioID = audioOutputDisplayID()
+            if let display = displays.first(where: { $0.recordID == audioID }) ?? displays.first(where: { $0.isMain }) {
+                presentOSD(kind: .volume, value: monitorAudio.level, for: display, source: "keys")
+            }
+            return true
+        }
         // Volume/mute follow the system's default audio output (resolved at keypress); brightness
         // follows the configured target mode and ignores this.
         let audioTarget = action.isVolume ? audioOutputDisplayID() : nil
@@ -4366,6 +4375,11 @@ final class AppModel: ObservableObject {
     /// Whether the media-key tap is currently capturing keys (true only with the toggle on AND the
     /// Accessibility grant present). Drives the Settings status row.
     var mediaKeysActive: Bool { mediaKeyTap != nil && MediaKeyTap.isAccessibilityTrusted }
+
+    func setSoftwareMonitorAudioEnabled(_ enabled: Bool) {
+        monitorAudio.setEnabled(enabled)
+        if monitorAudio.enabled { setMediaKeyInterceptionEnabled(true) }
+    }
 
     /// Toggle media-key interception (Batch-3 #3). Persists; prompts for Accessibility when enabling
     /// without the grant; reconciles the tap.

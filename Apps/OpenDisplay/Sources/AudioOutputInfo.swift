@@ -13,6 +13,8 @@ import TopologyCore
 enum AudioOutputInfo {
     /// A snapshot of the default output device: its CoreAudio name and physical transport.
     struct Snapshot {
+        let id: AudioDeviceID
+        let uid: String
         let name: String
         let transport: AudioOutputTransport
     }
@@ -20,7 +22,67 @@ enum AudioOutputInfo {
     /// The current default output device, or nil if CoreAudio has none / the query fails.
     static func currentDefaultOutput() -> Snapshot? {
         guard let deviceID = defaultOutputDeviceID() else { return nil }
-        return Snapshot(name: deviceName(deviceID) ?? "", transport: transportType(deviceID))
+        return snapshot(deviceID)
+    }
+
+    static func snapshot(_ id: AudioDeviceID) -> Snapshot? {
+        guard let uid = stringProperty(id, kAudioDevicePropertyDeviceUID) else { return nil }
+        return Snapshot(id: id, uid: uid, name: deviceName(id) ?? "", transport: transportType(id))
+    }
+
+    static func devices() -> [AudioDeviceID] {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr,
+              size > 0 else { return [] }
+        var result = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+        let status = result.withUnsafeMutableBytes {
+            AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, $0.baseAddress!)
+        }
+        return status == noErr ? result : []
+    }
+
+    static func stringProperty(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
+        var address = AudioObjectPropertyAddress(mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var value: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        let status = withUnsafeMutablePointer(to: &value) {
+            AudioObjectGetPropertyData(id, &address, 0, nil, &size, $0)
+        }
+        guard status == noErr, let value else { return nil }
+        return value.takeRetainedValue() as String
+    }
+
+    /// Never select a headphone jack or a device inferred from the display's name.
+    static func builtInSpeakers() -> AudioDeviceID? {
+        devices().first { id in
+            var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType,
+                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            var transport: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &transport) == noErr,
+                  transport == kAudioDeviceTransportTypeBuiltIn,
+                  let name = deviceName(id)?.lowercased(), name.contains("speaker") else { return false }
+            address.mSelector = kAudioDevicePropertyJackIsConnected
+            address.mScope = kAudioDevicePropertyScopeOutput
+            var connected: UInt32 = 0
+            if AudioObjectHasProperty(id, &address),
+               AudioObjectGetPropertyData(id, &address, 0, nil, &size, &connected) == noErr,
+               connected != 0 { return false }
+            return true
+        }
+    }
+
+    @discardableResult
+    static func selectOutput(_ id: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var target = id
+        guard AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size), &target) == noErr else { return false }
+        return defaultOutputDeviceID() == id
     }
 
     private static func defaultOutputDeviceID() -> AudioDeviceID? {

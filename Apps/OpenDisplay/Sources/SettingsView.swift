@@ -510,6 +510,7 @@ private struct HealthSection: View {
                 Divider()
 
                 Text("Media keys").font(.title3)
+                MonitorAudioSettings(controller: model.monitorAudio)
                 Toggle(isOn: Binding(
                     get: { model.settings.mediaKeyInterceptionEnabled },
                     set: { model.setMediaKeyInterceptionEnabled($0) }
@@ -518,7 +519,7 @@ private struct HealthSection: View {
                         Text("Use the brightness & volume keys to control displays")
                         Text("Routes the hardware brightness keys to the chosen display (external "
                              + "brightness over DDC). Volume keys follow the current sound output device, "
-                             + "driving that monitor's volume over DDC only when the audio plays through "
+                             + "using software volume when enabled, otherwise DDC when the audio plays through "
                              + "it. Needs macOS Accessibility permission to capture the keys; nothing is "
                              + "requested until you turn this on.")
                             .font(.caption).foregroundStyle(.secondary)
