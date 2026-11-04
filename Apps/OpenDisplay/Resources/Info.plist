@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleName</key>
 	<string>OpenDisplay</string>
 	<key>CFBundleDisplayName</key>
@@ -21,6 +23,8 @@
 	<!-- Menu-bar agent: no Dock icon (PRD UX-001). -->
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>OpenDisplay processes monitor audio locally to adjust its software volume. Audio is never recorded to a file or uploaded.</string>
 	<!-- Clock Mode (Issue 30): optional one-shot location lookup to auto-fill the sunrise/sunset
 	     latitude & longitude. Only requested when the user taps "Use current location"; a manual
 	     entry is always available instead. -->
