@@ -76,4 +76,47 @@ final class AuditLogTests: XCTestCase {
                               encoding: .utf8)
         XCTAssertTrue(text.contains("\"actor\":\"wakeConvergence\""))
     }
+    func testRecentSkipsInvalidUTF8BeforeValidTail() async throws {
+        let url = directory.appendingPathComponent("audit.jsonl")
+        try Data([0xFF, 0xFE, 0x0A]).write(to: url)
+        let log = DiskAuditLog(directory: directory)
+        await log.append(entry("newest"))
+        let rows = await log.recent(limit: 1)
+        XCTAssertEqual(rows.map(\.transactionId), ["newest"])
+    }
+
+    func testRecentHandlesEntriesSpanningReadBlocksAndTornTail() async throws {
+        let log = DiskAuditLog(directory: directory)
+        await log.append(entry("older"))
+        let longID = String(repeating: "x", count: 20_000)
+        await log.append(entry(longID))
+        await log.append(entry("newest"))
+        let handle = try FileHandle(forWritingTo: directory.appendingPathComponent("audit.jsonl"))
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("{unfinished".utf8))
+        try handle.close()
+        let rows = await log.recent(limit: 2)
+        XCTAssertEqual(rows.map(\.transactionId), [longID, "newest"])
+    }
+
+    func testNonpositiveLimitReturnsNoEntries() async {
+        let log = DiskAuditLog(directory: directory)
+        await log.append(entry("saved"))
+        let zero = await log.recent(limit: 0)
+        let negative = await log.recent(limit: -1)
+        XCTAssertTrue(zero.isEmpty)
+        XCTAssertTrue(negative.isEmpty)
+    }
+
+    func testCompleteFinalEntryWithoutNewlineIsIncluded() async throws {
+        let log = DiskAuditLog(directory: directory)
+        await log.append(entry("older"))
+        await log.append(entry("newest"))
+        let url = directory.appendingPathComponent("audit.jsonl")
+        var bytes = try Data(contentsOf: url)
+        XCTAssertEqual(bytes.removeLast(), 0x0A)
+        try bytes.write(to: url)
+        let rows = await log.recent(limit: 1)
+        XCTAssertEqual(rows.map(\.transactionId), ["newest"])
+    }
 }
