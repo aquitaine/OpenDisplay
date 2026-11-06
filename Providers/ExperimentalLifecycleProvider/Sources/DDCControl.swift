@@ -9,8 +9,8 @@ import IOKit
 /// volume, 0x60 input source. The `IOAVService*` symbols are undocumented IOKit SPI resolved with
 /// `dlsym` at runtime — so this links cleanly and is excluded from the public-API-only build, like
 /// the SkyLight lifecycle and DisplayServices brightness paths. Runs on its own actor with a FIFO
-/// bus turnstile (`lockBus`) making each multi-step transaction exclusive — the actor alone is NOT
-/// enough, since it is reentrant at the awaits inside a transaction — and uses non-blocking sleeps
+/// bus turnstile (`DDCTransactionGate`) making each multi-step transaction exclusive — the actor
+/// alone is NOT enough, since it is reentrant at the awaits inside a transaction — and uses non-blocking sleeps
 /// for the DDC inter-message delays, so the slow I2C never touches the UI.
 public actor ExternalDisplayDDC {
     /// Common VCP feature codes (Monitor Control Command Set). Any other code a panel implements is
@@ -69,11 +69,21 @@ public actor ExternalDisplayDDC {
 
     /// Every I2C call goes through these two so the failure run is counted in exactly one place.
     private func i2cWrite(_ bytes: UnsafePointer<UInt8>, _ length: UInt32) -> Bool {
-        noteI2C(writeFn(service, Self.i2cChip, Self.i2cSource, bytes, length) == 0)
+        guard !Task.isCancelled else { return false }
+        let ok = writeFn(service, Self.i2cChip, Self.i2cSource, bytes, length) == 0
+        // Preserve raw send success so an outstanding Get is still drained, but cancellation
+        // during synchronous I/O must not change the binding's failure accounting.
+        guard !Task.isCancelled else { return ok }
+        return noteI2C(ok)
     }
 
-    private func i2cRead(_ bytes: UnsafeMutablePointer<UInt8>, _ length: UInt32) -> Bool {
-        noteI2C(readFn(service, Self.i2cChip, Self.i2cSource, bytes, length) == 0)
+    /// Only called for an already-sent Get request after its reply deadline, with the bus held.
+    /// Even a cancelled transaction must drain this pending reply before releasing ownership;
+    /// discard its result and leave failure accounting unchanged when cancellation was observed.
+    private func i2cReadReply(_ bytes: UnsafeMutablePointer<UInt8>, _ length: UInt32) -> Bool {
+        let ok = readFn(service, Self.i2cChip, Self.i2cSource, bytes, length) == 0
+        guard !Task.isCancelled else { return false }
+        return noteI2C(ok)
     }
 
     private func noteI2C(_ ok: Bool) -> Bool {
@@ -99,15 +109,10 @@ public actor ExternalDisplayDDC {
     private static let interTransactionGapNanos: UInt64 = 50_000_000
     private var lastTransactionUptime: UInt64 = 0
 
-    /// Waits out the inter-transaction gap since the last bus operation. Loops rather than sleeping
-    /// once: actors are reentrant during `Task.sleep`, so another task may transact while we sleep,
-    /// moving the deadline — a single fixed sleep would then hit the bus too early.
-    private func paceBus() async {
-        while lastTransactionUptime != 0 {
-            let elapsed = DispatchTime.now().uptimeNanoseconds &- lastTransactionUptime
-            if elapsed >= Self.interTransactionGapNanos { return }
-            try? await Task.sleep(nanoseconds: Self.interTransactionGapNanos - elapsed)
-        }
+    /// Caller owns the bus, so no other transaction can move the deadline during this wait.
+    private func paceBus() async -> Bool {
+        await DDCTransactionGate.waitForQuietGap(
+            since: lastTransactionUptime, minimumNanos: Self.interTransactionGapNanos)
     }
 
     private func markTransaction() {
@@ -120,17 +125,7 @@ public actor ExternalDisplayDDC {
     // the pending reply (and reproducing the rapid-fire traffic that desyncs panels). This FIFO
     // turnstile makes each transaction exclusive: lock around request→delay→reply, not just around
     // individual I2C calls.
-    private var busLocked = false
-    private var busWaiters: [CheckedContinuation<Void, Never>] = []
-
-    private func lockBus() async {
-        if !busLocked { busLocked = true; return }
-        await withCheckedContinuation { busWaiters.append($0) }
-    }
-
-    private func unlockBus() {
-        if busWaiters.isEmpty { busLocked = false } else { busWaiters.removeFirst().resume() }
-    }
+    private let bus = DDCTransactionGate()
 
     /// Binds to the external display's IOAVService, or fails if the display is the built-in, has no
     /// AV service, or the SPI is unavailable.
@@ -178,26 +173,34 @@ public actor ExternalDisplayDDC {
     /// hardware replies), so stale garbage can't masquerade as a value.
     public func read(vcp code: UInt8) async -> (current: Int, max: Int)? {
         for attempt in 0..<Self.readRetries {
-            await lockBus()
-            let value = await readAttempt(code, attempt: attempt)
-            unlockBus()
+            guard !Task.isCancelled else { return nil }
+            let value = await readTransaction(code, attempt: attempt)
+            guard !Task.isCancelled else { return nil }
             if let value { return value }
         }
         return nil
+    }
+
+    private func readTransaction(_ code: UInt8, attempt: Int) async -> (current: Int, max: Int)? {
+        guard await bus.acquire() else { return nil }
+        defer { bus.release() }
+        return await readAttempt(code, attempt: attempt)
     }
 
     /// One bus-exclusive Get-VCP transaction: request → reply delay → wide read → frame scan.
     /// Caller holds the bus lock, so nothing can interleave between the request and its reply.
     private func readAttempt(_ code: UInt8, attempt: Int) async -> (current: Int, max: Int)? {
         let checksum = UInt8(0x6e ^ Int(Self.i2cSource) ^ 0x82 ^ 0x01) ^ code
-        await paceBus()
+        guard await paceBus(), !Task.isCancelled else { return nil }
         var request: [UInt8] = [0x82, 0x01, code, checksum]
         let wrote = i2cWrite(&request, 4)
         markTransaction()
         guard wrote else { return nil }  // paceBus() spaces the retry
-        try? await Task.sleep(nanoseconds: attempt == 0 ? Self.readReplyFirstNanos : Self.readReplyNanos)
+        await DDCTransactionGate.waitForReply(
+            since: lastTransactionUptime,
+            minimumNanos: attempt == 0 ? Self.readReplyFirstNanos : Self.readReplyNanos)
         var buffer = [UInt8](repeating: 0, count: Self.readWindow)
-        let readOK = i2cRead(&buffer, UInt32(Self.readWindow))
+        let readOK = i2cReadReply(&buffer, UInt32(Self.readWindow))
         markTransaction()
         guard readOK else { return nil }
         return Self.scanReply(in: buffer, vcp: code)
@@ -249,12 +252,12 @@ public actor ExternalDisplayDDC {
         let low = UInt8(value & 0xff)
         let checksum = UInt8(0x6e ^ Int(Self.i2cSource) ^ 0x84 ^ 0x03) ^ code ^ high ^ low
         var packet: [UInt8] = [0x84, 0x03, code, high, low, checksum]
-        await lockBus()
-        await paceBus()
+        guard await bus.acquire() else { return false }
+        defer { bus.release() }
+        guard await paceBus(), !Task.isCancelled else { return false }
         let ok = i2cWrite(&packet, 6)
         markTransaction()
-        unlockBus()
-        return ok
+        return !Task.isCancelled && ok
     }
 
     /// Reads the display's DDC/CI capabilities string (the response to VCP `0xF3`, MCCS spec) by
@@ -271,10 +274,9 @@ public actor ExternalDisplayDDC {
     public func readCapabilitiesString() async -> String? {
         // Hold the bus for the whole multi-chunk sequence: an interleaved transaction between
         // chunks breaks the offset continuation and is the likeliest wedge trigger.
-        await lockBus()
-        let result = await readCapabilitiesLocked()
-        unlockBus()
-        return result
+        guard await bus.acquire() else { return nil }
+        defer { bus.release() }
+        return await readCapabilitiesLocked()
     }
 
     private func readCapabilitiesLocked() async -> String? {
@@ -287,14 +289,15 @@ public actor ExternalDisplayDDC {
             // Capabilities Request: length 0x83 (3 data bytes), opcode 0xF3, 16-bit offset.
             let checksum = UInt8(0x6e ^ Int(Self.i2cSource) ^ 0x83 ^ 0xf3) ^ high ^ low
             var request: [UInt8] = [0x83, 0xf3, high, low, checksum]
-            await paceBus()
+            guard await paceBus(), !Task.isCancelled else { return nil }
             let wrote = i2cWrite(&request, 5)
             markTransaction()
             guard wrote else { break }
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            await DDCTransactionGate.waitForReply(since: lastTransactionUptime, minimumNanos: 50_000_000)
             var buffer = [UInt8](repeating: 0, count: 64)
-            let readOK = i2cRead(&buffer, 64)
+            let readOK = i2cReadReply(&buffer, 64)
             markTransaction()
+            guard !Task.isCancelled else { return nil }
             guard readOK,
                   buffer[0] == 0x6e, buffer[2] == 0xe3 else { break }  // 0xE3 = Capabilities Reply
             let length = Int(buffer[1] & 0x7f)
