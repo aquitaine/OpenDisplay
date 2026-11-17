@@ -80,13 +80,36 @@ public struct DiskAuditLog: AuditLogging {
     }
 
     public func recent(limit: Int) async -> [AuditEntry] {
-        guard let data = try? Data(contentsOf: fileURL),
-              let text = String(data: data, encoding: .utf8) else { return [] }
+        guard limit > 0, let handle = try? FileHandle(forReadingFrom: fileURL) else { return [] }
+        defer { try? handle.close() }
+        guard var offset = try? handle.seekToEnd() else { return [] }
         let decoder = Self.decoder()
-        let entries = text.split(separator: "\n").compactMap { line in
-            try? decoder.decode(AuditEntry.self, from: Data(line.utf8))
+        var pending = Data()
+        var newest: [AuditEntry] = []
+        // Read a snapshot from the tail. Concurrent O_APPEND writers cannot move these offsets.
+        // Keep the first, possibly split line for the next block; decode complete lines backwards.
+        while offset > 0 {
+            let count = Int(min(offset, 8192))
+            offset -= UInt64(count)
+            do {
+                try handle.seek(toOffset: offset)
+                guard let block = try handle.read(upToCount: count), !block.isEmpty else { break }
+                pending.insert(contentsOf: block, at: 0)
+            } catch { break }
+            var end = pending.endIndex
+            for index in pending.indices.reversed() where pending[index] == 0x0A {
+                if let entry = try? decoder.decode(AuditEntry.self, from: pending[(index + 1)..<end]) {
+                    newest.append(entry)
+                    if newest.count == limit { return newest.reversed() }
+                }
+                end = index
+            }
+            pending = Data(pending[..<end])
         }
-        return Array(entries.suffix(limit))
+        if !pending.isEmpty, let entry = try? decoder.decode(AuditEntry.self, from: pending) {
+            newest.append(entry)
+        }
+        return newest.reversed()
     }
 
     private static func encoder() -> JSONEncoder {
