@@ -344,6 +344,12 @@ final class AppModel: ObservableObject {
     /// True between `willSleep` and the matching `didWake` — the gap in which reconfiguration events
     /// arrive before macOS has said the machine woke.
     private var isBetweenSleepAndWake = false
+    /// Issue #50 (fast user switching): whether this login session owns the console. Every logged-in
+    /// user runs their own copy of the app against the same shared displays, so a copy whose user
+    /// has switched away makes no automatic display changes — see `SessionActivityGate`.
+    private var sessionGate = SessionActivityGate(isActive: AppModel.currentSessionIsOnConsole())
+    /// Session resign/become-active observer tokens, held for the app's whole lifetime.
+    private var sessionObservers: [NSObjectProtocol] = []
     /// When the app first saw zero visible surfaces in the current dark spell, nil while it can see
     /// one. The always-one-active net's deadline is measured from here.
     private var displaysDarkSince: Date?
@@ -396,6 +402,7 @@ final class AppModel: ObservableObject {
         // by default. A chord that can't be claimed is simply skipped (menu-bar item remains).
         registerHotkeys()
         observeSleepAndWake()  // re-assert what the user turned off once macOS has woken the desk
+        observeSessionSwitching()  // Issue #50: stand down while another user has the console
         reconcileMediaKeyTap()  // Batch-3 #3: arm the media-key tap if enabled + Accessibility granted
         reconcileXDRPowerAutomation()  // Issue #35: watch power only if an XDR battery rule is armed
         if settings.displayNotificationsEnabled { NotificationDelivery.requestAuthorization() }  // Batch-2 #5
@@ -462,6 +469,7 @@ final class AppModel: ObservableObject {
                 self?.activeSurfaceRecheck.cancel()
                 self?.offlineIntentRecheck.cancel()
                 self?.stopObservingSleepAndWake()
+                self?.stopObservingSessionSwitching()
                 #if !PUBLIC_API_ONLY
                 self?.groupBrightnessLoop?.cancel()
                 self?.adaptiveLoop?.cancel()
@@ -1380,7 +1388,7 @@ final class AppModel: ObservableObject {
         let members = Set(settings.displayGroups.filter(\.syncBrightness).flatMap(\.memberRecordIDs))
         let active = Set(displays.filter { $0.isActive && members.contains($0.recordID) }.map(\.recordID))
         nativeMonitors = nativeMonitors.filter { active.contains($0.key) || nativeWriters[$0.key] != nil }
-        guard !active.isEmpty else {
+        guard !active.isEmpty, sessionGate.permitsAutomaticDisplayActions else {
             groupBrightnessLoop?.cancel()
             groupBrightnessLoop = nil
             return
@@ -2289,7 +2297,7 @@ final class AppModel: ObservableObject {
     func reconcileAdaptiveLoop() {
         let anyModeOn = settings.adaptiveBrightnessSyncEnabled || settings.adaptiveWarmthEnabled
             || settings.clockScheduleEnabled || settings.adaptiveLocationModeEnabled
-        let wantRunning = anyModeOn
+        let wantRunning = anyModeOn && sessionGate.permitsAutomaticDisplayActions
             && displays.contains { $0.isActive && $0.displayClass != .builtIn }
         if wantRunning {
             guard adaptiveLoop == nil else { return }
@@ -2703,6 +2711,7 @@ final class AppModel: ObservableObject {
     /// one preset (mirrors `reconcileAdaptiveLoop`). Idempotent.
     func reconcileAppPresetObserver() {
         let wantRunning = settings.appPresetsEnabled && !settings.appPresets.isEmpty
+            && sessionGate.permitsAutomaticDisplayActions
         guard wantRunning else {
             stopAppPresetObserver()
             return
@@ -2729,7 +2738,8 @@ final class AppModel: ObservableObject {
     /// caches, then resolve and apply the pure policy's decision. Kicked by the frontmost-app observer,
     /// a live settings edit, a topology change, and the debounce re-check timer.
     func evaluateAppPresets() {
-        guard settings.appPresetsEnabled, !settings.appPresets.isEmpty else { return }
+        guard settings.appPresetsEnabled, !settings.appPresets.isEmpty,
+              sessionGate.permitsAutomaticDisplayActions else { return }
         let frontmostBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         Task { [weak self] in
             guard let self else { return }
@@ -3472,6 +3482,9 @@ final class AppModel: ObservableObject {
             resetDDCProbeCache()
             await refresh()
             logDisplayEvent("topology")
+            // Issue #50: while another user has the console the change is theirs (or macOS setting
+            // their session up). Keep the model current for when this user returns; change nothing.
+            guard sessionGate.permitsAutomaticDisplayActions else { continue }
             await enforceActiveSurfaceInvariant()
             reconcileDisplaySleepGuard()  // external arrived/left → acquire or release the keep-awake assertion
             #if !PUBLIC_API_ONLY
@@ -3526,7 +3539,7 @@ final class AppModel: ObservableObject {
             enabled: settings.autoDisconnectBuiltInOnExternal,
             externalPresent: hasExternalDisplay
         )
-        guard fire, !busy,
+        guard fire, !busy, sessionGate.permitsAutomaticDisplayActions,
               let builtIn = displays.first(where: { $0.displayClass == .builtIn && $0.isActive })
         else { return false }
         #if DEBUG
@@ -3623,6 +3636,13 @@ final class AppModel: ObservableObject {
     /// guarantee itself is unchanged: within `defaultRecoveryDeadline` seconds there is a screen,
     /// whatever the display list claims.
     private func enforceActiveSurfaceInvariant() async {
+        // Issue #50: a switched-away session isn't the one looking at the screen — lighting a
+        // fallback (or restoring the permanent configuration) from here rearranges the other user's
+        // displays. Coming back re-runs this from `resumeAfterSessionSwitch`.
+        guard sessionGate.permitsAutomaticDisplayActions else {
+            activeSurfaceRecheck.cancel()
+            return
+        }
         guard !busy else {
             // A write is in flight, so the world is half-applied and not worth judging. While the
             // screen is dark this re-arms rather than returning: the deadline must never be able to
@@ -3762,6 +3782,88 @@ final class AppModel: ObservableObject {
         sleepWakeObservers.removeAll()
     }
 
+    // MARK: - Fast user switching (Issue #50)
+
+    /// Whether the current login session is on the console, read once at launch (a login item can
+    /// start in a session that is already switched away). `kCGSessionOnConsoleKey` spelled out: the
+    /// CoreGraphics constant is a CFSTR macro.
+    nonisolated private static func currentSessionIsOnConsole() -> Bool {
+        let info = CGSessionCopyCurrentDictionary() as? [String: Any]
+        return SessionActivityGate.isActive(onConsole: info?["kCGSSessionOnConsoleKey"] as? Bool)
+    }
+
+    /// Watches the console being handed to another user and back, for the app's whole lifetime.
+    private func observeSessionSwitching() {
+        guard sessionObservers.isEmpty else { return }
+        let center = NSWorkspace.shared.notificationCenter
+        sessionObservers = [
+            center.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil,
+                               queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.sessionActivityChanged(isActive: false) }
+            },
+            center.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil,
+                               queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.sessionActivityChanged(isActive: true) }
+            }
+        ]
+    }
+
+    private func stopObservingSessionSwitching() {
+        for observer in sessionObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        sessionObservers.removeAll()
+    }
+
+    private func sessionActivityChanged(isActive: Bool) {
+        switch sessionGate.update(isActive: isActive) {
+        case .unchanged: return
+        case .suspended: suspendForSessionSwitch()
+        case .resumed: Task { await resumeAfterSessionSwitch() }
+        }
+    }
+
+    /// The user switched away: stop everything that would otherwise keep writing to the shared
+    /// displays from a session nobody is looking at. The gate keeps them stopped; this cancels what
+    /// is already armed or looping.
+    private func suspendForSessionSwitch() {
+        logDisplayEvent("session-inactive")
+        activeSurfaceRecheck.cancel()
+        offlineIntentRecheck.cancel()
+        layoutProtectionRecheck.cancel()
+        #if !PUBLIC_API_ONLY
+        reconcileAdaptiveLoop()
+        reconcileGroupBrightnessLoop()
+        reconcileAppPresetObserver()
+        #endif
+    }
+
+    /// The user is back at the console. Treated like a wake, because it is one as far as the
+    /// displays are concerned: macOS has just reconfigured them for this user, the AV service
+    /// proxies DDC goes through may have been rebuilt, and whatever changed while away was the
+    /// other session's doing. Re-read everything, then converge in the same order a wake does.
+    private func resumeAfterSessionSwitch() async {
+        logDisplayEvent("session-active")
+        #if !PUBLIC_API_ONLY
+        invalidateDDCBindings()
+        #endif
+        resetDDCProbeCache()
+        lastWakeAt = Date()  // open the wake window: displays relit by the switch are macOS's doing
+        offlineReassertAttempts.removeAll()
+        displaysDarkSince = nil
+        await refresh()
+        // An external present now isn't an arrival — it may have been there the whole time.
+        autoDisconnectPolicy.seed(externalPresent: hasExternalDisplay)
+        await enforceActiveSurfaceInvariant()
+        reconcileDisplaySleepGuard()
+        #if !PUBLIC_API_ONLY
+        reconcileAdaptiveLoop()
+        reconcileAppPresetObserver()
+        #endif
+        await reassertManagedOfflineIntent()
+        await evaluateLayoutProtection(trigger: .wake)
+    }
+
     /// Everything the app owes the user the moment the machine comes back.
     ///
     /// Order matters and follows the lifecycle precedence ladder in `WakeConvergencePolicy`: make
@@ -3773,6 +3875,9 @@ final class AppModel: ObservableObject {
         logDisplayEvent("wake")
         lastWakeAt = Date()
         isBetweenSleepAndWake = false  // the transition is over; the bounded window starts now
+        // Issue #50: woken while another user has the console — theirs to converge on. This user's
+        // own convergence runs when they switch back (`resumeAfterSessionSwitch`).
+        guard sessionGate.permitsAutomaticDisplayActions else { return }
         offlineReassertAttempts.removeAll()  // a new wake is a fresh world; prior attempts don't count
         // A dark spell stamped as the machine went down must not count against the recovery
         // deadline: measured from a pre-sleep stamp, the net would light its fallback on the very
@@ -3795,6 +3900,8 @@ final class AppModel: ObservableObject {
     /// of times, so the safety net's guarantee is never the thing being argued with.
     private func reassertManagedOfflineIntent() async {
         offlineIntentRecheck.cancel()
+        // Issue #50: the "off"s are this user's; they are paid when this user is back at the console.
+        guard sessionGate.permitsAutomaticDisplayActions else { return }
         let intent = WakeConvergencePolicy.offlineIntent(wakeConvergenceContext())
         // "Ask again" either because the policy said so (nothing lit yet to take over) or because a
         // write is already in flight — an owed "off" must never be dropped on the floor for want of
@@ -3834,7 +3941,10 @@ final class AppModel: ObservableObject {
     private func wakeConvergenceContext() -> WakeConvergencePolicy.Context {
         WakeConvergencePolicy.Context(
             now: Date(), observations: displays, managedOffline: managedOffline,
-            lastWakeAt: lastWakeAt, isBetweenSleepAndWake: isBetweenSleepAndWake,
+            lastWakeAt: lastWakeAt,
+            // Switched away reads like the sleep/wake gap: a ledger display the other session lit
+            // is not this user re-enabling it, so its owed "off" is stamped, never forgotten.
+            isBetweenSleepAndWake: isBetweenSleepAndWake || sessionGate.attributesDisplayChangesElsewhere,
             darkSince: displaysDarkSince, reassertAttempts: offlineReassertAttempts)
     }
 
@@ -3918,7 +4028,7 @@ final class AppModel: ObservableObject {
         // Republish only on a real change: this runs on every topology event, and reassigning a
         // @Published value re-evaluates every observing view.
         if currentLayoutFingerprint != fingerprint { currentLayoutFingerprint = fingerprint }
-        guard settings.layoutProtectionEnabled else { return }
+        guard settings.layoutProtectionEnabled, sessionGate.permitsAutomaticDisplayActions else { return }
         let protected = settings.protectedLayouts[currentLayoutFingerprint]
         let evaluation = LayoutProtectionPolicy.decide(
             current: snapshot, protected: protected, trigger: trigger,
