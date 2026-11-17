@@ -52,6 +52,7 @@ final class SoftwareUpdater: NSObject {
     /// cycle (which begins on the next runloop pass) sees the settings the user actually chose.
     init(behavior: AutomaticUpdateBehavior) {
         super.init()
+        guard !Self.updatesDisabled else { return }
         apply(behavior)
         observeAutomaticDownloadPreference()
         updaterController.startUpdater()
@@ -68,6 +69,7 @@ final class SoftwareUpdater: NSObject {
     /// see `observeAutomaticDownloadPreference`. Sparkle re-schedules its cycle after either flag
     /// changes, so no explicit reset is needed here.
     func apply(_ behavior: AutomaticUpdateBehavior) {
+        guard !Self.updatesDisabled else { return }
         updaterController.updater.automaticallyChecksForUpdates = behavior.checksForUpdates
         updaterController.updater.automaticallyDownloadsUpdates = behavior.downloadsAndInstalls
     }
@@ -80,11 +82,17 @@ final class SoftwareUpdater: NSObject {
     /// of its own is mid-flight — it drops the request silently, and a phase moved to `checking` would
     /// sit on a spinner no callback ever clears.
     func checkForUpdates() {
+        guard !Self.updatesDisabled else { return }
         guard updaterController.updater.canCheckForUpdates else { return }
         NotificationCenter.default.post(name: .openDisplayDismissMenu, object: nil)
         activateForUpdaterWindow()
         record(.checkStarted)
         updaterController.updater.checkForUpdates()
+    }
+
+    /// Locally packaged builds can opt out of the upstream release feed.
+    private static var updatesDisabled: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "OpenDisplayDisableUpdates") as? Bool == true
     }
 
     /// Mirrors Sparkle's automatic-download flag back into the app's settings, which is what makes the

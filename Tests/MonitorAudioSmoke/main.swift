@@ -48,20 +48,69 @@ for channels: [UInt32] in [[2], [1, 1]] {
     processor.setGain(8) // never amplifies
     processor.render(input: UnsafePointer(input.pointer), output: output.pointer)
     near(output.samples[0][3 * Int(channels[0])], 1)
-    precondition(processor.healthy(after: 10))
+    precondition(processor.healthy())
     processor.stop(); processor.stop()
 }
 let processor = MonitorAudioProcessor()
 let stereo = Buffers(channels: [2], frames: 4, fill: 1)
 let mismatch = Buffers(channels: [1], frames: 4, fill: 5)
 processor.render(input: UnsafePointer(stereo.pointer), output: mismatch.pointer)
-precondition(!processor.healthy(after: 0))
+precondition(!processor.healthy())
 near(mismatch.samples[0][0], 0)
-precondition(!MonitorAudioProcessor().healthy(after: 10))
+// No callback is normal while idle; it must not tear down the audio route.
+precondition(MonitorAudioProcessor().healthy())
+var recovery = MonitorAudioRecoveryPolicy()
+precondition(!recovery.ready(deviceID: 12, now: 0))
+precondition(recovery.ready(deviceID: 12, now: 1))
+for i in 0..<5 { recovery.failed(now: Double(i + 2)) }
+precondition(!recovery.ready(deviceID: 12, now: 100))
+recovery.recovered() // explicit volume action re-arms an exhausted retry budget
+precondition(recovery.ready(deviceID: 12, now: 101))
+precondition(!recovery.ready(deviceID: nil, now: 102))
+precondition(!recovery.ready(deviceID: 13, now: 103))
+precondition(recovery.ready(deviceID: 13, now: 104))
 precondition(MonitorAudioRoutePolicy.shouldFallback(enabled: true, missingUID: "monitor", currentUID: nil))
 precondition(MonitorAudioRoutePolicy.shouldFallback(enabled: true, missingUID: "monitor", currentUID: "monitor"))
 for current in ["headphones", "usb", "bluetooth", "other-monitor", "speakers"] {
     precondition(!MonitorAudioRoutePolicy.shouldFallback(enabled: true, missingUID: "monitor", currentUID: current))
 }
 precondition(!MonitorAudioRoutePolicy.shouldFallback(enabled: false, missingUID: "monitor", currentUID: nil))
-print("PASS: interleaved/planar stereo, gain ramp, mute, finite gain, no boost, invalid layout, callback watchdog, route policy, repeated teardown")
+print("PASS: interleaved/planar stereo, gain ramp, mute, finite gain, no boost, invalid layout, idle without callbacks, invalid-layout detection, retry rearming, reconnect, route policy, repeated teardown")
+
+let staleProcessor = MonitorAudioProcessor()
+let staleInput = Buffers(channels: [2], frames: 4, fill: 1)
+let staleOutput = Buffers(channels: [2], frames: 4, fill: -1)
+staleProcessor.render(input: UnsafePointer(staleInput.pointer), output: staleOutput.pointer, sampleTime: 100)
+near(staleOutput.samples[0][0], 1)
+staleProcessor.render(input: UnsafePointer(staleInput.pointer), output: staleOutput.pointer, sampleTime: 100)
+near(staleOutput.samples[0][0], 0)
+staleProcessor.render(input: UnsafePointer(staleInput.pointer), output: staleOutput.pointer, sampleTime: 104)
+near(staleOutput.samples[0][0], 1)
+staleProcessor.stop()
+staleProcessor.render(input: UnsafePointer(staleInput.pointer), output: staleOutput.pointer, sampleTime: 108)
+near(staleOutput.samples[0][0], 0)
+print("PASS: duplicate input timestamp is silenced; retired routes cannot replay audio")
+
+let draining = MonitorAudioProcessor()
+draining.render(input: UnsafePointer(staleInput.pointer), output: staleOutput.pointer)
+near(staleOutput.samples[0][0], 1)
+draining.silence() // drain HAL before removing the display, without waiting for teardown
+precondition(!draining.hasDrained)
+for index in 0..<8 {
+    draining.render(input: UnsafePointer(staleInput.pointer), output: staleOutput.pointer)
+    near(staleOutput.samples[0][0], 0)
+    precondition(draining.hasDrained == (index == 7))
+}
+precondition(!draining.healthy())
+draining.stop()
+print("PASS: quiescing clears queued output before device teardown")
+
+var attach = MonitorAudioAttachPolicy()
+precondition(attach.update(previous: [], available: ["monitor"], preferred: nil, currentUID: nil, currentIsBuiltIn: false, now: 0) == nil)
+precondition(attach.update(previous: ["monitor"], available: ["monitor"], preferred: nil, currentUID: "speakers", currentIsBuiltIn: true, now: 4) == "monitor")
+attach.selected()
+precondition(attach.pendingUID == nil)
+_ = attach.update(previous: [], available: ["monitor"], preferred: nil, currentUID: "headphones", currentIsBuiltIn: false, now: 5)
+precondition(attach.pendingUID == nil)
+precondition(attach.update(previous: [], available: ["a", "b"], preferred: nil, currentUID: "speakers", currentIsBuiltIn: true, now: 8) == nil)
+print("PASS: delayed speaker fallback, manual headphone preservation, ambiguous attach, successful return")

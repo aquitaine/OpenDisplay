@@ -47,7 +47,9 @@ public struct ODSliderRow: View {
                 Text(valueText)
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                     .monospacedDigit()
-                    .frame(width: 30, alignment: .trailing)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(minWidth: 38, alignment: .trailing)
             }
         }
         .padding(.horizontal, 8).padding(.vertical, 5)

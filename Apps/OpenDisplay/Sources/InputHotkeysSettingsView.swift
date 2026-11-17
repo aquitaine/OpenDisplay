@@ -152,3 +152,34 @@ private struct AddInputHotkeySheet: View {
     }
 }
 #endif
+
+#if os(macOS)
+struct DisplayPowerHotkeySection: View {
+    @EnvironmentObject private var model: AppModel
+
+    private var targets: [String: String] {
+        var result = Dictionary(uniqueKeysWithValues: model.displays.map { ($0.recordID.rawValue, model.displayName(for: $0)) })
+        for offline in model.managedOffline { result[offline.recordID.rawValue] = offline.name }
+        return result
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Display on/off shortcuts").font(.title3)
+            Text("Toggle each display with Control–Option–Command–Shift and a number. The last active display stays on. Recovery: ⌃⌥⌘R.")
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(targets.keys.sorted(), id: \.self) { id in
+                Picker(targets[id] ?? id, selection: Binding(
+                    get: { model.displayPowerShortcuts[id] ?? 0 },
+                    set: { model.setDisplayPowerShortcut(id, digit: $0) })) {
+                    Text("None").tag(0)
+                    ForEach(1...9, id: \.self) { digit in
+                        Text("⌃⌥⌘⇧\(digit)").tag(digit)
+                    }
+                }
+            }
+            if let error = model.powerShortcutError { Text(error).font(.caption).foregroundStyle(.red) }
+        }
+    }
+}
+#endif

@@ -390,6 +390,7 @@ private struct HealthSection: View {
 
                 Divider()
 
+                DisplayPowerHotkeySection()
                 InputHotkeySection()
 
                 Divider()

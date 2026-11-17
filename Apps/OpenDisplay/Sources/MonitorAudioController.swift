@@ -12,6 +12,25 @@ enum MonitorAudioRoutePolicy {
     }
 }
 
+/// A pending physical attach survives delayed default-route changes and HAL enumeration.
+struct MonitorAudioAttachPolicy {
+    private(set) var pendingUID: String?
+    private var detectedAt: TimeInterval = 0
+
+    mutating func update(previous: Set<String>, available: Set<String>, preferred: String?,
+                         currentUID: String?, currentIsBuiltIn: Bool, now: TimeInterval) -> String? {
+        let arrivals = available.subtracting(previous)
+        if let preferred, arrivals.contains(preferred) { pendingUID = preferred; detectedAt = now }
+        else if arrivals.count == 1 { pendingUID = arrivals.first; detectedAt = now }
+        guard let pendingUID else { return nil }
+        guard available.contains(pendingUID) else { self.pendingUID = nil; return nil }
+        if currentUID == pendingUID { self.pendingUID = nil; return nil }
+        if currentUID != nil && !currentIsBuiltIn { self.pendingUID = nil; return nil }
+        return currentIsBuiltIn && now - detectedAt >= 1 ? pendingUID : nil
+    }
+    mutating func selected() { pendingUID = nil }
+}
+
 /// Device identity must settle before recreating the tap. Failed starts use bounded backoff.
 struct MonitorAudioRecoveryPolicy {
     private var observedID: AudioDeviceID?
@@ -46,10 +65,21 @@ final class MonitorAudioController: ObservableObject {
     @Published var fallbackEnabled = UserDefaults.standard.bool(forKey: "MonitorAudioSpeakerFallback") {
         didSet { UserDefaults.standard.set(fallbackEnabled, forKey: "MonitorAudioSpeakerFallback") }
     }
+    private var reconnectRequested = false
+    private var reconnecting = false
+    private var reconnectRetryAt: TimeInterval = 0
+    private var logicalDisplayID: String?
+    private var logicalOutput: AudioOutputInfo.Snapshot?
+    private var attachPolicy = MonitorAudioAttachPolicy()
+    private var previousMonitorUIDs: Set<String> = []
+    private var preferredMonitorUID: String?
     private var processor: MonitorAudioProcessor?
     private var selected: AudioOutputInfo.Snapshot?
     private var lastExternal: AudioOutputInfo.Snapshot?
     private var timer: Timer?
+    private var wakeObserver: NSObjectProtocol?
+    private var routeListener: AudioObjectPropertyListenerBlock?
+    private var lastUserRetry: TimeInterval = -.infinity
     private var priorMuteLevel: Float = 1
     private var startedAt: TimeInterval = 0
     private var recovery = MonitorAudioRecoveryPolicy()
@@ -58,13 +88,38 @@ final class MonitorAudioController: ObservableObject {
     private var speakerReturnDeadline: TimeInterval?
 
     init() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        previousMonitorUIDs = Set(AudioOutputInfo.devices().compactMap { AudioOutputInfo.snapshot($0) }
+            .filter { $0.transport == .hdmi || $0.transport == .displayPort }.map(\.uid))
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.checkRoute() }
         }
+        self.timer = timer
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            Task { @MainActor in self?.checkRoute() }
+        }
+        routeListener = listener
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main, listener)
+        // Continue recovery while a menu or slider is tracking the pointer.
+        RunLoop.main.add(timer, forMode: .common)
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, self.enabled else { return }
+                    self.suspend()
+                    self.recovery = MonitorAudioRecoveryPolicy()
+                    self.checkRoute()
+                }
+            }
     }
 
     func setEnabled(_ value: Bool) {
         stop()
+        guard processor == nil else {
+            status = "Core Audio could not stop the previous session. Quit and reopen OpenDisplay before retrying."
+            return
+        }
         guard value else { status = "Software volume is off. Normal audio restored."; return }
         guard #available(macOS 14.2, *) else { status = "Software volume requires macOS 14.2 or later."; return }
         guard let output = AudioOutputInfo.currentDefaultOutput(),
@@ -98,23 +153,137 @@ final class MonitorAudioController: ObservableObject {
         speakerReturnUID = nil
         speakerReturnDeadline = nil
         managedWasAvailable = false
+        logicalDisplayID = nil
+        logicalOutput = nil
+        reconnectRequested = false
+    }
+
+    /// Quiesce and drain the output while its display link is still alive.
+    func prepareLogicalDisconnect(output: AudioOutputInfo.Snapshot, displayID: String) async -> Bool {
+        logicalDisplayID = displayID
+        logicalOutput = output
+        processor?.silence()
+        // Require actual silent callbacks, rather than assuming a fixed delay drained HAL.
+        if let processor {
+            for _ in 0..<50 {
+                if processor.hasDrained { break }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            guard processor.hasDrained else {
+                suspend()
+                logicalDisplayID = nil
+                logicalOutput = nil
+                status = "Display kept on: audio did not acknowledge silent buffers. Retry after pausing playback."
+                return false
+            }
+        }
+        lastExternal = nil
+        if AudioOutputInfo.currentDefaultOutput()?.uid == output.uid,
+           let speakers = AudioOutputInfo.builtInSpeakers(), AudioOutputInfo.selectOutput(speakers) {
+            speakerReturnUID = AudioOutputInfo.snapshot(speakers)?.uid
+        }
+        if let processor, !processor.stop() {
+            logicalDisplayID = nil
+            logicalOutput = nil
+            status = "Display kept on: Core Audio could not retire the old output safely."
+            return false
+        }
+        suspend()
+        recovery = MonitorAudioRecoveryPolicy()
+        status = "Display audio paused. Using built-in speakers until the monitor returns."
+        return true
+    }
+
+    func finishLogicalDisconnect(committed: Bool) async {
+        if !committed, let id = logicalDisplayID { await logicalDisplayReconnected(displayID: id) }
+    }
+
+    func logicalDisplayReconnected(displayID: String) async {
+        guard logicalDisplayID == displayID, let saved = logicalOutput, !reconnecting else { return }
+        reconnectRequested = true
+        reconnecting = true
+        defer { reconnecting = false; reconnectRetryAt = ProcessInfo.processInfo.systemUptime + 2 }
+        // Keep polling recovery blocked throughout link settling and silent priming.
+        for _ in 0..<10 {
+            if let endpoint = AudioOutputInfo.devices().compactMap({ AudioOutputInfo.snapshot($0) }).first(where: { $0.uid == saved.uid }) {
+                let current = AudioOutputInfo.currentDefaultOutput()
+                let speakers = AudioOutputInfo.builtInSpeakers()
+                guard current?.uid == saved.uid || current?.uid == speakerReturnUID || (speakers != nil && current?.id == speakers) else {
+                    logicalDisplayID = nil; logicalOutput = nil
+                    status = "Monitor reconnected. Preserving your other sound output."
+                    return
+                }
+                if enabled, #available(macOS 14.2, *) {
+                    suspend()
+                    guard processor == nil else { return }
+                    let primer = MonitorAudioProcessor()
+                    primer.silence()
+                    do {
+                        // Start a new zero-output stream on the re-created link while music
+                        // remains on the Mac. This replaces queued hardware PCM before routing.
+                        try primer.start(output: endpoint, initialGain: 0)
+                        for _ in 0..<50 {
+                            if primer.hasDrained { break }
+                            try? await Task.sleep(for: .milliseconds(10))
+                        }
+                        let drained = primer.hasDrained
+                        let stopped = primer.stop()
+                        if !stopped { processor = primer }
+                        guard stopped, drained else {
+                            status = "Monitor audio could not be cleared. Keeping sound on the Mac; retry reconnect."
+                            return
+                        }
+                    } catch {
+                        status = "Monitor audio could not restart: \(error.localizedDescription)"
+                        return
+                    }
+                }
+                // Recheck after awaits so a manual headphone selection is never overwritten.
+                guard logicalDisplayID == displayID else { return }
+                let actual = AudioOutputInfo.currentDefaultOutput()
+                if actual?.uid == saved.uid || actual?.uid == speakerReturnUID || (speakers != nil && actual?.id == speakers) {
+                    guard AudioOutputInfo.selectOutput(endpoint.id) else {
+                        status = "Could not select the reconnected monitor audio output."
+                        return
+                    }
+                }
+                logicalDisplayID = nil; logicalOutput = nil
+                recovery = MonitorAudioRecoveryPolicy()
+                lastExternal = endpoint
+                checkRoute()
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+        status = "Monitor display returned, but its audio endpoint is not ready. Retry reconnect."
     }
 
     private func suspend() {
-        processor?.stop()
-        processor = nil
         active = false
+        if let processor, !processor.stop() {
+            // Keep ownership of a failed HAL teardown; never orphan it or start a second route.
+            status = "Core Audio could not retire the audio session. Retrying teardown."
+            return
+        }
+        processor = nil
+    }
+
+    var managesCurrentOutput: Bool {
+        enabled && selected != nil && AudioOutputInfo.currentDefaultOutput()?.uid == selected?.uid
     }
 
     func setLevel(_ value: Float) {
         guard enabled, value.isFinite else { return }
         level = min(1, max(0, value))
         processor?.setGain(level)
+        // Sliders and keys share recovery, including after the automatic retry budget is exhausted.
+        checkRoute(userInitiated: true)
     }
 
     func handle(_ action: MediaKeyAction, fineStep: Bool) -> Bool {
-        guard action.isVolume, active, processor != nil,
-              AudioOutputInfo.currentDefaultOutput()?.uid == selected?.uid else { return false }
+        guard action.isVolume else { return false }
+        // Validate at every key press. Explicitly disabled processing remains disabled.
+        guard managesCurrentOutput else { checkRoute(); return false }
         switch action {
         case .volumeUp, .volumeDown: setLevel(level + action.signedDelta(fineStep: fineStep))
         case .muteToggle:
@@ -125,9 +294,26 @@ final class MonitorAudioController: ObservableObject {
         return true
     }
 
-    private func checkRoute() {
+    private func checkRoute(userInitiated: Bool = false) {
         let current = AudioOutputInfo.currentDefaultOutput()
         let devices = AudioOutputInfo.devices()
+        let monitors = devices.compactMap { AudioOutputInfo.snapshot($0) }
+            .filter { $0.transport == .hdmi || $0.transport == .displayPort }
+        let availableUIDs = Set(monitors.map(\.uid))
+        if let current, current.transport == .hdmi || current.transport == .displayPort {
+            preferredMonitorUID = current.uid
+        }
+        if logicalDisplayID == nil,
+           let uid = attachPolicy.update(previous: previousMonitorUIDs, available: availableUIDs,
+                preferred: preferredMonitorUID, currentUID: current?.uid,
+                currentIsBuiltIn: current?.id == AudioOutputInfo.builtInSpeakers() && current != nil,
+                now: ProcessInfo.processInfo.systemUptime),
+           let endpoint = monitors.first(where: { $0.uid == uid }),
+           let actual = AudioOutputInfo.currentDefaultOutput(), actual.id == AudioOutputInfo.builtInSpeakers(),
+           AudioOutputInfo.selectOutput(endpoint.id) {
+            attachPolicy.selected()
+        }
+        previousMonitorUIDs = availableUIDs
         if let previous = lastExternal, !devices.contains(where: { AudioOutputInfo.snapshot($0)?.uid == previous.uid }) {
             // A valid new route may be an explicit user choice. Never steal it from headphones/USB.
             if MonitorAudioRoutePolicy.shouldFallback(enabled: fallbackEnabled, missingUID: previous.uid,
@@ -142,9 +328,20 @@ final class MonitorAudioController: ObservableObject {
         if let current, current.transport == .hdmi || current.transport == .displayPort {
             lastExternal = current
         } else if current != nil { lastExternal = nil }
+        if let id = logicalDisplayID {
+            if reconnectRequested, !reconnecting, ProcessInfo.processInfo.systemUptime >= reconnectRetryAt {
+                Task { @MainActor [weak self] in await self?.logicalDisplayReconnected(displayID: id) }
+            }
+            return
+        }
         guard enabled, let selected else { return }
         let now = ProcessInfo.processInfo.systemUptime
         let endpoint = devices.compactMap { AudioOutputInfo.snapshot($0) }.first { $0.uid == selected.uid }
+        if userInitiated, processor == nil, now - lastUserRetry >= 1 {
+            // A deliberate volume action can re-arm bounded retries without resetting gain/mute.
+            recovery.recovered()
+            lastUserRetry = now
+        }
         let ready = recovery.ready(deviceID: endpoint?.id, now: now)
         let actual = AudioOutputInfo.currentDefaultOutput()
         if endpoint == nil, managedWasAvailable { speakerReturnDeadline = now + 3 }
@@ -162,21 +359,22 @@ final class MonitorAudioController: ObservableObject {
         managedWasAvailable = true
         guard actual?.uid == selected.uid else {
             suspend()
-            if ready, let speakerReturnUID, actual?.uid == speakerReturnUID {
-                // Return only from the built-in route observed at unplug, never from headphones/USB.
-                if AudioOutputInfo.currentDefaultOutput()?.uid == speakerReturnUID {
-                    _ = AudioOutputInfo.selectOutput(endpoint.id)
-                }
-            } else if let actual, actual.uid != speakerReturnUID { speakerReturnUID = nil }
+            if ready, let speakerReturnUID, actual?.uid == speakerReturnUID,
+               AudioOutputInfo.currentDefaultOutput()?.uid == speakerReturnUID {
+                _ = AudioOutputInfo.selectOutput(endpoint.id)
+            } else if let actual, actual.uid != speakerReturnUID {
+                speakerReturnUID = nil
+                speakerReturnDeadline = nil
+            }
             status = "Waiting for \(selected.name) to be selected as Sound Output. Previous volume is remembered."
             return
         }
         if endpoint.id != selected.id { suspend() }
-        if let processor, !processor.healthy(after: now - startedAt) {
+        if let processor, !processor.healthy(requireRunning: userInitiated) {
             suspend()
             recovery.failed(now: now)
             status = "Audio stream changed. Rebuilding the monitor audio route…"
-            return
+            // Continue below so a stable endpoint can recover during this same interaction.
         }
         if active, now - startedAt >= 5 { recovery.recovered() }
         guard processor == nil, ready, #available(macOS 14.2, *) else { return }
@@ -193,7 +391,7 @@ final class MonitorAudioController: ObservableObject {
         } catch {
             recovery.failed(now: now)
             status = recovery.failures >= 5
-                ? "Could not restore monitor audio. Turn software volume off/on to retry. Normal audio restored."
+                ? "Could not restore monitor audio. Press a volume key or move the volume slider to retry. Normal audio restored."
                 : "Waiting for monitor audio to settle: \(error.localizedDescription) Retrying…"
         }
     }
@@ -203,12 +401,12 @@ final class MonitorAudioController: ObservableObject {
 final class MonitorAudioProcessor: @unchecked Sendable {
     private struct Control {
         var gain: Float = 1
-        var callbacks: UInt64 = 0
         var invalid = false
-        var lastObservedCallbacks: UInt64 = 0
-        var lastProgress: TimeInterval = 0
+        var stopped = false
+        var silentCallbacks = 0
     }
     private let control = OSAllocatedUnfairLock(initialState: Control())
+    private var lastInputSampleTime: Float64?
     private var lastGain: Float = 1
     private var tap: AudioObjectID = 0
     private var aggregate: AudioDeviceID = 0
@@ -223,14 +421,23 @@ final class MonitorAudioProcessor: @unchecked Sendable {
         guard value.isFinite else { return }
         control.withLock { $0.gain = min(1, max(0, value)) }
     }
-    func healthy(after seconds: TimeInterval) -> Bool {
-        control.withLock {
-            if $0.callbacks != $0.lastObservedCallbacks {
-                $0.lastObservedCallbacks = $0.callbacks
-                $0.lastProgress = seconds
-            }
-            return !$0.invalid && (seconds < 3 || seconds - $0.lastProgress < 2)
-        }
+    func healthy(requireRunning: Bool = false) -> Bool {
+        guard control.withLock({ !$0.invalid && !$0.stopped }) else { return false }
+        // A silent/idle tap may legitimately deliver no callbacks. Never destroy it on a
+        // callback deadline: doing so repeatedly unmutes the original full-level route.
+        // Idle HAL routes can also stop their engine. Check running state when the user
+        // requests volume, rather than tearing down an idle route on every timer tick.
+        guard aggregate != 0 else { return true } // renderer-only tests have no HAL route
+        return deviceFlag(kAudioDevicePropertyDeviceIsAlive) &&
+            (!requireRunning || deviceFlag(kAudioDevicePropertyDeviceIsRunning))
+    }
+
+    private func deviceFlag(_ selector: AudioObjectPropertySelector) -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(aggregate, &address, 0, nil, &size, &value) == noErr && value != 0
     }
 
     @available(macOS 14.2, *)
@@ -277,14 +484,17 @@ final class MonitorAudioProcessor: @unchecked Sendable {
                   input.mBytesPerFrame == outputFormat.mBytesPerFrame else {
                 throw Failure(message: "The monitor's input and output stream layouts do not match.")
             }
-            try check(AudioDeviceCreateIOProcIDWithBlock(&io, aggregate, nil) { [self] _, input, _, output, _ in
-                render(input: input, output: output)
+            try check(AudioDeviceCreateIOProcIDWithBlock(&io, aggregate, nil) { [self] _, input, inputTime, output, _ in
+                let timestamp = inputTime.pointee
+                render(input: input, output: output,
+                       sampleTime: timestamp.mFlags.contains(.sampleTimeValid) ? timestamp.mSampleTime : nil)
             }, "Create audio processor")
             try check(AudioDeviceStart(aggregate, io), "Start audio processor")
         } catch { stop(); throw error }
     }
 
-    func render(input: UnsafePointer<AudioBufferList>, output: UnsafeMutablePointer<AudioBufferList>) {
+    func render(input: UnsafePointer<AudioBufferList>, output: UnsafeMutablePointer<AudioBufferList>,
+                sampleTime: Float64? = nil) {
         let source = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
         let destination = UnsafeMutableAudioBufferListPointer(output)
         var valid = source.count == destination.count && (destination.count == 1 || destination.count == 2)
@@ -302,12 +512,19 @@ final class MonitorAudioProcessor: @unchecked Sendable {
         }
         valid = valid && channelCount == 2
         let validLayout = valid
-        let target = control.withLockIfAvailable { state in
-            state.callbacks &+= 1
+        // Silence while retiring a route, or if HAL replays a stale callback after hotplug.
+        let state = control.withLockIfAvailable { state -> (Float, Bool) in
             if !validLayout { state.invalid = true }
-            return state.gain
-        } ?? lastGain
-        guard valid else { return }
+            if state.stopped { state.silentCallbacks += 1 }
+            return (state.gain, state.stopped)
+        }
+        guard let (target, stopped) = state, !stopped, valid else { return }
+        if let sampleTime {
+            guard sampleTime.isFinite else { return }
+            let previous = lastInputSampleTime
+            lastInputSampleTime = sampleTime
+            if let previous, sampleTime <= previous { return }
+        }
         for i in destination.indices {
             let count = Int(destination[i].mDataByteSize) / MemoryLayout<Float>.size
             let channels = max(1, Int(destination[i].mNumberChannels))
@@ -322,14 +539,30 @@ final class MonitorAudioProcessor: @unchecked Sendable {
         lastGain = target
     }
 
-    func stop() {
+    var hasDrained: Bool { control.withLock { $0.silentCallbacks >= 8 } }
+
+    func silence() {
+        control.withLock { $0.stopped = true; $0.silentCallbacks = 0 }
+    }
+
+    @discardableResult
+    func stop() -> Bool {
+        // Any in-flight callback must output silence before HAL teardown starts.
+        control.withLock { $0.stopped = true }
         if aggregate != 0 {
-            if let io { AudioDeviceStop(aggregate, io); AudioDeviceDestroyIOProcID(aggregate, io) }
+            if let io {
+                guard AudioDeviceStop(aggregate, io) == noErr else { return false }
+                guard AudioDeviceDestroyIOProcID(aggregate, io) == noErr else { return false }
+            }
             io = nil
-            AudioHardwareDestroyAggregateDevice(aggregate)
+            guard AudioHardwareDestroyAggregateDevice(aggregate) == noErr else { return false }
             aggregate = 0
         }
-        if #available(macOS 14.2, *), tap != 0 { AudioHardwareDestroyProcessTap(tap); tap = 0 }
+        if #available(macOS 14.2, *), tap != 0 {
+            guard AudioHardwareDestroyProcessTap(tap) == noErr else { return false }
+            tap = 0
+        }
+        return true
     }
     deinit { stop() }
 
