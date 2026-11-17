@@ -159,10 +159,7 @@ final class AppModel: ObservableObject {
 
     /// Common DDC/CI input-source codes (VCP 0x60). Monitors mostly follow these; the menu shows the
     /// live code too, so a non-standard panel is still legible.
-    static let standardInputs: [(name: String, code: Int)] = [
-        ("HDMI 1", 0x11), ("HDMI 2", 0x12), ("DisplayPort 1", 0x0F), ("DisplayPort 2", 0x10),
-        ("USB-C", 0x1B), ("DVI", 0x03), ("VGA", 0x01),
-    ]
+    static let standardInputs = InputSwitchCommand.standardInputs
 
     /// Human label for a DDC input code, or "Code N" if non-standard.
     func inputName(_ code: Int) -> String {
@@ -270,6 +267,9 @@ final class AppModel: ObservableObject {
     /// slider drag, replaced on every tick and flushed on quit.
     private var groupPersistTask: Task<Void, Never>?
     private var hotKeys: [GlobalHotKey] = []
+    /// Input-hotkey ids macOS refused to register (the chord is taken by another app or the
+    /// system). Shown as a warning on the row, so a dead shortcut isn't silent (issue #45).
+    @Published private(set) var unregisteredInputHotkeyIDs: Set<String> = []
     private var registry: DisplayRegistry?
     private var sceneLibrary: SceneLibrary?
     /// Persisted user settings. Mutated only through the dedicated setters (which also persist and
@@ -1978,22 +1978,49 @@ final class AppModel: ObservableObject {
     /// the OSD, exactly like every other in-app input switch.
     func switchInputByHotkey(_ entry: InputSwitchBinding) async {
         #if !PUBLIC_API_ONLY
-        guard let observation = displays.first(where: { $0.recordID == entry.displayID }) else {
-            await notifyInputSwitchFailed(entry.displayID, reason: "is offline")
-            return
+        if let failure = await sendInputSwitch(entry) {
+            await notifyInputSwitchFailed(entry.displayID, reason: failure)
         }
-        guard let controller = await ddcController(for: observation) else {
-            await notifyInputSwitchFailed(entry.displayID, reason: "has no DDC control")
-            return
-        }
-        guard await controller.write(.inputSource, entry.inputCode) else {
-            await notifyInputSwitchFailed(entry.displayID, reason: "rejected the input switch")
-            return
-        }
-        inputSource[entry.displayID] = entry.inputCode
-        presentInputSwitchOSD(inputName: inputName(entry.inputCode), for: observation)
         #endif
     }
+
+    /// Sends `entry`'s input command once, outside the hotkey path — the "Test" button in the
+    /// input-hotkey editor, so a user can find which value their panel honours before binding it.
+    /// Returns nil when the write went out, else a short reason ("is offline", …). "Sent" is all a
+    /// successful write proves: DDC has no acknowledgement that the panel actually switched.
+    func testInputSwitch(_ entry: InputSwitchBinding) async -> String? {
+        #if !PUBLIC_API_ONLY
+        return await sendInputSwitch(entry)
+        #else
+        return "needs the full build"
+        #endif
+    }
+
+    #if !PUBLIC_API_ONLY
+    /// The one write path for hotkey and Test: resolves the display by persistent identity and
+    /// writes the input value with the binding's command — standard VCP 0x60, or LG's alternate
+    /// VCP 0xF4 from source address 0x50 (issue #45).
+    private func sendInputSwitch(_ entry: InputSwitchBinding) async -> String? {
+        guard let observation = displays.first(where: { $0.recordID == entry.displayID }) else {
+            return "is offline"
+        }
+        guard let controller = await ddcController(for: observation) else { return "has no DDC control" }
+        let command = entry.command
+        guard await controller.write(vcp: command.vcpCode, entry.inputCode,
+                                     sourceAddress: command.sourceAddress) else {
+            return "rejected the input switch"
+        }
+        // The standard code is what VCP 0x60 reads back, so cache it; an LG alternate value isn't,
+        // so drop the cache and let the next refresh read whatever the panel now reports.
+        if command == .standard {
+            inputSource[entry.displayID] = entry.inputCode
+        } else {
+            inputSource[entry.displayID] = nil
+        }
+        presentInputSwitchOSD(inputName: command.inputName(entry.inputCode), for: observation)
+        return nil
+    }
+    #endif
 
     #if !PUBLIC_API_ONLY
     /// Posts the "couldn't switch" notification (Batch-2 #5's delivery path) for a hotkey target
@@ -4143,13 +4170,17 @@ final class AppModel: ObservableObject {
             }
             nextID += 1
         }
+        var unregistered: Set<String> = []
         for entry in registry.inputSwitchBindings {
             if let hotkey = GlobalHotKey(keyCode: entry.binding.keyCode, modifiers: entry.binding.modifiers,
                                          id: nextID, action: inputSwitchHotkeyHandler(for: entry)) {
                 hotKeys.append(hotkey)
+            } else {
+                unregistered.insert(entry.id)
             }
             nextID += 1
         }
+        if unregistered != unregisteredInputHotkeyIDs { unregisteredInputHotkeyIDs = unregistered }
     }
 
     private func inputSwitchHotkeyHandler(for entry: InputSwitchBinding) -> () -> Void {
