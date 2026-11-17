@@ -5,6 +5,17 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [Unreleased]
+
+### Fixed
+- **Displays fighting between users after fast user switching (#50).** Each logged-in user runs
+  their own copy of OpenDisplay, and the copy belonging to the user you switched away from kept
+  reacting to display changes — re-enabling a "missing" screen, putting back its own layout,
+  turning its own displays off again, and writing brightness to monitors. It now stands down
+  completely while its user isn't at the screen, and when you switch back it re-reads the displays
+  and restores your arrangement the way it does after a wake. Sidecar itself is managed by macOS
+  per user; OpenDisplay doesn't connect or disconnect the iPad.
+
 ## [0.11.7] — 2026-11-17
 
 ### Added
