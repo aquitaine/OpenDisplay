@@ -214,6 +214,9 @@ make lint        # SwiftLint, if installed
 also works if you prefer not to use make.) There is **no remote CI** — local `make test` is
 the verification gate.
 
+On macOS, `./scripts/check-icc-profiles.sh` enumerates installed RGB profiles and checks the active profile name on each display.
+This check does not change display settings.
+
 ### Building the macOS app (on a Mac)
 
 The app, rescue utility, CLI, design system, and providers are macOS targets generated from
