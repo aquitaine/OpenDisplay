@@ -5,10 +5,10 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
-## [Unreleased]
+## [0.11.8] — 2026-11-17
 
 ### Fixed
-- **Displays fighting between users after fast user switching (#50).** Each logged-in user runs
+- **Displays fighting between users after fast user switching ([#50](https://github.com/aquitaine/OpenDisplay/issues/50)).** Each logged-in user runs
   their own copy of OpenDisplay, and the copy belonging to the user you switched away from kept
   reacting to display changes — re-enabling a "missing" screen, putting back its own layout,
   turning its own displays off again, and writing brightness to monitors. It now stands down
