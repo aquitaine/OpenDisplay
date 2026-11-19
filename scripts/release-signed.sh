@@ -59,9 +59,26 @@ echo "Signing identity: $IDENTITY"
 # --- 1. Build the Release app + bundle the helper -------------------------------------------------
 CONFIG="$CONFIG" ./scripts/bundle-helper.sh "$CONFIG"
 
-DD=$(ls -dt "$HOME"/Library/Developer/Xcode/DerivedData/OpenDisplay-* | head -1)
-APP="$DD/Build/Products/$CONFIG/OpenDisplay.app"
+PRODUCTS=$(./scripts/products-dir.sh "$CONFIG")
+APP="$PRODUCTS/OpenDisplay.app"
+# The DerivedData root for this checkout (…/Build/Products/<CONFIG> → …); the appcast step finds
+# Sparkle's generate_appcast in its resolved packages.
+DD=$(cd "$PRODUCTS/../../.." && pwd)
 [ -d "$APP" ] || { echo "error: $APP not found" >&2; exit 1; }
+
+# Refuse to ship a bundle missing an architecture: Intel Macs are supported, and a thin build has
+# slipped out of this script before (see bundle-helper.sh).
+while IFS= read -r -d '' binary; do
+  archs=$(lipo -archs "$binary" 2>/dev/null) || continue
+  case " $archs " in
+    *" arm64 "*) ;; *) echo "error: $binary lacks arm64 (has: $archs)" >&2; exit 1 ;;
+  esac
+  case " $archs " in
+    *" x86_64 "*) ;; *) echo "error: $binary lacks x86_64 (has: $archs)" >&2; exit 1 ;;
+  esac
+done < <(find "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Frameworks" \
+              -path '*Sparkle.framework*' -prune -o -type f -perm -u+x -print0)
+echo "Architectures: every binary is universal (arm64 + x86_64)"
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
 RELEASE_TAG="${RELEASE_TAG:-v$VERSION}"
 echo "Version: $VERSION (release tag $RELEASE_TAG)"

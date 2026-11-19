@@ -49,6 +49,64 @@ public struct KeyBinding: Hashable, Sendable, Codable {
     public static let controlOptionCommand: UInt32 = control | option | command
 }
 
+/// Which DDC/CI command an input switch sends. Most panels take MCCS VCP `0x60` from the standard
+/// host source address `0x51`; many LG monitors ignore that for some inputs (notably USB-C) and
+/// instead switch on LG's vendor command — VCP `0xF4` sent from source address `0x50`, with
+/// LG-specific input values (see `lgAlternateInputs`). Opt-in per binding (issue #45).
+public enum InputSwitchCommand: String, Hashable, Sendable, Codable, CaseIterable {
+    case standard
+    case lgAlternate
+
+    public var label: String {
+        switch self {
+        case .standard: return "Standard (VCP 0x60)"
+        case .lgAlternate: return "LG alternate (VCP 0xF4)"
+        }
+    }
+
+    /// The VCP feature code this command writes.
+    public var vcpCode: UInt8 {
+        switch self {
+        case .standard: return 0x60
+        case .lgAlternate: return 0xF4
+        }
+    }
+
+    /// The DDC/CI host source address the write is framed with (the I2C "data address" and part of
+    /// the packet checksum).
+    public var sourceAddress: UInt8 {
+        switch self {
+        case .standard: return 0x51
+        case .lgAlternate: return 0x50
+        }
+    }
+
+    /// The named input values offered for this command. Standard codes follow MCCS; the LG values
+    /// are the ones ddcutil and BetterDisplay document for LG's alternate command. Which value a
+    /// given LG model uses for USB-C varies (0xD1 on some, 0xD2 on others), hence both entries.
+    public var inputs: [(name: String, code: Int)] {
+        switch self {
+        case .standard: return Self.standardInputs
+        case .lgAlternate: return Self.lgAlternateInputs
+        }
+    }
+
+    public static let standardInputs: [(name: String, code: Int)] = [
+        ("HDMI 1", 0x11), ("HDMI 2", 0x12), ("DisplayPort 1", 0x0F), ("DisplayPort 2", 0x10),
+        ("USB-C", 0x1B), ("DVI", 0x03), ("VGA", 0x01),
+    ]
+
+    public static let lgAlternateInputs: [(name: String, code: Int)] = [
+        ("HDMI 1", 0x90), ("HDMI 2", 0x91), ("HDMI 3", 0x92), ("HDMI 4", 0x93),
+        ("DisplayPort 1", 0xD0), ("DisplayPort 2 / USB-C", 0xD1), ("USB-C", 0xD2),
+    ]
+
+    /// Human label for `code` under this command, or "Code 0xNN" if it isn't a named value.
+    public func inputName(_ code: Int) -> String {
+        inputs.first { $0.code == code }?.name ?? String(format: "Code 0x%02X", code)
+    }
+}
+
 /// One "jump to input" hotkey binding (Lunar-parity todo 4, "Input Hotkeys") — a chord bound to
 /// switching one specific display to one specific DDC input code, e.g. "⌃⌥⌘1 → Desk monitor, HDMI 2".
 /// Kept apart from `HotkeyAction` because its target is user-configured data (a persistent display
@@ -60,15 +118,35 @@ public struct InputSwitchBinding: Hashable, Sendable, Codable, Identifiable {
     /// transient port/CG id), so the binding still finds the right panel after a reconnect or a
     /// dock re-plug that reorders ports.
     public var displayID: DisplayRecordID
-    /// The DDC/CI input-source code (VCP 0x60) to switch to, e.g. 0x11 for HDMI 1.
+    /// The input value to switch to, interpreted by `command` — e.g. 0x11 for HDMI 1 under the
+    /// standard VCP 0x60, or 0xD2 for USB-C under LG's alternate command.
     public var inputCode: Int
     public var binding: KeyBinding
+    /// Which DDC command carries `inputCode`. Absent in bindings saved before issue #45, which
+    /// decode as `.standard` — exactly the behaviour they had.
+    public var command: InputSwitchCommand
 
-    public init(id: String = UUID().uuidString, displayID: DisplayRecordID, inputCode: Int, binding: KeyBinding) {
+    public init(id: String = UUID().uuidString, displayID: DisplayRecordID, inputCode: Int,
+                binding: KeyBinding, command: InputSwitchCommand = .standard) {
         self.id = id
         self.displayID = displayID
         self.inputCode = inputCode
         self.binding = binding
+        self.command = command
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, displayID, inputCode, binding, command }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        displayID = try container.decode(DisplayRecordID.self, forKey: .displayID)
+        inputCode = try container.decode(Int.self, forKey: .inputCode)
+        binding = try container.decode(KeyBinding.self, forKey: .binding)
+        // Unknown raw values (a newer build's command) fall back to standard rather than dropping
+        // the user's whole shortcut list.
+        let raw = try container.decodeIfPresent(String.self, forKey: .command)
+        command = raw.flatMap(InputSwitchCommand.init(rawValue:)) ?? .standard
     }
 }
 

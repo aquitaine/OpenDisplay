@@ -14,13 +14,19 @@ cd "$(dirname "$0")/.."
 # release once shipped a binary still stamped 0.3.0 because the project wasn't regenerated).
 make xcode >/dev/null
 
+# `generic/platform=macOS` ("Any Mac") builds every architecture in ARCHS. The old
+# `-destination 'platform=macOS'` matched both "My Mac" (arm64 only) and "Any Mac", and Xcode picked
+# one per invocation — 0.11.7's first notarized build came out arm64-only for the app while the
+# helper came out universal, the reverse of 0.11.6's helper.
+DESTINATION='generic/platform=macOS'
 echo "Building OpenDisplay.app ($CONFIG)…"
-xcodebuild -project OpenDisplay.xcodeproj -scheme OpenDisplay -configuration "$CONFIG" -destination 'platform=macOS' build >/dev/null
+xcodebuild -project OpenDisplay.xcodeproj -scheme OpenDisplay -configuration "$CONFIG" -destination "$DESTINATION" build >/dev/null
 echo "Building opendisplay CLI ($CONFIG)…"
-xcodebuild -project OpenDisplay.xcodeproj -scheme opendisplay -configuration "$CONFIG" -destination 'platform=macOS' build >/dev/null
+xcodebuild -project OpenDisplay.xcodeproj -scheme opendisplay -configuration "$CONFIG" -destination "$DESTINATION" build >/dev/null
 
-DD=$(ls -dt "$HOME"/Library/Developer/Xcode/DerivedData/OpenDisplay-* | head -1)
-PRODUCTS="$DD/Build/Products/$CONFIG"
+# Ask Xcode where THIS checkout's products are. Picking the newest DerivedData/OpenDisplay-* folder
+# breaks as soon as a second checkout (a worktree) of the project has built more recently.
+PRODUCTS=$(./scripts/products-dir.sh "$CONFIG")
 APP="$PRODUCTS/OpenDisplay.app"
 CLI="$PRODUCTS/opendisplay"
 

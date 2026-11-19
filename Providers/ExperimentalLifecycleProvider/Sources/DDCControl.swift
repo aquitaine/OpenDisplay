@@ -68,8 +68,9 @@ public actor ExternalDisplayDDC {
     public private(set) var consecutiveIOFailures = 0
 
     /// Every I2C call goes through these two so the failure run is counted in exactly one place.
-    private func i2cWrite(_ bytes: UnsafePointer<UInt8>, _ length: UInt32) -> Bool {
-        noteI2C(writeFn(service, Self.i2cChip, Self.i2cSource, bytes, length) == 0)
+    private func i2cWrite(_ bytes: UnsafePointer<UInt8>, _ length: UInt32,
+                          source: UInt32 = ExternalDisplayDDC.i2cSource) -> Bool {
+        noteI2C(writeFn(service, Self.i2cChip, source, bytes, length) == 0)
     }
 
     private func i2cRead(_ bytes: UnsafeMutablePointer<UInt8>, _ length: UInt32) -> Bool {
@@ -245,16 +246,33 @@ public actor ExternalDisplayDDC {
     /// sleeping here, so a single slider tick doesn't pay 50ms of dead latency.
     @discardableResult
     public func write(vcp code: UInt8, _ value: Int) async -> Bool {
-        let high = UInt8((value >> 8) & 0xff)
-        let low = UInt8(value & 0xff)
-        let checksum = UInt8(0x6e ^ Int(Self.i2cSource) ^ 0x84 ^ 0x03) ^ code ^ high ^ low
-        var packet: [UInt8] = [0x84, 0x03, code, high, low, checksum]
+        await write(vcp: code, value, sourceAddress: UInt8(Self.i2cSource))
+    }
+
+    /// `write(vcp:_:)` framed from a non-standard host source address. LG's alternate input
+    /// command (VCP `0xF4`) is only honoured when sent from `0x50` instead of the usual `0x51`; the
+    /// address is both the I2C data-address argument and part of the checksum. Used only for that
+    /// one write — reads and every other control keep the standard address, and the bus turnstile
+    /// and pacing are shared, so it can't interleave with them.
+    @discardableResult
+    public func write(vcp code: UInt8, _ value: Int, sourceAddress: UInt8) async -> Bool {
+        let packet = Self.setVCPPacket(vcp: code, value: value, sourceAddress: sourceAddress)
         await lockBus()
         await paceBus()
-        let ok = i2cWrite(&packet, 6)
+        let ok = i2cWrite(packet, UInt32(packet.count), source: UInt32(sourceAddress))
         markTransaction()
         unlockBus()
         return ok
+    }
+
+    /// The Set-VCP payload sent after the I2C address byte: length `0x84`, opcode `0x03`, VCP code,
+    /// value high/low, and the checksum — XOR of the destination address `0x6e`, the source
+    /// address, and every payload byte.
+    static func setVCPPacket(vcp code: UInt8, value: Int, sourceAddress: UInt8) -> [UInt8] {
+        let high = UInt8((value >> 8) & 0xff)
+        let low = UInt8(value & 0xff)
+        let checksum = 0x6e ^ sourceAddress ^ 0x84 ^ 0x03 ^ code ^ high ^ low
+        return [0x84, 0x03, code, high, low, checksum]
     }
 
     /// Reads the display's DDC/CI capabilities string (the response to VCP `0xF3`, MCCS spec) by

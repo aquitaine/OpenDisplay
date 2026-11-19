@@ -5,6 +5,32 @@ All notable changes to OpenDisplay are documented here. The format is based on
 [Semantic Versioning](https://semver.org/). OpenDisplay is pre-1.0 (0.x); anything may
 change until 1.0.
 
+## [0.11.8] — 2026-11-17
+
+### Fixed
+- **Displays fighting between users after fast user switching ([#50](https://github.com/aquitaine/OpenDisplay/issues/50)).** Each logged-in user runs
+  their own copy of OpenDisplay, and the copy belonging to the user you switched away from kept
+  reacting to display changes — re-enabling a "missing" screen, putting back its own layout,
+  turning its own displays off again, and writing brightness to monitors. It now stands down
+  completely while its user isn't at the screen, and when you switch back it re-reads the displays
+  and restores your arrangement the way it does after a wake. Sidecar itself is managed by macOS
+  per user; OpenDisplay doesn't connect or disconnect the iPad.
+
+## [0.11.7] — 2026-11-17
+
+### Added
+- **LG alternate input switching for input hotkeys** ([#45](https://github.com/aquitaine/OpenDisplay/issues/45)).
+  Many LG monitors ignore the standard input command for some inputs, most often USB-C, and
+  only switch on LG's own command. When you add an input hotkey you can now pick
+  "LG alternate" and choose from LG's input values (HDMI 1–4, DisplayPort 1, DisplayPort 2 /
+  USB-C, USB-C), or type a custom hex value. Which value an LG uses for USB-C varies by model,
+  so the editor has a Test button that sends the command once before you save it. Existing
+  hotkeys keep working exactly as before.
+
+### Fixed
+- **Input hotkeys that macOS refused to register no longer fail silently.** If another app
+  already owns the shortcut, its row in Input hotkeys now says so.
+
 ## [0.11.6] — 2026-10-14
 
 ### Fixed

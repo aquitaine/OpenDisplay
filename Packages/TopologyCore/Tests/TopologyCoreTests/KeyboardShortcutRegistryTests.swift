@@ -119,4 +119,48 @@ final class KeyboardShortcutRegistryTests: XCTestCase {
         reg.addInputSwitchBinding(entry)
         XCTAssertEqual(reg.mergedWithDefaults().inputSwitchBindings, [entry])
     }
+
+    // MARK: - LG alternate input command (issue #45)
+
+    func testBindingsSavedBeforeCommandExistedDecodeAsStandard() throws {
+        let entry = InputSwitchBinding(id: "usbc", displayID: deskMonitor, inputCode: 0x1B, binding: digit2)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(entry)) as? [String: Any])
+        object["command"] = nil
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(InputSwitchBinding.self, from: legacy)
+        XCTAssertEqual(decoded.command, .standard)
+        XCTAssertEqual(decoded, entry)
+    }
+
+    func testUnknownCommandFallsBackToStandardInsteadOfFailing() throws {
+        let entry = InputSwitchBinding(id: "x", displayID: deskMonitor, inputCode: 0x11, binding: digit1)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(entry)) as? [String: Any])
+        object["command"] = "someFutureVendor"
+        let decoded = try JSONDecoder().decode(InputSwitchBinding.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(decoded.command, .standard)
+    }
+
+    func testLGAlternateBindingRoundTrips() throws {
+        var reg = KeyboardShortcutRegistry()
+        reg.addInputSwitchBinding(InputSwitchBinding(id: "usbc", displayID: deskMonitor, inputCode: 0xD2,
+                                                     binding: digit2, command: .lgAlternate))
+        let decoded = try JSONDecoder().decode(KeyboardShortcutRegistry.self, from: JSONEncoder().encode(reg))
+        XCTAssertEqual(decoded, reg)
+        XCTAssertEqual(decoded.inputSwitchBindings.first?.command, .lgAlternate)
+    }
+
+    func testCommandWireParameters() {
+        XCTAssertEqual(InputSwitchCommand.standard.vcpCode, 0x60)
+        XCTAssertEqual(InputSwitchCommand.standard.sourceAddress, 0x51)
+        XCTAssertEqual(InputSwitchCommand.lgAlternate.vcpCode, 0xF4)
+        XCTAssertEqual(InputSwitchCommand.lgAlternate.sourceAddress, 0x50)
+    }
+
+    func testInputNamesPerCommand() {
+        XCTAssertEqual(InputSwitchCommand.standard.inputName(0x1B), "USB-C")
+        XCTAssertEqual(InputSwitchCommand.lgAlternate.inputName(0xD2), "USB-C")
+        XCTAssertEqual(InputSwitchCommand.lgAlternate.inputName(0xD1), "DisplayPort 2 / USB-C")
+        XCTAssertEqual(InputSwitchCommand.lgAlternate.inputName(0x90), "HDMI 1")
+        XCTAssertEqual(InputSwitchCommand.lgAlternate.inputName(0x1B), "Code 0x1B")
+    }
 }

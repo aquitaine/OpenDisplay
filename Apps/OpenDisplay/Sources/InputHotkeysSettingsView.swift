@@ -63,17 +63,28 @@ private struct InputHotkeyRow: View {
     let entry: InputSwitchBinding
 
     var body: some View {
-        ODRow(rowLabel, secondary: HotkeyDigitChords.label(forDigit: digit)) {
-            Button {
-                model.removeInputSwitchHotkey(id: entry.id)
-            } label: {
-                Image(systemName: "trash")
+        VStack(alignment: .leading, spacing: ODSpacing.xs) {
+            ODRow(rowLabel, secondary: HotkeyDigitChords.label(forDigit: digit)) {
+                Button {
+                    model.removeInputSwitchHotkey(id: entry.id)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+            if model.unregisteredInputHotkeyIDs.contains(entry.id) {
+                Label("macOS didn't register this shortcut. Another app may already use it.",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(ODColor.danger)
+            }
         }
     }
 
-    private var rowLabel: String { "\(displayLabel) \u{2192} \(model.inputName(entry.inputCode))" }
+    private var rowLabel: String {
+        let input = entry.command.inputName(entry.inputCode)
+        let suffix = entry.command == .lgAlternate ? " (LG alternate)" : ""
+        return "\(displayLabel) \u{2192} \(input)\(suffix)"
+    }
 
     private var displayLabel: String {
         model.records[entry.displayID]?.displayName ?? entry.displayID.rawValue
@@ -87,15 +98,37 @@ private struct InputHotkeyRow: View {
     }
 }
 
-/// Modal form for adding one input-switch hotkey: pick the display, the input code, and a ⌃⌥⌘-digit
-/// chord, with a live conflict check before the Add button enables.
+/// Modal form for adding one input-switch hotkey: pick the display, the command (standard MCCS or
+/// LG's alternate), the input value (named or custom hex), and a ⌃⌥⌘-digit chord, with a live
+/// conflict check before Add enables and a Test button that sends the command once.
 private struct AddInputHotkeySheet: View {
     @EnvironmentObject private var model: AppModel
     @Binding var isPresented: Bool
 
     @State private var selectedDisplayID: DisplayRecordID?
-    @State private var selectedInputCode = AppModel.standardInputs.first?.code ?? 0
+    @State private var selectedCommand: InputSwitchCommand = .standard
+    /// A named input's code, or `customInputTag` when the user types their own hex value.
+    @State private var selectedInputCode = InputSwitchCommand.standard.inputs.first?.code ?? 0
+    @State private var customInputHex = ""
     @State private var selectedDigit = 1
+    @State private var testStatus: String?
+    @State private var isTesting = false
+
+    private static let customInputTag = -1
+
+    /// The value the binding will carry, or nil while a custom value doesn't parse as 0x00...0xFF.
+    private var inputCode: Int? {
+        guard selectedInputCode == Self.customInputTag else { return selectedInputCode }
+        let trimmed = customInputHex.trimmingCharacters(in: .whitespaces).lowercased()
+        let digits = trimmed.hasPrefix("0x") ? String(trimmed.dropFirst(2)) : trimmed
+        guard let value = Int(digits, radix: 16), (0...0xFF).contains(value) else { return nil }
+        return value
+    }
+
+    private func candidate(displayID: DisplayRecordID, inputCode: Int) -> InputSwitchBinding {
+        InputSwitchBinding(displayID: displayID, inputCode: inputCode, binding: candidateBinding,
+                           command: selectedCommand)
+    }
 
     private var externalDisplays: [DisplayObservation] {
         model.displays.filter { $0.displayClass != .builtIn }
@@ -116,9 +149,41 @@ private struct AddInputHotkeySheet: View {
                     Text(model.displayName(for: display)).tag(display.recordID as DisplayRecordID?)
                 }
             }
+            Picker("Command", selection: $selectedCommand) {
+                ForEach(InputSwitchCommand.allCases, id: \.self) { command in
+                    Text(command.label).tag(command)
+                }
+            }
+            .onChange(of: selectedCommand) { _, command in
+                selectedInputCode = command.inputs.first?.code ?? 0
+                testStatus = nil
+            }
+            if selectedCommand == .lgAlternate {
+                Text("For LG monitors that ignore the standard input command for some inputs, often USB-C. "
+                     + "The USB-C value differs by model: if one doesn't work, try the other, or a custom value.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Picker("Input", selection: $selectedInputCode) {
-                ForEach(AppModel.standardInputs, id: \.code) { input in
-                    Text(input.name).tag(input.code)
+                ForEach(selectedCommand.inputs, id: \.code) { input in
+                    Text(String(format: "%@ (0x%02X)", input.name, input.code)).tag(input.code)
+                }
+                Divider()
+                Text("Custom value\u{2026}").tag(Self.customInputTag)
+            }
+            .onChange(of: selectedInputCode) { _, _ in testStatus = nil }
+            if selectedInputCode == Self.customInputTag {
+                TextField("Hex value, e.g. 0xD2", text: $customInputHex)
+                    .textFieldStyle(.roundedBorder)
+                if !customInputHex.isEmpty, inputCode == nil {
+                    Text("Enter a hex value from 0x00 to 0xFF.").font(.caption).foregroundStyle(ODColor.danger)
+                }
+            }
+            HStack {
+                Button("Test") { runTest() }
+                    .disabled(selectedDisplayID == nil || inputCode == nil || isTesting)
+                if let testStatus {
+                    Text(testStatus).font(.caption).foregroundStyle(.secondary)
                 }
             }
             Picker("Shortcut", selection: $selectedDigit) {
@@ -135,7 +200,7 @@ private struct AddInputHotkeySheet: View {
                 Button("Cancel") { isPresented = false }
                 Button("Add") { addBinding() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(selectedDisplayID == nil || hasConflict)
+                    .disabled(selectedDisplayID == nil || inputCode == nil || hasConflict)
             }
         }
         .padding(ODSpacing.lg)
@@ -144,11 +209,24 @@ private struct AddInputHotkeySheet: View {
     }
 
     private func addBinding() {
-        guard let displayID = selectedDisplayID else { return }
-        model.addInputSwitchHotkey(InputSwitchBinding(
-            displayID: displayID, inputCode: selectedInputCode, binding: candidateBinding
-        ))
+        guard let displayID = selectedDisplayID, let inputCode else { return }
+        model.addInputSwitchHotkey(candidate(displayID: displayID, inputCode: inputCode))
         isPresented = false
+    }
+
+    /// Sends the command once. Reports "Sent" rather than "Switched": a DDC write has no
+    /// acknowledgement, so only the monitor itself can show whether it took.
+    private func runTest() {
+        guard let displayID = selectedDisplayID, let inputCode else { return }
+        let entry = candidate(displayID: displayID, inputCode: inputCode)
+        isTesting = true
+        testStatus = "Sending\u{2026}"
+        Task {
+            let failure = await model.testInputSwitch(entry)
+            testStatus = failure.map { "Not sent: display \($0)." }
+                ?? "Sent. If the monitor didn't switch, try another value."
+            isTesting = false
+        }
     }
 }
 #endif
