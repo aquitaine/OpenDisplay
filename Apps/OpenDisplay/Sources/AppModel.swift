@@ -1,5 +1,6 @@
 #if os(macOS)
 import AppKit
+import Combine
 import AutomationSchema
 import CoreGraphicsProvider
 import DisplayDomain
@@ -266,6 +267,8 @@ final class AppModel: ObservableObject {
     /// The coalescing timer behind `persistDisplayGroupsSoon` — one pending disk write for a whole
     /// slider drag, replaced on every tick and flushed on quit.
     private var groupPersistTask: Task<Void, Never>?
+    @Published private(set) var displayPowerShortcuts = UserDefaults.standard.dictionary(forKey: "DisplayPowerShortcuts") as? [String: Int] ?? [:]
+    @Published private(set) var powerShortcutError: String?
     private var hotKeys: [GlobalHotKey] = []
     /// Input-hotkey ids macOS refused to register (the chord is taken by another app or the
     /// system). Shown as a warning on the row, so a dead shortcut isn't silent (issue #45).
@@ -316,6 +319,8 @@ final class AppModel: ObservableObject {
     private let osdHUD = OSDHUDController()
     /// Active media-key event tap (Batch-3 #3) when interception is on AND Accessibility is granted.
     private var mediaKeyTap: MediaKeyTap?
+    let monitorAudio = MonitorAudioController()
+    private var monitorAudioChanges: AnyCancellable?
     /// Re-arms the media-key tap once the Accessibility grant lands. TCC has no notification API, so
     /// without this poll the user must relaunch the app after granting — the #1 "keys don't work" trap.
     private var mediaKeyTapRetry: Task<Void, Never>?
@@ -400,6 +405,10 @@ final class AppModel: ObservableObject {
         // Register the configurable global hotkeys (Batch-2 #4). Reconnect-All is always-available
         // (recovery hierarchy step 3) and reachable even when the menu bar isn't; the rest are unbound
         // by default. A chord that can't be claimed is simply skipped (menu-bar item remains).
+        // Forward the nested controller's level/route updates to menu and settings bindings.
+        monitorAudioChanges = monitorAudio.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
         registerHotkeys()
         observeSleepAndWake()  // re-assert what the user turned off once macOS has woken the desk
         observeSessionSwitching()  // Issue #50: stand down while another user has the console
@@ -465,6 +474,7 @@ final class AppModel: ObservableObject {
                 self?.xdrPowerMonitor.stop()
                 self?.mediaKeyTapRetry?.cancel()
                 self?.mediaKeyTap?.stop()
+                self?.monitorAudio.stop()
                 self?.layoutProtectionRecheck.cancel()
                 self?.activeSurfaceRecheck.cancel()
                 self?.offlineIntentRecheck.cancel()
@@ -1798,7 +1808,12 @@ final class AppModel: ObservableObject {
 
     /// Cached level (0...1) of a DDC hardware control, or nil if the display doesn't report it.
     func ddcControl(_ control: HardwareControl, for observation: DisplayObservation) -> Float? {
-        ddcControlLevel[observation.recordID]?[control.vcp]
+        if control == .volume, softwareAudioTargets(observation) { return monitorAudio.level }
+        return ddcControlLevel[observation.recordID]?[control.vcp]
+    }
+
+    private func softwareAudioTargets(_ observation: DisplayObservation) -> Bool {
+        monitorAudio.managesCurrentOutput && audioOutputDisplayID() == observation.recordID
     }
 
     /// Forgets the DDC negative-probe cache for one display (or all). Called when the world may have
@@ -1884,6 +1899,11 @@ final class AppModel: ObservableObject {
     /// on a group's behalf, so it doesn't mirror straight back (Issue #39).
     func setHardwareControl(_ control: HardwareControl, _ value: Float,
                             for observation: DisplayObservation, isGroupSync: Bool = false) {
+        if control == .volume, softwareAudioTargets(observation) {
+            monitorAudio.setLevel(value)
+            presentOSD(kind: .volume, value: monitorAudio.level, for: observation)
+            return
+        }
         #if !PUBLIC_API_ONLY
         guard observation.displayClass != .builtIn else { return }
         let id = observation.recordID
@@ -3340,6 +3360,14 @@ final class AppModel: ObservableObject {
             cgID: observation.cgDisplayID ?? 0,
             name: displayName(for: observation),
             displayClass: observation.displayClass)
+        // Resolve while the display is still online; logical disconnect can leave its HAL
+        // audio device present even after the display disappears from the topology.
+        let disconnectedAudio = audioOutputDisplayID() == observation.recordID
+            ? AudioOutputInfo.currentDefaultOutput() : nil
+        if let disconnectedAudio {
+            guard await monitorAudio.prepareLogicalDisconnect(output: disconnectedAudio,
+                displayID: observation.recordID.rawValue) else { return false }
+        }
         backUpWindowServerConfig(before: offline.name)
         let result = try? await coordinator.disconnect(
             observation.recordID,
@@ -3351,6 +3379,7 @@ final class AppModel: ObservableObject {
             managedOffline.append(offline)
             persistManagedOffline()
         }
+        if disconnectedAudio != nil { await monitorAudio.finishLogicalDisconnect(committed: committed) }
         await refresh()
         logDisplayEvent("disconnect:\(committed ? "committed" : "failed") \(offline.name)")
         return committed
@@ -3398,6 +3427,9 @@ final class AppModel: ObservableObject {
         }
         guard forgettingIntent else {
             await refresh()
+            if displays.contains(where: { $0.recordID == offline.recordID && $0.isActive }) {
+                await monitorAudio.logicalDisplayReconnected(displayID: offline.recordID.rawValue)
+            }
             return true
         }
         guard await verifyReconnect(of: offline) else {
@@ -3407,6 +3439,7 @@ final class AppModel: ObservableObject {
         }
         managedOffline.removeAll { $0.recordID == offline.recordID }
         persistManagedOffline()
+        await monitorAudio.logicalDisplayReconnected(displayID: offline.recordID.rawValue)
         logDisplayEvent("reconnect:lit \(offline.name)")
         return true
     }
@@ -4280,6 +4313,14 @@ final class AppModel: ObservableObject {
             }
             nextID += 1
         }
+        for (displayID, digit) in displayPowerShortcuts.sorted(by: { $0.key < $1.key }) {
+            let binding = Self.powerBinding(digit)
+            if let hotkey = GlobalHotKey(keyCode: binding.keyCode, modifiers: binding.modifiers,
+                id: nextID, action: { [weak self] in Task { await self?.toggleDisplayPower(displayID) } }) {
+                hotKeys.append(hotkey)
+            } else { powerShortcutError = "A display shortcut could not be registered. Choose another shortcut." }
+            nextID += 1
+        }
         var unregistered: Set<String> = []
         for entry in registry.inputSwitchBindings {
             if let hotkey = GlobalHotKey(keyCode: entry.binding.keyCode, modifiers: entry.binding.modifiers,
@@ -4291,6 +4332,37 @@ final class AppModel: ObservableObject {
             nextID += 1
         }
         if unregistered != unregisteredInputHotkeyIDs { unregisteredInputHotkeyIDs = unregistered }
+    }
+
+    static func powerBinding(_ digit: Int) -> KeyBinding {
+        let base = HotkeyDigitChords.binding(forDigit: digit)
+        return KeyBinding(keyCode: base.keyCode, modifiers: base.modifiers | KeyBinding.shift)
+    }
+
+    func setDisplayPowerShortcut(_ displayID: String, digit: Int) {
+        powerShortcutError = nil
+        if digit == 0 { displayPowerShortcuts[displayID] = nil }
+        else {
+            guard (1...9).contains(digit),
+                  !displayPowerShortcuts.contains(where: { $0.key != displayID && $0.value == digit }),
+                  !settings.hotkeyShortcuts.mergedWithDefaults().inputSwitchBindingConflicts(
+                    Self.powerBinding(digit), excludingInputSwitchID: nil) else {
+                powerShortcutError = "That shortcut is already assigned."
+                return
+            }
+            displayPowerShortcuts[displayID] = digit
+        }
+        UserDefaults.standard.set(displayPowerShortcuts, forKey: "DisplayPowerShortcuts")
+        registerHotkeys()
+    }
+
+    private func toggleDisplayPower(_ displayID: String) async {
+        guard !busy else { return }
+        if let offline = managedOffline.first(where: { $0.recordID.rawValue == displayID }) {
+            await reconnectOffline(offline)
+        } else if let display = displays.first(where: { $0.recordID.rawValue == displayID && $0.isActive }) {
+            _ = await setDisplayActive(false, for: display)
+        }
     }
 
     private func inputSwitchHotkeyHandler(for entry: InputSwitchBinding) -> () -> Void {
@@ -4342,7 +4414,8 @@ final class AppModel: ObservableObject {
     /// True if `combo` is already claimed by any registered hotkey (fixed action or input-switch)
     /// other than `excludingInputSwitchID` — the settings UI's pre-save conflict check.
     func inputSwitchHotkeyConflicts(_ combo: KeyBinding, excludingInputSwitchID: String?) -> Bool {
-        settings.hotkeyShortcuts.inputSwitchBindingConflicts(combo, excludingInputSwitchID: excludingInputSwitchID)
+        settings.hotkeyShortcuts.mergedWithDefaults().inputSwitchBindingConflicts(combo, excludingInputSwitchID: excludingInputSwitchID)
+            || displayPowerShortcuts.values.contains { Self.powerBinding($0) == combo }
     }
 
     /// Makes the next active display the main display (wraps around).
@@ -4396,6 +4469,13 @@ final class AppModel: ObservableObject {
     /// others (e.g. volume on the built-in) pass through to macOS.
     @discardableResult
     func handleMediaKey(_ action: MediaKeyAction, fineStep: Bool) -> Bool {
+        if monitorAudio.handle(action, fineStep: fineStep) {
+            let audioID = audioOutputDisplayID()
+            if let display = displays.first(where: { $0.recordID == audioID }) ?? displays.first(where: { $0.isMain }) {
+                presentOSD(kind: .volume, value: monitorAudio.level, for: display, source: "keys")
+            }
+            return true
+        }
         // Volume/mute follow the system's default audio output (resolved at keypress); brightness
         // follows the configured target mode and ignores this.
         let audioTarget = action.isVolume ? audioOutputDisplayID() : nil
@@ -4507,6 +4587,11 @@ final class AppModel: ObservableObject {
     /// Whether the media-key tap is currently capturing keys (true only with the toggle on AND the
     /// Accessibility grant present). Drives the Settings status row.
     var mediaKeysActive: Bool { mediaKeyTap != nil && MediaKeyTap.isAccessibilityTrusted }
+
+    func setSoftwareMonitorAudioEnabled(_ enabled: Bool) {
+        monitorAudio.setEnabled(enabled)
+        if monitorAudio.enabled { setMediaKeyInterceptionEnabled(true) }
+    }
 
     /// Toggle media-key interception (Batch-3 #3). Persists; prompts for Accessibility when enabling
     /// without the grant; reconciles the tap.
